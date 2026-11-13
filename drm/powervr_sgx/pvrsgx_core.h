@@ -78,6 +78,13 @@ struct pvrsgx_heap_layout {
  * awake for as long as it is bound.
  */
 #define PVRSGX_PART_ISLAND_ALWAYS_ON	BIT(0)
+/*
+ * The SGX has no interrupt line of its own: it is bit 18 of the display
+ * engine's interrupt registers in the same BAR 0, and that block signals the
+ * CPU by MSI (Interrupt Pin reads 0). gma500 does this on Cedarview; on Clover
+ * Trail no display driver exists, so powervr_sgx owns that one bit.
+ */
+#define PVRSGX_PART_VDC_IRQ		BIT(1)
 
 /**
  * struct pvrsgx_part - What a board adds to the core it has

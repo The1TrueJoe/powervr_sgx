@@ -342,7 +342,7 @@ static const struct pvrsgx_part pvrsgx_parts[] = {
 		 * ACPI can't power the island: GFX0's _PS0 only writes GDDS,
 		 * and the APM block that owns the island has no driver here yet.
 		 */
-		.flags = PVRSGX_PART_ISLAND_ALWAYS_ON,
+		.flags = PVRSGX_PART_ISLAND_ALWAYS_ON | PVRSGX_PART_VDC_IRQ,
 	},
 };
 
@@ -370,6 +370,16 @@ static int pvrsgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	sdev->part = part;
 	sdev->family = pvrsgx_core_family_get(part->core);
 	sdev->irq = pdev->irq;
+	if (part->flags & PVRSGX_PART_VDC_IRQ) {
+		err = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
+		if (err < 0)
+			return err;
+		sdev->irq = pci_irq_vector(pdev, 0);
+	}
+	if (!sdev->irq) {
+		dev_err(&pdev->dev, "no interrupt\n");
+		return -ENODEV;
+	}
 	pci_set_drvdata(pdev, sdev);
 
 	/*
@@ -388,13 +398,30 @@ static int pvrsgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (IS_ERR(bar))
 		return PTR_ERR(bar);
 	sdev->regs = (u8 __iomem *)bar + part->regs_off;
+	if (part->flags & PVRSGX_PART_VDC_IRQ) {
+		/* Only the SGX's bit; the display's own interrupts stay as they are. */
+		sdev->vdc = bar;
+		writel(PVRSGX_VDC_IRQ_SGX, bar + PVRSGX_VDC_INT_IDENTITY);
+		writel(readl(bar + PVRSGX_VDC_INT_MASK) & ~PVRSGX_VDC_IRQ_SGX,
+		       bar + PVRSGX_VDC_INT_MASK);
+		writel(readl(bar + PVRSGX_VDC_INT_ENABLE) | PVRSGX_VDC_IRQ_SGX,
+		       bar + PVRSGX_VDC_INT_ENABLE);
+	}
 
 	return pvrsgx_probe_common(sdev);
 }
 
 static void pvrsgx_remove(struct pci_dev *pdev)
 {
-	pvrsgx_remove_common(pci_get_drvdata(pdev));
+	struct pvrsgx_device *sdev = pci_get_drvdata(pdev);
+
+	pvrsgx_remove_common(sdev);
+	if (sdev->vdc) {
+		writel(readl(sdev->vdc + PVRSGX_VDC_INT_ENABLE) & ~PVRSGX_VDC_IRQ_SGX,
+		       sdev->vdc + PVRSGX_VDC_INT_ENABLE);
+		writel(readl(sdev->vdc + PVRSGX_VDC_INT_MASK) | PVRSGX_VDC_IRQ_SGX,
+		       sdev->vdc + PVRSGX_VDC_INT_MASK);
+	}
 }
 
 static void pvrsgx_shutdown(struct pci_dev *pdev)

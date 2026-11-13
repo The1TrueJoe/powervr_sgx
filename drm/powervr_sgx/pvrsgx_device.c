@@ -196,11 +196,18 @@ static irqreturn_t pvrsgx_irq(int irq, void *arg)
 	if (!READ_ONCE(sdev->powered))
 		return IRQ_NONE;
 	status = sgx_rd(sdev, SGX_CR_EVENT_STATUS) & sgx_rd(sdev, SGX_CR_EVENT_HOST_ENABLE);
-	if (!(status & SGX_CR_EVENT_STATUS_SW_EVENT))
+	if (!(status & SGX_CR_EVENT_STATUS_SW_EVENT)) {
+		/* Behind the display's latch, a stale bit would block the next MSI. */
+		if (sdev->vdc)
+			writel(PVRSGX_VDC_IRQ_SGX, sdev->vdc + PVRSGX_VDC_INT_IDENTITY);
 		return IRQ_NONE;
+	}
 	trace_pvrsgx_irq(status);
 	sgx_wr(sdev, SGX_CR_EVENT_HOST_CLEAR,
 	       SGX_CR_EVENT_HOST_CLEAR_SW_EVENT | SGX_CR_EVENT_HOST_CLEAR_MASTER_INTERRUPT);
+	/* The display latches the SGX's line: clear it after the source. */
+	if (sdev->vdc)
+		writel(PVRSGX_VDC_IRQ_SGX, sdev->vdc + PVRSGX_VDC_INT_IDENTITY);
 	atomic_inc(&sdev->irq_count);
 	if (!READ_ONCE(sdev->fw_running))
 		return IRQ_HANDLED;

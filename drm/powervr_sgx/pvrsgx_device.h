@@ -121,6 +121,12 @@ struct pvrsgx_fw {
 /**
  * struct pvrsgx_device - The SGX545
  */
+/* Display engine interrupt registers (gma500 psb_drv.h) and the SGX's bit. */
+#define PVRSGX_VDC_INT_ENABLE		0x20A0
+#define PVRSGX_VDC_INT_IDENTITY		0x20A4
+#define PVRSGX_VDC_INT_MASK		0x20A8
+#define PVRSGX_VDC_IRQ_SGX		BIT(18)
+
 struct pvrsgx_device {
 	/** @base: The DRM device. */
 	struct drm_device base;
@@ -133,6 +139,8 @@ struct pvrsgx_device {
 
 	/** @regs: The core registers (BAR 0). */
 	void __iomem *regs;
+	/** @vdc: The display engine's registers when it carries the SGX's interrupt, or NULL. */
+	void __iomem *vdc;
 	/** @irq: Its interrupt. */
 	int irq;
 
