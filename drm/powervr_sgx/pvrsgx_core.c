@@ -187,6 +187,14 @@ static const struct pvrsgx_core_family families[] = {
 	},
 };
 
+/*
+ * Not read on the hardware yet. 0 can't match: pvrsgx_core_lookup() refuses it
+ * and ~0 as what a window without a core behind it reads, so a Clover Trail is
+ * logged and refused instead of driven blind. Fill it in from sgx-ident's
+ * output (docs/porting/cores/clovertrail.md).
+ */
+#define PVRSGX_CLV_CORE_REV	0
+
 static const struct pvrsgx_core_info cores[] = {
 	{
 		.family = &families[0],
@@ -224,6 +232,31 @@ static const struct pvrsgx_core_info cores[] = {
 		.core_rev = 0x00010205,
 		.clock_hz = 200000000,
 		.fw_name = "powervr_sgx/sgx530_ukernel.bin",
+	},
+	{
+		/*
+		 * Clover Trail (Atom Z2760). Its SGX545 is the one Cedarview and
+		 * the CE5300 have (docs/UKERNEL.md, "SGX545 core revisions"):
+		 * the same features, instruction set and microkernel. Only the
+		 * place of its window behind the display engine's BAR and who
+		 * powers its island differ (struct pvrsgx_part).
+		 *
+		 * TODO(clovertrail): CORE_REVISION has not been read on the
+		 * hardware yet. An unknown revision makes the driver log both
+		 * values and refuse the part before it writes a register, so
+		 * this placeholder never matches on purpose. Replace it with
+		 * what sgx-ident prints (docs/porting/cores/clovertrail.md),
+		 * and check the new revision for errata of its own.
+		 *
+		 * The clock: 533 MHz for the Z2760 (notebookcheck, "Imagination
+		 * PowerVR SGX545"). The microkernel's timer only needs the order
+		 * of magnitude; the first TA kick confirms it.
+		 */
+		.family = &families[0],
+		.name = "Intel Clover Trail (SGX545 1.0.xx)",
+		.core_rev = PVRSGX_CLV_CORE_REV,
+		.clock_hz = 533000000,
+		.fw_name = "powervr_sgx/sgx545_ukernel.bin",
 	},
 };
 
@@ -295,7 +328,16 @@ const struct pvrsgx_core_family *pvrsgx_core_family_get(unsigned int core)
 const struct pvrsgx_core_info *pvrsgx_core_lookup(const struct pvrsgx_core_family *family,
 						  u32 core_id, u32 core_rev)
 {
-	if (core_id != family->core_id)
+	/*
+	 * CORE_ID's low 16 bits are CONFIG, the integrator's: the same core
+	 * reports different values on different boards, so they are not part of
+	 * the identity. The revision still has to match exactly.
+	 */
+	if ((core_id & PVRSGX_CORE_ID_CORE_MASK) !=
+	    (family->core_id & PVRSGX_CORE_ID_CORE_MASK))
+		return NULL;
+	/* What a window reads with no core behind it: unpowered, or not there. */
+	if (!core_rev || core_rev == ~0u)
 		return NULL;
 	for (unsigned int i = 0; i < ARRAY_SIZE(cores); i++)
 		if (cores[i].family == family && cores[i].core_rev == core_rev)

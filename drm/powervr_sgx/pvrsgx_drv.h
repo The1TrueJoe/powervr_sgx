@@ -19,6 +19,15 @@
 /* The registers this driver touches all lie below this offset. */
 #define PVRSGX_REGS_MIN			0x4000
 
+/*
+ * Clover Trail (Atom Z2760): the SGX sits behind the display engine's BAR 0,
+ * at the offset Medfield and Cedarview use (MRST_SGX_OFFSET in gma500's
+ * psb_drv.h, 0x80000). The BAR is 1 MiB, so the low half is the display
+ * engine's and must never be read: nothing in this driver refers to it.
+ * Unverified on the tablet: sgx-ident checks it (docs/porting/cores/clovertrail.md).
+ */
+#define PVRSGX_CLV_SGX_OFFSET		0x80000
+
 struct device;
 struct dev_pm_ops;
 struct drm_powervr_sgx_obj_array;

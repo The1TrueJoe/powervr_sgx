@@ -136,6 +136,8 @@ struct pvrsgx_device {
 	/** @irq: Its interrupt. */
 	int irq;
 
+	/** @part: This board's part: its window's place and its power. */
+	const struct pvrsgx_part *part;
 	/** @family: The core the bus says is there, set before the probe reads a register. */
 	const struct pvrsgx_core_family *family;
 	/** @cr: Its registers that move between cores (@family's). */

@@ -6,6 +6,7 @@
 #include <linux/pm_runtime.h>
 
 #include "pvrsgx_device.h"
+#include "pvrsgx_drv.h"
 #include "pvrsgx_fw.h"
 #include "pvrsgx_job.h"
 #include "pvrsgx_pm.h"
@@ -17,6 +18,16 @@
  * run_job until it leaves the active list.
  */
 #define AUTOSUSPEND_MS	500
+
+/*
+ * Parts whose graphics island nothing can power back once it is gated
+ * (Clover Trail: ACPI's GFX0 _PS0 only writes GDDS, the island is the P-Unit's
+ * APM block and there is no APM hand-over yet). The device then never idles.
+ */
+static bool island_always_on(const struct pvrsgx_device *sdev)
+{
+	return sdev->part && (sdev->part->flags & PVRSGX_PART_ISLAND_ALWAYS_ON);
+}
 
 int pvrsgx_power_get(struct pvrsgx_device *sdev)
 {
@@ -59,6 +70,15 @@ void pvrsgx_power_init(struct pvrsgx_device *sdev)
 			sdev->pm_pinned = true;
 		}
 	}
+
+	/*
+	 * Without an APM hand-over nothing would bring the island back, so on
+	 * these parts the device is held awake: no runtime suspend, no
+	 * microkernel stop, for as long as the driver is bound. The reference
+	 * is dropped in pvrsgx_power_fini().
+	 */
+	if (island_always_on(sdev))
+		pm_runtime_get_noresume(dev);
 }
 
 /* Before remove: undo pvrsgx_power_init, with the device awake. */
@@ -66,6 +86,8 @@ void pvrsgx_power_fini(struct pvrsgx_device *sdev)
 {
 	struct device *dev = sdev->base.dev;
 
+	if (island_always_on(sdev))
+		pm_runtime_put_noidle(dev);
 	if (sdev->pdev) {
 		pm_runtime_forbid(dev);
 		pm_runtime_dont_use_autosuspend(dev);
@@ -88,6 +110,9 @@ static int pvrsgx_runtime_suspend(struct device *dev)
 {
 	struct pvrsgx_device *sdev = dev_get_drvdata(dev);
 
+	/* Held awake by pvrsgx_power_init(): a stop here would gate the island. */
+	if (island_always_on(sdev))
+		return -EBUSY;
 	/* Lost too: after a failed start the clocks are still on (fw_stop's second branch). */
 	mutex_lock(&sdev->reset_lock);
 	pvrsgx_fw_stop(sdev);
@@ -119,7 +144,22 @@ static int pvrsgx_runtime_resume(struct device *dev)
 static int pvrsgx_suspend(struct device *dev)
 {
 	struct pvrsgx_device *sdev = dev_get_drvdata(dev);
-	int err = pvrsgx_job_quiesce(sdev);
+	int err;
+
+	/*
+	 * Coming back from system sleep means powering the graphics island
+	 * again, which nothing can do before the APM hand-over exists
+	 * (docs/porting/cores/clovertrail.md). Refusing the sleep is honest:
+	 * the alternative is waking up with a dead GPU. Remove the module to
+	 * let the machine sleep.
+	 */
+	if (island_always_on(sdev)) {
+		dev_warn_once(dev,
+			      "Clover Trail: no APM island hand-over; refusing to sleep (rmmod powervr_sgx first)\n");
+		return -EBUSY;
+	}
+
+	err = pvrsgx_job_quiesce(sdev);
 
 	if (err)
 		return err;

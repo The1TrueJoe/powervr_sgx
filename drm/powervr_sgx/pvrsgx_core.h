@@ -64,6 +64,40 @@ struct pvrsgx_heap_layout {
 };
 
 /*
+ * SGX_CR_CORE_ID's core number: bits 15:0 are CONFIG, which the integrator
+ * chose and which therefore differs from board to board. Only the number
+ * above them is the core's.
+ */
+#define PVRSGX_CORE_ID_CORE_MASK	GENMASK(31, 16)
+
+/* Part flags (&struct pvrsgx_part). */
+/*
+ * Nothing on this part can power the graphics island back once it is gated:
+ * ACPI's GFX0 _PS0 only writes GDDS, the island belongs to the P-Unit's APM
+ * block and the driver has no APM hand-over yet. It then keeps the device
+ * awake for as long as it is bound.
+ */
+#define PVRSGX_PART_ISLAND_ALWAYS_ON	BIT(0)
+
+/**
+ * struct pvrsgx_part - What a board adds to the core it has
+ *
+ * Several parts carry the same SGX545 and differ in where its window sits and
+ * in who manages its power. The bus glue picks the entry, and the core number
+ * from it: the PCI id table's driver_data is the index.
+ */
+struct pvrsgx_part {
+	/** @name: The part, as "Intel Clover Trail", for the log. */
+	const char *name;
+	/** @core: Its core's number, as the family table names it (545). */
+	unsigned int core;
+	/** @regs_off: Offset of the SGX's window inside BAR 0. */
+	u32 regs_off;
+	/** @flags: PVRSGX_PART_*. */
+	u32 flags;
+};
+
+/*
  * struct pvrsgx_core_regs - Registers that move or change between SGX5xx cores
  *
  * The other registers in pvrsgx_regs.h sit at the same offsets with the same
@@ -120,7 +154,7 @@ struct pvrsgx_core_family {
 	const char *name;
 	/** @core: Its number, as the bus glue names it: 545 for SGX545. */
 	unsigned int core;
-	/** @core_id: Expected SGX_CR_CORE_ID. */
+	/** @core_id: Expected SGX_CR_CORE_ID; only its core number is compared. */
 	u32 core_id;
 	/** @regs: Where its registers and fields are. */
 	const struct pvrsgx_core_regs *regs;

@@ -18,6 +18,22 @@ static void core_test_lookup(struct kunit *test)
 	KUNIT_EXPECT_NULL(test, pvrsgx_core_lookup(f, 0x01120000, 0x0001000e));
 }
 
+/*
+ * CONFIG (CORE_ID's low 16 bits) is the integrator's, not the core's, and a
+ * window with no core behind it reads 0 or ~0: neither may be taken for a part.
+ */
+static void core_test_config_and_empty_window(struct kunit *test)
+{
+	const struct pvrsgx_core_family *f = pvrsgx_core_family_get(545);
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_EXPECT_NOT_NULL(test, pvrsgx_core_lookup(f, 0x01150002, 0x0001000e));
+	KUNIT_EXPECT_NOT_NULL(test, pvrsgx_core_lookup(f, 0x0115ffff, 0x0001000d));
+	KUNIT_EXPECT_NULL(test, pvrsgx_core_lookup(f, 0x01160000, 0x0001000e));
+	KUNIT_EXPECT_NULL(test, pvrsgx_core_lookup(f, 0x01150000, 0xffffffff));
+	KUNIT_EXPECT_NULL(test, pvrsgx_core_lookup(f, 0x01150000, 0));
+}
+
 static void core_test_unknown(struct kunit *test)
 {
 	KUNIT_EXPECT_NULL(test, pvrsgx_core_family_get(0));
@@ -122,6 +138,7 @@ static void core_test_cpu_latency(struct kunit *test)
 
 static struct kunit_case pvrsgx_core_test_cases[] = {
 	KUNIT_CASE(core_test_lookup),
+	KUNIT_CASE(core_test_config_and_empty_window),
 	KUNIT_CASE(core_test_unknown),
 	KUNIT_CASE(core_test_table),
 	KUNIT_CASE(core_test_sgx545_values),
