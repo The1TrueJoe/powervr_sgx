@@ -109,6 +109,8 @@ static const struct pvrsgx_core_regs sgx530_regs = {
 	.soft_reset_cores = GENMASK(6, 1),
 	.use_code_base0 = SGX_CR_USE_CODE_BASE_0,
 	.pds_exec_base = SGX_CR_PDS_EXEC_BASE,
+	/* Named in the GPL header; its debug dump reads it. */
+	.pds_pc_base = 0x0b2c,
 	.bif_int_stat_fault_req = GENMASK(13, 0),
 	.bif_int_stat_fault_type = BIT(14),	/* read or write */
 	.bif_fault_addr = GENMASK(27, 12),

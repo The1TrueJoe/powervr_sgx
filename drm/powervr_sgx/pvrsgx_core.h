@@ -88,6 +88,7 @@ struct pvrsgx_core_regs {
 	u32 event_kick2_now;
 	u32 use_code_base0;
 	u32 pds_exec_base;
+	u32 pds_pc_base;		/* the PDS program counter, a debug read (0 if unnamed) */
 	u32 bif_int_stat_fault_req;
 	u32 bif_int_stat_fault_type;
 	u32 bif_fault_addr;		/* BIF_FAULT's address field */
