@@ -628,9 +628,11 @@ struct prog_info {
       bool f16;       /* the texel returns F16, two registers from raw */
       bool fetch;     /* a texelFetch: state of its own (sgx_draw.c) */
       unsigned plane; /* an RG32 / RGBA32 unit's plane (channel) */
+      unsigned state; /* its texture state block */
       uint64_t smp;
    } deps[SGX_MAX_DEP_SAMPLES];
    unsigned n_deps;
+   unsigned n_states; /* texture state blocks (sgx_shader.n_dep_states) */
    unsigned branch_at[64]; /* flat indices of the branches */
    unsigned n_branches;
 };
@@ -737,8 +739,14 @@ read_program(const struct sgx_shader *out, struct sgx_pipe_shader *so,
       info->deps[info->n_deps].f16 = x->f16;
       info->deps[info->n_deps].fetch = x->fetch;
       info->deps[info->n_deps].plane = x->plane;
+      info->deps[info->n_deps].state = x->state;
+      if (x->state >= out->n_dep_states)
+         return info->why = "dependent sample without texture state", false;
       info->n_deps++;
    }
+   info->n_states = info->n_deps ? out->n_dep_states : 0;
+   if (info->n_states > SGX_MAX_DEP_STATES)
+      return info->why = "too many dependent texture states", false;
    for (unsigned i = 0; i < out->n_blocks; i++) {
       if (out->blocks[i].kind != SGX_BLOCK_BRANCH)
          continue;
@@ -1281,7 +1289,7 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
        * don't fit to memory (mem_dwords), so this only catches a program
        * whose SA use still runs past (a guard, not drawn). */
       unsigned end = (vertex ? 10 : 9) + MAX2(so->const_dwords, out.sa_slots) +
-                     (vertex ? 0 : 4 * info.n_deps);
+                     (vertex ? 0 : 4 * info.n_states);
 
       if (end > 128) {
          fprintf(
@@ -1345,11 +1353,11 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
       if (info.n_deps) {
          unsigned sa[SGX_MAX_DEP_SAMPLES], n;
 
-         if (MAX2(so->const_dwords, out.sa_slots) + 4 * info.n_deps >
+         if (MAX2(so->const_dwords, out.sa_slots) + 4 * info.n_states >
              SGX_MAX_CONSTS) {
             fprintf(stderr,
-                    "sgx: %u SA slots and %u dependent samples: not drawn\n",
-                    out.sa_slots, info.n_deps);
+                    "sgx: %u SA slots and %u dependent texture states: not drawn\n",
+                    out.sa_slots, info.n_states);
             simple_mtx_unlock(&screen->lock);
             sgx_shader_free(&out);
             ralloc_free(nir);
@@ -1361,16 +1369,21 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
             SGX_DBG(NIR, "fragment program: %u SA slots, %u in list C\n",
                     out.sa_slots, so->const_dwords);
          so->const_dwords = MAX2(so->const_dwords, out.sa_slots);
+         /* one block of 4 words per texture state, the dependent samples
+          * that share it reading the same registers */
+         for (unsigned k = 0; k < info.n_states; k++)
+            so->dep_sa[k] = 9 + so->const_dwords + 4 * k;
          for (unsigned j = 0; j < info.n_deps; j++) {
-            so->dep_sa[j] = 9 + so->const_dwords + 4 * j;
-            so->dep_sampler[j] = info.deps[j].sampler;
-            so->dep_f16[j] = info.deps[j].f16;
-            so->dep_fetch[j] = info.deps[j].fetch;
-            so->dep_plane[j] = info.deps[j].plane;
-            sa[j] = so->dep_sa[j];
+            unsigned k = info.deps[j].state;
+
+            so->dep_sampler[k] = info.deps[j].sampler;
+            so->dep_f16[k] = info.deps[j].f16;
+            so->dep_fetch[k] = info.deps[j].fetch;
+            so->dep_plane[k] = info.deps[j].plane;
+            sa[j] = so->dep_sa[k];
          }
-         so->n_deps = info.n_deps;
-         so->const_dwords += 4 * info.n_deps;
+         so->n_deps = info.n_states;
+         so->const_dwords += 4 * info.n_states;
          if (out.n_code1) {
             /* each phase's dependent samples into its own block */
             struct prog_info i0 = info, i1 = info;

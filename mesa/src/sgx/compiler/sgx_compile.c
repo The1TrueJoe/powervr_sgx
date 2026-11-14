@@ -6878,18 +6878,44 @@ operand_slots(const struct sgx_ctx *c, const struct sgx_ins *i,
    return true;
 }
 
+/* The dependent samples' texture state blocks: one for each way a unit is
+ * read (sampler, F16 return, texelFetch, plane), shared by the samples that
+ * read it that way (a blur's taps of one texture use one block, not one
+ * each). Returns the number of blocks. */
+static unsigned
+dep_states(struct sgx_ctx *c)
+{
+   unsigned n = 0;
+   for (unsigned i = 0; i < c->n_samples; i++) {
+      struct sgx_sample *s = c->samples[i];
+      if (!s->dependent)
+         continue;
+      s->state = n;
+      for (unsigned j = 0; j < i; j++) {
+         const struct sgx_sample *t = c->samples[j];
+         if (t->dependent && t->sampler == s->sampler &&
+             t->f16_return == s->f16_return && t->fetch == s->fetch &&
+             t->plane == s->plane) {
+            s->state = t->state;
+            break;
+         }
+      }
+      if (s->state == n)
+         n++;
+   }
+   return n;
+}
+
 /* An instruction names sa0-sa127. The constants go from sa_base, a
- * fragment program's dependent texture state (4 each) after them. When the
- * slots don't fit, every slot also gets block word slot + 1 (ld.a.d's
- * offset #i reads base + 4 * (i + 1): iso sanity_st), indexed arrays that
- * fit whole and then the most-used constants stay in SA, and mem_index /
- * mem_uniforms load the rest. */
+ * fragment program's dependent texture state blocks (4 dwords each,
+ * dep_states) after them. When the slots don't fit, every slot also gets
+ * block word slot + 1 (ld.a.d's offset #i reads base + 4 * (i + 1): iso
+ * sanity_st), indexed arrays that fit whole and then the most-used constants
+ * stay in SA, and mem_index / mem_uniforms load the rest. */
 static void
 place_constants(struct sgx_ctx *c)
 {
-   unsigned deps = 0;
-   for (unsigned s = 0; s < c->n_samples; s++)
-      deps += c->samples[s]->dependent;
+   unsigned deps = c->n_dep_states = dep_states(c);
    unsigned budget = 128 - c->sa_base - MIN2(4 * deps, 128 - c->sa_base);
    c->mem_dwords = c->n_mem_bases = 0;
    for (unsigned s = 0; s < c->n_sa; s++)
