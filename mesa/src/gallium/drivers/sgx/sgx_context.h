@@ -63,7 +63,11 @@ struct sgx_const {
  * choice for word-by-word fetches) at SGX_K_LEVELS + u, a raw integer */
 #define SGX_K_LEVELS       1096
 
-#define SGX_MAX_DEP_SAMPLES 8
+/* a fragment program's dependent samples, and their texture state blocks
+ * (the compiler's sgx_sample_info.state: one per way a unit is read, 4 SA
+ * dwords each, so no more than SA holds) */
+#define SGX_MAX_DEP_SAMPLES SGX_MAX_SAMPLES
+#define SGX_MAX_DEP_STATES 32
 
 /* the fragment driver block's register that sets gl_FrontFacing's sense:
  * bit 0 clear when gallium's front_ccw is set (A/B against the DDK) */
@@ -96,16 +100,17 @@ struct sgx_pipe_shader {
    /* writes gl_FragDepth: in pa<depth_pa> at the feedback nop for a depthf;
     * -1 doesn't */
    int depth_pa;
-   /* dependent samples: the SA register of each one's 4 texture state words,
-    * and its sampler */
-   unsigned dep_sa[SGX_MAX_DEP_SAMPLES], dep_sampler[SGX_MAX_DEP_SAMPLES],
+   /* dependent samples' texture state blocks (sgx_sample_info.state; the
+    * samples that read a unit the same way share one): the SA register of
+    * each block's 4 texture state words, and its sampler */
+   unsigned dep_sa[SGX_MAX_DEP_STATES], dep_sampler[SGX_MAX_DEP_STATES],
       n_deps;
    /* the texel comes back F16 into two registers (T3 01028800) */
-   bool dep_f16[SGX_MAX_DEP_SAMPLES];
+   bool dep_f16[SGX_MAX_DEP_STATES];
    /* its plane of an RG32 / RGBA32 texture (the state's address moves) */
-   uint8_t dep_plane[SGX_MAX_DEP_SAMPLES];
+   uint8_t dep_plane[SGX_MAX_DEP_STATES];
    /* a texelFetch (sgx_sample_info.fetch): sampled NEAREST, clamped */
-   bool dep_fetch[SGX_MAX_DEP_SAMPLES];
+   bool dep_fetch[SGX_MAX_DEP_STATES];
    struct {
       struct sgxws_blend key;
       uint32_t code;

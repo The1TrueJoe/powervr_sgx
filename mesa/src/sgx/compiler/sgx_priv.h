@@ -135,6 +135,7 @@ struct sgx_sample {
    bool f16coord; /* dependent: F16 coordinates, two per register (smp .f16) */
    bool f16_return; /* returns F16 pairs: pa, pa + 1; dependent: its two
                        destination registers */
+   unsigned state; /* dependent: its texture state block (place_constants) */
    /* dependent: the SAMPLE pseudo-instruction (dst raw, coord, lod) */
    struct sgx_ins *ins;
 };
@@ -225,7 +226,8 @@ struct sgx_ctx {
    int face_f32;  /* ... as 1.0 / 0.0 (face_int: made when a select needs it) */
    struct sgx_ins *face_and; /* the and that makes face_int */
    unsigned colour_pa;
-   struct sgx_sample *samples[16];
+   struct sgx_sample *samples[SGX_MAX_SAMPLES];
+   unsigned n_dep_states; /* place_constants: dependent state blocks */
    unsigned n_samples;
 
    struct set *skip;        /* NIR instructions the backend doesn't emit */
