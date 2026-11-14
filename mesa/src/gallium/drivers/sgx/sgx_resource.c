@@ -216,7 +216,10 @@ sgx_resource_create(struct pipe_screen *pscreen,
    if (!res->data)
       goto fail;
    /* (a depth buffer that isn't sampled has none: the ISP keeps depth) */
-   if (sgx_tex_format(templ->format) && templ->target != PIPE_TEXTURE_3D &&
+   /* (a 3D texture of one slice is laid out and sampled as a 2D one:
+    * max_texture_3d_levels, lower_tex_3d) */
+   if (sgx_tex_format(templ->format) &&
+       (templ->target != PIPE_TEXTURE_3D || templ->depth0 == 1) &&
        templ->last_level < ARRAY_SIZE(res->level_offset) &&
        (!sgx_tex_depth(templ->format) ||
         (templ->bind & PIPE_BIND_SAMPLER_VIEW))) {
