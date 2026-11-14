@@ -455,9 +455,16 @@ static uint32_t pds_secondary(struct sgx_ring *r, uint32_t src, uint32_t dma_ctr
 	return pds_emit(r, &p, rows);
 }
 
-/* DOUTD control: dwords-1, attribute register at b8, b22-24 [G], b25 = secondary attributes [G] */
+/*
+ * DOUTD control: dwords-1, attribute register at b8, b22-24 [G], b25 = secondary attributes [G].
+ * SGXGEN_DMA530: the 530 vendor stream has the fields above the register one bit lower
+ * (kind at b21-23, secondary at b24: 0x01000018 for a 25-dword block, 0x0140000a for
+ * 11 dwords of pixel uniforms).
+ */
 static uint32_t dma_ctrl(uint32_t dwords, uint32_t reg, uint32_t kind, int secondary)
 {
+	if (getenv("SGXGEN_DMA530"))
+		return (dwords - 1) | reg << 8 | kind << 21 | (secondary ? 0x1000000 : 0);
 	return (dwords - 1) | reg << 8 | kind << 22 | (secondary ? 0x2000000 : 0);
 }
 
