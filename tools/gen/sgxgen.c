@@ -1240,8 +1240,10 @@ void sgx_clear(struct sgx_ctx *c, const float rgba[4], float depth)
 	blk[5] = pds_word(c, c->clear_pds, 2);
 	blk[6] = 0x80000000 | 0 << 16 | (s->rt.xt - 1);		/* region clip: whole surface, in tiles */
 	blk[7] = 0 << 16 | (s->rt.yt - 1);
-	blk[8] = 8 << 16 | 0x1800;				/* 8 output dwords [D], 0x1800 [G] */
-	blk[9] = 0x40;						/* MTE ctrl of the clear [G] */
+	/* SGXGEN_OUTSEL530: the 530 vendor stream has the output dword count at b24 */
+	blk[8] = 8 << (getenv("SGXGEN_OUTSEL530") ? 24 : 16) | 0x1800;	/* 8 output dwords [D], 0x1800 [G] */
+	/* SGXGEN_MTE530: the 530 vendor clear's MTE control */
+	blk[9] = getenv("SGXGEN_MTE530") ? 0x00010000 : 0x40;	/* MTE ctrl of the clear [G] */
 	blk[10] = 5;						/* one 4-component set */
 	blk[11] = 0;
 	state_block(c, blk, 12, 12, 3);
@@ -1301,7 +1303,8 @@ int sgx_draw(struct sgx_ctx *c, const struct sgx_draw *d)
 			    doutu_w0(c, fs->sec, 0, 0), 4, &rows);
 	blk[n++] = 0;
 	blk[n++] = ispa(st);
-	blk[n++] = 0x10 << 8 | 0xf << 4;			/* ISPB: line width 1.0, colour mask */
+	/* SGXGEN_ISPB530: the 530 vendor draw's ISPB has no line width */
+	blk[n++] = (getenv("SGXGEN_ISPB530") ? 0 : 0x10 << 8) | 0xf << 4;	/* ISPB: line width 1.0, colour mask */
 	blk[n++] = pds_word(c, sec, rows);
 	/* PDS middle word: b18-24 = (secondary dwords+3)>>2 [D]; the rest from the DDK's
 	 * shader object (b0, b16-17 constant; b25-28 = 0xb for this shader) [G] */
@@ -1321,9 +1324,9 @@ int sgx_draw(struct sgx_ctx *c, const struct sgx_draw *d)
 	blk[n++] = f32((zn + zf) * 0.5f);
 	blk[n++] = f32((zf - zn) * 0.5f);
 	blk[n++] = 0;						/* header 0x200 */
-	blk[n++] = vs->out_dwords << 16 | 0x3000;		/* output select */
+	blk[n++] = vs->out_dwords << (getenv("SGXGEN_OUTSEL530") ? 24 : 16) | 0x3000;	/* output select */
 	blk[n++] = 0x3727c5ac;					/* W clamp 1e-5 */
-	blk[n++] = mte_ctrl(st);
+	blk[n++] = getenv("SGXGEN_MTE530") ? 0x00088000 : mte_ctrl(st);	/* SGXGEN_MTE530: the vendor draw's */
 	blk[n++] = 0;						/* TSP: no texcoords */
 	blk[n++] = 0;
 	blk[0] = 0x1 | 0x2 | 0x40 | 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000;
