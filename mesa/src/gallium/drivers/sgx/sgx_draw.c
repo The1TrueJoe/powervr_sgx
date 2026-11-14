@@ -1447,7 +1447,6 @@ vcache_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
    /* most recently used first; the frame being recorded reads it */
    list_del(&v->link);
    list_add(&v->link, &ctx->vcache_lru);
-   v->last_seq = sgxws_next_seq(ctx->hw);
    d->verts = NULL;
    d->indices = NULL;
    d->verts_va = v->verts_va;
@@ -1456,6 +1455,8 @@ vcache_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
    d->n_indices = v->nidx;
    if (sgxws_draw(ctx->hw, d))
       fprintf(stderr, "sgx: draw of %u indices dropped\n", v->nidx);
+   /* the kick that reads it, after the draw (zc_draw_resident) */
+   v->last_seq = sgxws_next_seq(ctx->hw);
    d->verts_va = d->idx_va = 0;
    return true;
 }
@@ -1539,9 +1540,6 @@ zc_draw_resident(struct sgx_context *ctx, const struct pipe_draw_info *info,
       if (zf[e].va & 3)
          return false;
    }
-   for (unsigned e = 0; e < n_fetch; e++)
-      f[e].res->vbo_seq = sgxws_next_seq(ctx->hw);
-   ib->vbo_seq = sgxws_next_seq(ctx->hw);
    d->fetch = zf;
    d->n_fetch = n_fetch;
    d->blocks = NULL;
@@ -1556,6 +1554,14 @@ zc_draw_resident(struct sgx_context *ctx, const struct pipe_draw_info *info,
       if (sgxws_draw(ctx->hw, d))
          fprintf(stderr, "sgx: draw of %u indices dropped\n", d->n_indices);
    }
+   /* the kick that reads them: stamped after sgxws_draw, which submits the
+    * frame and starts the next when its rings are full (make_room) or the
+    * depth bias changes; stamped before, a buffer re-specified after the
+    * draw (glBufferData a draw) had its copy freed, and its address given
+    * to the next, while that next kick still read it (issue #5) */
+   for (unsigned e = 0; e < n_fetch; e++)
+      f[e].res->vbo_seq = sgxws_next_seq(ctx->hw);
+   ib->vbo_seq = sgxws_next_seq(ctx->hw);
    SGX_DBG(DRAW, "resident indexed draw x%u\n", count);
    ctx->stats.zc_draws++;
    d->fetch = NULL;
@@ -1683,9 +1689,6 @@ zc_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
       if (zf[e].va & 3)
          return false;
    }
-   for (unsigned e = 0; e < n_fetch; e++)
-      if (f[e].res)
-         f[e].res->vbo_seq = sgxws_next_seq(ctx->hw);
    d->fetch = zf;
    d->n_fetch = n_fetch;
    d->blocks = blocks;
@@ -1700,6 +1703,10 @@ zc_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
    if (sgxws_draw(ctx->hw, d))
       fprintf(stderr, "sgx: zero-copy draw of %u vertices dropped\n",
               out_count);
+   /* (after the draw: zc_draw_resident) */
+   for (unsigned e = 0; e < n_fetch; e++)
+      if (f[e].res)
+         f[e].res->vbo_seq = sgxws_next_seq(ctx->hw);
    ctx->stats.zc_draws++;
    d->fetch = NULL;
    d->n_fetch = 0;
@@ -2295,6 +2302,22 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
               compiled ? " (compiled)" : "");
       if (sgxws_draw(ctx->hw, &d))
          fprintf(stderr, "sgx: draw of %u vertices dropped\n", out_count);
+   }
+   /* The draws may have gone into a later kick than the one the textures
+    * and targets were marked with: sgxws_draw submits the frame and starts
+    * the next when its rings are full or the depth bias changes.  Marked
+    * again with the kick the last draw is in, so a write to one waits for
+    * (or goes around) the kick that really reads it. */
+   if (ctx->recording) {
+      uint32_t seq = sgxws_next_seq(ctx->hw);
+
+      u_foreach_bit (unit, sampled)
+         sgx_resource(ctx->views[unit]->texture)->use_seq = seq;
+      if (ctx->recording->texture)
+         ctx->recording->use_seq = seq;
+      if (ctx->recording_zs && ctx->recording_zs->zls_stored &&
+          sgxws_bo_valid(&ctx->recording_zs->zls))
+         ctx->recording_zs->use_seq = seq;
    }
 out:
    simple_mtx_unlock(&screen->lock);
