@@ -275,6 +275,42 @@ lower_txs_int(nir_builder *b, nir_tex_instr *tex)
    return true;
 }
 
+/* A 3D texture is one texel (max_texture_3d_levels = 1: the volume layout
+ * isn't the driver's yet, TEX.md section 14), kept as a 1x1 2D texture
+ * (sgx_resource), which every (s, t, r) reads whatever the wrap and filter:
+ * its samples become 2D ones at (s, t). Sizes and level counts keep the
+ * volume's (lower_txs). */
+static bool
+lower_tex_3d(nir_builder *b, nir_instr *instr, void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+
+   if (tex->sampler_dim != GLSL_SAMPLER_DIM_3D || tex->op == nir_texop_txs ||
+       tex->op == nir_texop_query_levels || tex->op == nir_texop_lod ||
+       tex->op == nir_texop_texture_samples)
+      return false;
+   b->cursor = nir_before_instr(instr);
+   for (unsigned i = 0; i < tex->num_srcs; i++) {
+      switch (tex->src[i].src_type) {
+      case nir_tex_src_coord:
+      case nir_tex_src_ddx:
+      case nir_tex_src_ddy:
+      case nir_tex_src_offset:
+         if (tex->src[i].src.ssa->num_components > 2)
+            nir_src_rewrite(&tex->src[i].src,
+                            nir_trim_vector(b, tex->src[i].src.ssa, 2));
+         break;
+      default:
+         break;
+      }
+   }
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->coord_components = 2;
+   return true;
+}
+
 /* textureSize (level 0) of a fragment program, which st's lowering of
  * rectangle lookups asks for (coords / textureSize): the size from driver
  * constants (SGX_K_TEXSIZE) the draw fills, as floats, where the program
@@ -1149,6 +1185,8 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
       if (srgb_filter)
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_srgb_filter,
                   nir_metadata_control_flow, &srgb_filter);
+      NIR_PASS(_, nir, nir_shader_instructions_pass, lower_tex_3d,
+               nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_lower_tex, &tex);
    }
    /* textureGrad, the Offset variants and texelFetch as smp can do them;
