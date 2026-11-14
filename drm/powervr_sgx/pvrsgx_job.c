@@ -41,6 +41,7 @@
 #include "pvrsgx_job.h"
 #include "pvrsgx_prime.h"
 #include "pvrsgx_kobj.h"
+#include "pvrsgx_mmu.h"
 #include "pvrsgx_trace.h"
 #include "pvrsgx_validate.h"
 #include "pvrsgx_vm.h"
@@ -50,6 +51,30 @@
 static unsigned int job_timeout_ms = 2000;
 module_param(job_timeout_ms, uint, 0444);
 MODULE_PARM_DESC(job_timeout_ms, "How long a job may run before the GPU is reset (default 2000 ms)");
+
+/*
+ * Bring-up, SGX530 with allow_unisolated only (off unless probe_unmap_size is
+ * set): clear the job VM's page-table entries for [probe_unmap_va, +size) just
+ * before each job is pushed, so that a GPU read there faults (BIF_FAULT gives
+ * the address) instead of stalling unseen. The VM's own ranges only: the
+ * firmware heaps, whose tables are the kernel directory's, are left alone.
+ */
+static unsigned int probe_unmap_va, probe_unmap_size;
+module_param(probe_unmap_va, uint, 0444);
+MODULE_PARM_DESC(probe_unmap_va, "Bring-up (SGX530): GPU address to unmap before each job");
+module_param(probe_unmap_size, uint, 0444);
+MODULE_PARM_DESC(probe_unmap_size, "Bring-up (SGX530): bytes to unmap at probe_unmap_va (default 0, off)");
+
+static void probe_unmap(struct pvrsgx_job *job)
+{
+	struct pvrsgx_vm *vm = job->ctx->vm;
+
+	if (!probe_unmap_size || vm->sdev->family->core != 530 || !pvrsgx_allow_unisolated)
+		return;
+	drm_warn(&vm->sdev->base, "probe: unmapping 0x%08x +0x%x for job type %u\n",
+		 probe_unmap_va, probe_unmap_size, job->type);
+	pvrsgx_mmu_unmap(vm->mmu, probe_unmap_va & ~(SGX_MMU_PAGE_SIZE - 1), probe_unmap_size);
+}
 
 /*
  * Two jobs on the GPU at once, so one render's TA runs while another's 3D
@@ -1217,6 +1242,7 @@ int pvrsgx_ioctl_submit_jobs(struct drm_device *drm, void *data, struct drm_file
 				drm_syncobj_replace_fence(sig->syncobj, done);
 			}
 		}
+		probe_unmap(job);
 		drm_sched_entity_push_job(&job->base);
 		ja[i].job = NULL;	/* the scheduler owns it now */
 		pushed++;
