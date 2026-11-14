@@ -40,6 +40,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "fixed-function fragment programs at highp (F32), not mediump (F16; texture coordinates F32)"},
    {"nozerocopy", SGX_DEBUG_NO_ZERO_COPY,
     "vertex inputs gathered into f32 x 4, not DMAed where they are"},
+   {"novboslabs", SGX_DEBUG_NO_VBO_SLABS,
+    "every buffer's device copy a BO of its own, not small ones cut from shared slabs"},
    {"nolazyscanout", SGX_DEBUG_NO_LAZY_SCANOUT,
     "scanout buffers on a dumb-buffer display (kmsro) are the display's from the start, not when a KMS handle is asked for"},
    {"nophasesplit", SGX_DEBUG_NO_PHASE_SPLIT,
@@ -395,6 +397,7 @@ sgx_screen_destroy(struct pipe_screen *pscreen)
 {
    struct sgx_screen *screen = sgx_screen(pscreen);
 
+   sgx_resource_screen_fini(screen);
    /* Keep the services connection and a hardware context for the process's
     * next screen instead of tearing them down: when srvinit started the
     * microkernel, a render context's cleanup never completes (the bridge

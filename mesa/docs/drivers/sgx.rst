@@ -96,6 +96,9 @@ Environment variables
       coordinate set, not of another
    ``nozerocopy``
       vertex inputs gathered into f32 x 4, not DMAed where they are
+   ``novboslabs``
+      every buffer's device copy a BO of its own, not small ones (64 KiB
+      or less) cut from shared slabs
    ``nozls``
       depth and stencil not kept across renders
    ``nolazyscanout``
