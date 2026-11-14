@@ -1253,7 +1253,9 @@ void sgx_clear(struct sgx_ctx *c, const float rgba[4], float depth)
 	blk[9] = getenv("SGXGEN_MTE530") ? 0x00010000 : 0x40;	/* MTE ctrl of the clear [G] */
 	blk[10] = 5;						/* one 4-component set */
 	blk[11] = 0;
-	state_block(c, blk, 12, 12, 3);
+	/* SGXGEN_CLEAR_KIND: the DMA kind (ours 3; the 530 vendor's 10-dword state block uses 1) */
+	state_block(c, blk, 12, 12,
+		    getenv("SGXGEN_CLEAR_KIND") ? env_u32("SGXGEN_CLEAR_KIND") : 3);
 	vdm_draw(c, SGX_TRIANGLES, 3, c->idx, v.va, 16, 4, doutu_w0_shader(c, c->clear_vs, 1, 0), 4, 8);
 }
 
