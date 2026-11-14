@@ -10,6 +10,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/devcoredump.h>
+#include <linux/module.h>
 #include <linux/seq_buf.h>
 #include <linux/vmalloc.h>
 
@@ -24,6 +25,29 @@
 #include "pvrsgx_mmu.h"
 #include "pvrsgx_render.h"
 #include "pvrsgx_vm.h"
+
+/*
+ * Bring-up, read only (off unless read_ukregs=1, SGX530 only): the registers the
+ * SGX530 microkernel itself reads that the core's GPL header doesn't name. The
+ * host only reads them, never writes.
+ */
+static bool pvrsgx_read_ukregs;
+module_param_named(read_ukregs, pvrsgx_read_ukregs, bool, 0444);
+MODULE_PARM_DESC(read_ukregs, "Bring-up: dump the SGX530 registers its microkernel reads (read only; default off)");
+
+static void dump_ukregs(struct seq_buf *sb, struct pvrsgx_device *sdev)
+{
+	static const u16 regs[] = {
+		0x138, 0x218, 0x274, 0x408, 0x624, 0x628, 0x630, 0x700,
+		0x710, 0x724, 0x72c, 0x734, 0x804, 0xa74,
+	};
+
+	if (!pvrsgx_read_ukregs || sdev->family->core != 530)
+		return;
+	for (int i = 0; i < ARRAY_SIZE(regs); i++)
+		seq_buf_printf(sb, "UK_READ              0x%04x 0x%08x\n", regs[i],
+			       sgx_rd(sdev, regs[i]));
+}
 
 /* Registers safe to read while the clocks are on. */
 static void dump_regs(struct seq_buf *sb, struct pvrsgx_device *sdev)
@@ -76,6 +100,7 @@ static void dump_regs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 		seq_buf_printf(sb, "%-20s 0x%04x 0x%08x\n", name, regs[i].reg,
 			       sgx_rd(sdev, regs[i].reg));
 	}
+	dump_ukregs(sb, sdev);
 }
 
 void pvrsgx_dump_status(struct seq_buf *sb, struct pvrsgx_device *sdev, bool regs)
