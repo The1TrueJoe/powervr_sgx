@@ -131,8 +131,12 @@ static int inval_probe_show(struct seq_file *m, void *unused)
 			sgx_wr(sdev, SGX_CR_EVENT_HOST_CLEAR, s1 & ~s0);
 		if (s21 & ~s20)
 			sgx_wr(sdev, SGX_CR_EVENT_HOST_CLEAR2, s21 & ~s20);
-		seq_printf(m, "  cleared: 0x%08x 0x%08x\n", sgx_rd(sdev, SGX_CR_EVENT_STATUS),
+		seq_printf(m, "  cleared: 0x%08x 0x%08x", sgx_rd(sdev, SGX_CR_EVENT_STATUS),
 			   sgx_rd(sdev, SGX_CR_EVENT_STATUS2));
+		/* SGX530: its invalidate-done register (unnamed; read only, cumulative) */
+		if (sdev->family->core == 530)
+			seq_printf(m, "  0x138 0x%08x", sgx_rd(sdev, 0x138));
+		seq_puts(m, "\n");
 	}
 	pm_runtime_put(sdev->base.dev);
 	drm_dev_exit(idx);
