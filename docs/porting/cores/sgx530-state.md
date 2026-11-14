@@ -78,6 +78,31 @@ changes, since the vendor stream shows the SGX530 needs them, but they aren't th
   The macrotile words and macrotile count match ours. The driver now takes all four per
   core (`wip/sgx530-kick-test`, with a `ta_revert` bring-up parameter). With them, and with
   every client form above, the hang is unchanged.
+- **0x138 is the SGX530's invalidate-done register (C).** Reading it was approved
+  2026-11-14, read only; the host never writes it. On an idle GPU, a host write of 1 to each
+  invalidate sets bits in 0x138, which stay set until acknowledged:
+
+  | write | bits |
+  |---|---|
+  | `PDS_INV0` (0xad0) | b1, b5 |
+  | `PDS_INV1` (0xad4) | b2, b6 |
+  | `PDS_INV2` (0xad8) | b3, b7 |
+  | `PDS_INV3` (0xadc) | b4, b8 |
+  | `PDS_INV_CSC` (0xae0) | b0 |
+
+  The microkernel's TA side requests `PDS_INV0` and the CSC, so on the SGX530 it waits for
+  **0x23**. The SGX545's 0x27 adds b2, which only `PDS_INV1` sets here, so that wait timed
+  out on every TA kick. With 0x23 (`ukernel/cores/sgx530.py`) no bounded wait times out,
+  and 0x138 reads 0x1dc mid-kick (0x1ff with 0x23 acknowledged). The TA still stalls. The
+  3D side's mask on this core is likely `PDS_INV1` + CSC = 0x45, plus whatever the early
+  0xa08 request adds (G; the 3D side isn't reached yet).
+- **The other registers the microkernel reads, mid-hang (C, read only).**
+  - 0x700 = 0x10210000, the PB free-list head as written.
+  - 0x624 = 0x1000 and 0x628 = 0x11000, the PB thresholds as written.
+  - 0x218 = 0x01000000, where the microkernel writes TA flags 2 (0x400000).
+  - 0x804 = 0x10000000, the MADD bit still set.
+  - 0x710 = 0x1020.
+  - 0x274, 0x408, 0x630, 0x724, 0x72c and 0x734 are all 0.
 
 ## UPDATE 2026-11-13: full 64x64 kick on silicon — microkernel + command layer PROVEN; only blocker left is sgxgen's PDS data layout
 

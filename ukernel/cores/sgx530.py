@@ -59,6 +59,12 @@ ISA_CORE = 545               # assembled with the SGX545's encodings: sgx.xml de
                              # 530 once sgx.xml has the SGX530's confirmed forms.
 
 # ---- bring-up ---------------------------------------------------------------
+# The invalidate-done bits in 0x138 (C, a host probe on an OMAP3630 board,
+# 2026-11-14): PDS_INV0 sets b1+b5, PDS_INV1 b2+b6, PDS_INV2 b3+b7, PDS_INV3
+# b4+b8, PDS_INV_CSC b0. The TA side requests PDS_INV0 and the CSC, so it waits
+# for 0x23; the SGX545's 0x27 needs b2, which only PDS_INV1 sets here, and timed
+# out on every TA kick (bounded wait 0xd).
+INV_DONE_TA = 0x23
 WAIT_BOUND = 0xffff          # every wait gives up after 65535 polls and logs itself
                              # in WAIT_TIMEOUT_ID/CT (the manifest's "waits" names it)
 FEATURES = 0x4              # PVRSGX_UKFW_SINGLE_CONTEXT (bit 2, proposed): EDM on list
