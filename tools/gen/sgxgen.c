@@ -611,6 +611,8 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 	{
 		struct drm_powervr_sgx_ioctl_create_context_args cc = {
 			.type = DRM_POWERVR_SGX_CTX_TYPE_RENDER, .vm_context_handle = d->vm,
+			/* SGXGEN_PB_PAGES: a PB size other than the device default */
+			.param_buffer_pages = env_u32("SGXGEN_PB_PAGES"),
 		};
 		struct drm_syncobj_create sc = {};
 
