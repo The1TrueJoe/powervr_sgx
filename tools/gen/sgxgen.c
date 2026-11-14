@@ -693,6 +693,23 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 	CODE(&t, MOVS(MV, 2, 0, 0, 1, 2, 2, DOUTU));
 	CODE(&t, HALT);
 	c->terminate = pds_emit(&c->pds_vtx, &t, &rows);
+	/* SGXGEN_PRETERM530: the vendor stream on the 530 runs a type 4 program of
+	 * DOUTA (0x800, 0), DOUTA (0, 0x100) and a task just before the terminate */
+	{
+		struct pds q = { 0 };
+
+		pds_d0(&q, 0, 0x800);
+		pds_d0(&q, 1, 0);
+		pds_d0(&q, 2, 0);
+		pds_d0(&q, 3, 0x100);
+		pds_d0(&q, 4, doutu_w0(c, c->state_emit[2], 1, 0));
+		pds_d0(&q, 5, 0);
+		CODE(&q, MOVS(MV, 0, 0x18, 0, 1, 2, 2, DOUTA));
+		CODE(&q, MOVS(MV, 1, 0x18, 0, 1, 2, 2, DOUTA));
+		CODE(&q, MOVS(MV, 2, 0, 0, 1, 2, 2, DOUTU));
+		CODE(&q, HALT);
+		c->preterm = pds_emit(&c->pds_vtx, &q, &rows);
+	}
 
 	/* pixel programs shared by every object without inputs, and the clear's */
 	c->pds_empty_p = pds_secondary(&c->pds_pix, 0, 0, doutu_w0(c, c->empty_p, 0, 0), 0, NULL);
@@ -1147,7 +1164,11 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	va = pds_emit(&c->pds_vtx, &p, &rows);
 	vdm(c, 0x40000000 | vdm_pds(c, va));
 	/* info: rows, the rotating buffer index + 0x2000, 0x2020400, dwords */
-	vdm(c, rows << 26 | ((c->vdm_counter + 0x2000) | 0x2020400 | ((n + 3) >> 2)));
+	/* SGXGEN_VDMINFO530: the 530 vendor stream's low bits, 0x2a200 | dwords */
+	if (getenv("SGXGEN_VDMINFO530"))
+		vdm(c, rows << 26 | 0x2a200 | ((n + 3) >> 2));
+	else
+		vdm(c, rows << 26 | ((c->vdm_counter + 0x2000) | 0x2020400 | ((n + 3) >> 2)));
 	c->vdm_counter = (c->vdm_counter + 1) & 3;
 }
 
@@ -1178,13 +1199,21 @@ static void vdm_draw(struct sgx_ctx *c, uint32_t prim, uint32_t count, uint32_t 
 	CODE(&p, MOVS(MV_CC3, 1, 0, 0, 1, 3, 3, DOUTU));
 	CODE(&p, HALT);
 	va = pds_emit(&c->pds_vtx, &p, &rows);
-	vdm(c, 0x80000000 | 0x00c00000 | prim << 26 | count);
+	/* SGXGEN_DRAW530: the 530 vendor stream's draw: word 0 b24 set, index
+	 * batches of 8, and the batching field 2 at 8 vertices per task */
+	int d530 = getenv("SGXGEN_DRAW530") != NULL;
+	uint32_t bf = vpt - 1 < 3 ? vpt - 1 : 3;
+
+	if (d530) {
+		batch = 8;
+		bf = vpt >= 16 ? 3 : vpt >= 8 ? 2 : vpt >= 4 ? 1 : 0;
+	}
+	vdm(c, 0x80000000 | 0x00c00000 | (d530 ? 0x01000000 : 0) | prim << 26 | count);
 	vdm(c, idx & ~1u);				/* 16-bit indices */
 	vdm(c, (batch - 1) << 28);
 	vdm(c, 0x003fffff);
 	vdm(c, (vpt - 1) << 28 | vdm_pds(c, va));
-	vdm(c, (out_dwords + 3) >> 2 << 24 | ((in_dwords * 4 + 0xf) >> 4) << 7 |
-	       (vpt - 1 < 3 ? vpt - 1 : 3) << 22 | rows);
+	vdm(c, (out_dwords + 3) >> 2 << 24 | ((in_dwords * 4 + 0xf) >> 4) << 7 | bf << 22 | rows);
 }
 
 /* glClear(COLOR): a screen-covering triangle, the DDK's way (NOTES.md "Clear") */
@@ -1314,7 +1343,7 @@ int sgx_draw(struct sgx_ctx *c, const struct sgx_draw *d)
 		vsec.p[6 + i] = vs->sec_init[i];
 	sec = pds_secondary(&c->pds_vtx, vsec.va, dma_ctrl(10, 0, 1, 1), doutu_w0(c, c->empty_v, 1, 0), 0, &vrows);
 	vdm(c, 0x40000000 | vdm_pds(c, sec));
-	vdm(c, vrows << 26 | 0xe100 | (10 + 3) >> 2);
+	vdm(c, vrows << 26 | (getenv("SGXGEN_VDMINFO530") ? 0x2a200 : 0xe100) | (10 + 3) >> 2);
 
 	/* SGXGEN_FAULT: vertices from an unmapped address, a TA page fault (recovery tests) */
 	if (getenv("SGXGEN_FAULT"))
@@ -1331,10 +1360,16 @@ static uint32_t vdm_end(struct sgx_ctx *c)
 {
 	uint32_t at = c->vdm.bo.va + c->vdm.used;
 
+	int i530 = getenv("SGXGEN_VDMINFO530") != NULL;
+
 	vdm(c, 0x40000000 | vdm_pds(c, c->empty_state));
-	vdm(c, 1u << 26 | 0xe100);
+	vdm(c, 1u << 26 | (i530 ? 0x16100 : 0xe100));
+	if (getenv("SGXGEN_PRETERM530")) {
+		vdm(c, 0x40000000 | vdm_pds(c, c->preterm));
+		vdm(c, 3u << 26 | 0x2c201);
+	}
 	vdm(c, 0x60000000 | vdm_pds(c, c->terminate));
-	vdm(c, 3u << 26 | 0x2022401);
+	vdm(c, 3u << 26 | (i530 ? 0x2a201 : 0x2022401));
 	vdm(c, 0xc0000000);
 	return at;
 }

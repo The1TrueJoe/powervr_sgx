@@ -167,6 +167,7 @@ struct sgx_ctx {
 	/* fixed programs */
 	uint32_t empty_v, empty_p, copy_fs, clear_vs, pe_ptoff, pe_emit, state_emit[33];
 	uint32_t empty_state, terminate;	/* VDM state programs (PDS vertex heap) */
+	uint32_t preterm;		/* SGXGEN_PRETERM530: the 530 vendor stream's pre-terminate DOUTAs */
 	uint32_t pds_empty_p;			/* pixel PDS program: run the empty task */
 	uint32_t clear_pds;			/* pixel PDS program: iterate colour, copy_fs */
 	uint32_t idx;				/* identity 16-bit index buffer */
