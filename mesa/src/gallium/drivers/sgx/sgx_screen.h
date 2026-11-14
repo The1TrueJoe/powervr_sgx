@@ -8,6 +8,7 @@
 
 #include "pipe/p_screen.h"
 #include "util/simple_mtx.h"
+#include "util/pb_slab.h"
 #include "util/slab.h"
 
 #include "sgxws.h"
@@ -36,6 +37,7 @@
 #define SGX_DEBUG_GLSL130            (1 << 20)
 #define SGX_DEBUG_NO_MRT             (1 << 21)
 #define SGX_DEBUG_UBO                (1 << 22)
+#define SGX_DEBUG_NO_VBO_SLABS       (1 << 23)
 
 extern uint32_t sgx_drv_debug;
 /* SGX_DUMP_CODE=dir: every compiled program's instructions written there */
@@ -75,6 +77,15 @@ struct sgx_screen {
       uint32_t seq;
    } retired[32];
    unsigned n_retired;
+
+   /* Small buffers' device copies, cut from slabs of device memory
+    * (sgx_buffer_vbo): a game that re-specifies its vertex buffer every draw
+    * (glBufferData, GL_STREAM_DRAW) made and freed a BO each, thousands a
+    * second (issue #5).  An entry freed is used again once the kick it was
+    * last read by is done: vbo_done, the done kick at the allocation */
+   struct pb_slabs vbo_slabs;
+   bool vbo_slabs_ok;
+   uint32_t vbo_done;
 
    /* kmsro: the display device scanout buffers are allocated on */
    bool zero_copy; /* sgxws_device_info.zero_copy, unless SGX_DEBUG=nozerocopy */
