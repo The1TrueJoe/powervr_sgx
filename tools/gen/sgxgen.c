@@ -686,8 +686,13 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 		die("SGX_REGISTER_HW_RENDER_CONTEXT failed: %d", e);
 #endif
 
-	ring_init(d, &c->usse_pix, H_PIXSHADER, 0x8000);
-	ring_init(d, &c->usse_vtx, H_VTXSHADER, 0x8000);
+	/* SGXGEN_CODE_RING: the code rings' size, and so (aligned to it) their window offset.
+	 * The 530's DOUTU offset reaches less than 32 KiB (board, 2026-11-15), so 0x4000
+	 * puts the code at window offset 0x4000. */
+	uint32_t code_ring = getenv("SGXGEN_CODE_RING") ? env_u32("SGXGEN_CODE_RING") : 0x8000;
+
+	ring_init(d, &c->usse_pix, H_PIXSHADER, code_ring);
+	ring_init(d, &c->usse_vtx, H_VTXSHADER, code_ring);
 	ring_init(d, &c->pds_pix, H_PDSPIXEL, 0x10000);
 	ring_init(d, &c->pds_vtx, H_PDSVERTEX, 0x10000);
 	ring_init(d, &c->gen, H_GENERAL, 0x40000);
