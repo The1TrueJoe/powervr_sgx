@@ -1204,6 +1204,8 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 		lead_done = 1;
 	}
 	/* the DDK's static state program: tst; bra; doutd; tst; bra; doutd; doutu */
+	/* SGXGEN_STATE_EMPTYTASK (below): the empty vertex task instead of the state emit
+	 * (bring-up probe: is a fault the MTE's, fed by the emit?) */
 	/* SGXGEN_STATE_NODMA: DS0[0] = 0, so the program's own tst/bra skips the DOUTD
 	 * (bring-up probe: does the PDS block in the DMA?) */
 	pds_d0(&p, 0, getenv("SGXGEN_STATE_NODMA") ? 0 : b.va);
@@ -1215,7 +1217,7 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 		pds_d0(&p, 1, dma_ctrl(dma_dwords, 0, kind, 1));
 	pds_d0(&p, 2, 0);
 	pds_d0(&p, 3, 0);
-	pds_d0(&p, 4, doutu_w0(c, c->state_emit[n], 1, 0) | (getenv("SGXGEN_STATE_BIT21") ? 0x200000 : 0));
+	pds_d0(&p, 4, doutu_w0(c, getenv("SGXGEN_STATE_EMPTYTASK") ? c->empty_v : c->state_emit[n], 1, 0) | (getenv("SGXGEN_STATE_BIT21") ? 0x200000 : 0));
 	pds_d0(&p, 5, 0);
 	CODE(&p, TST1(S1_DS0(0)));
 	CODE(&p, BRA_P0(6));
