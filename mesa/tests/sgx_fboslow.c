@@ -11,13 +11,15 @@
  * each round, for each size, 8 frames of a clear and one full-screen blended
  * quad with a glFlush after each, then a glFinish. EGL surfaceless, GLES 2.
  *
- * usage: sgx_fboslow [-z WxH,...] [-s mask] [-f frames] [-R k] [-C k] [rounds]
+ * usage: sgx_fboslow [-z WxH,...] [-s mask] [-f frames] [-R k] [-C k] [-D file] [rounds]
  *   -z sizes  up to five sizes of its own, in place of the five above
  *   -s mask   the sizes to draw, a bit each from the first (1) to the fifth (16);
  *             default all
  *   -f n      frames per size per round (default 8)
  *   -R k      delete the FBOs and their textures and make them again every k rounds
  *   -C k      a new GL context (and FBOs) every k rounds
+ *   -D file   after each round, the lines of file (a driver's debugfs status, say)
+ *             that name a DPM register
  *   rounds    default 30
  *
  * It prints the milliseconds a frame per size per round, the renders so far, the
@@ -195,6 +197,26 @@ drm_kb(void)
    return total;
 }
 
+/* the lines of path that name a DPM register, on one line */
+static void
+print_dpm(const char *path)
+{
+   char line[256];
+   FILE *f = fopen(path, "r");
+
+   if (!f)
+      return;
+   printf("    ");
+   while (fgets(line, sizeof(line), f)) {
+      if (strncmp(line, "DPM", 3))
+         continue;
+      line[strcspn(line, "\n")] = 0;
+      printf(" %s;", line);
+   }
+   printf("\n");
+   fclose(f);
+}
+
 static GLuint tex[NSIZES], fbo[NSIZES];
 
 static void
@@ -285,13 +307,14 @@ main(int argc, char **argv)
    static const EGLint ctx_attr[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
    unsigned mask = 31;
    int frames = 8, rounds = 30, refbo = 0, rectx = 0, opt, big = -1;
+   const char *dpm = NULL;
    double best[NSIZES], last[NSIZES];
    long renders = 0;
    EGLDisplay dpy;
    EGLContext ctx;
    bool fail = false;
 
-   while ((opt = getopt(argc, argv, "z:s:f:R:C:")) != -1) {
+   while ((opt = getopt(argc, argv, "z:s:f:R:C:D:")) != -1) {
       switch (opt) {
       case 'z': {
          char *p = optarg;
@@ -312,9 +335,10 @@ main(int argc, char **argv)
       case 'f': frames = atoi(optarg); break;
       case 'R': refbo = atoi(optarg); break;
       case 'C': rectx = atoi(optarg); break;
+      case 'D': dpm = optarg; break;
       default:
          fprintf(stderr, "usage: sgx_fboslow [-z WxH,...] [-s mask] [-f frames] [-R k] [-C k] "
-                         "[rounds]\n");
+                         "[-D file] [rounds]\n");
          return 2;
       }
    }
@@ -380,6 +404,8 @@ main(int argc, char **argv)
          printf("  %9.1f", last[s]);
       }
       printf("  %7ld  %9ld  %7ld\n", renders, shmem_kb(), drm_kb());
+      if (dpm)
+         print_dpm(dpm);
       fflush(stdout);
    }
 
