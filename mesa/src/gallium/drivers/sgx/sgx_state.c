@@ -247,20 +247,25 @@ sgx_create_blend_state(struct pipe_context *pctx,
    if (!so)
       return NULL;
    so->base = *cso;
-   if (cso->rt[0].blend_enable && !cso->logicop_enable) {
+   for (unsigned r = 0; r < (cso->independent_blend_enable ? SGX_BLEND_RTS : 1);
+        r++) {
+      const struct pipe_rt_blend_state *rt = &cso->rt[r];
+
+      if (!rt->blend_enable || cso->logicop_enable)
+         continue;
       /* the sop2 form, or the sopwm one where sop2's selectors can't say it
        * (SRC_ALPHA_SATURATE with the sources traded) */
       for (unsigned i = 0; i < 2; i++)
-         so->enable = blend_hw(&cso->rt[0], i, false, &so->hw[i]) ||
-                      blend_hw(&cso->rt[0], i, true, &so->hw[i]);
-      so->enable = so->enable && so->hw[0].blend && so->hw[1].blend;
-      if (!so->enable)
+         so->enable[r] = blend_hw(rt, i, false, &so->hw[r][i]) ||
+                         blend_hw(rt, i, true, &so->hw[r][i]);
+      so->enable[r] =
+         so->enable[r] && so->hw[r][0].blend && so->hw[r][1].blend;
+      if (!so->enable[r])
          fprintf(
             stderr,
             "sgx: blend (func %u/%u, factors %u %u %u %u) not drawn yet, drawing opaque\n",
-            cso->rt[0].rgb_func, cso->rt[0].alpha_func,
-            cso->rt[0].rgb_src_factor, cso->rt[0].rgb_dst_factor,
-            cso->rt[0].alpha_src_factor, cso->rt[0].alpha_dst_factor);
+            rt->rgb_func, rt->alpha_func, rt->rgb_src_factor,
+            rt->rgb_dst_factor, rt->alpha_src_factor, rt->alpha_dst_factor);
    }
    return so;
 }

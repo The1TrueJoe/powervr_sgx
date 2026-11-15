@@ -270,11 +270,14 @@ fs_writes_target(const struct sgx_context *ctx, unsigned t)
            BITFIELD64_BIT(FRAG_RESULT_DATA0 + t));
 }
 
-/* the bound colour mask of render target 0 */
+/* the bound colour mask of the render target being drawn (rt_index) */
 static unsigned
 colour_mask(const struct sgx_context *ctx)
 {
-   return ctx->blend ? ctx->blend->base.rt[0].colormask : PIPE_MASK_RGBA;
+   return ctx->blend
+             ? ctx->blend->base.rt[sgx_blend_rt(ctx->blend, ctx->rt_index)]
+                  .colormask
+             : PIPE_MASK_RGBA;
 }
 
 static void clear_one(struct pipe_context *pctx, unsigned buffers,
@@ -551,9 +554,7 @@ build_state(struct sgx_context *ctx, struct sgxws_state *st)
 {
    const struct pipe_rasterizer_state *rs =
       ctx->rasterizer ? &ctx->rasterizer->base : NULL;
-   unsigned mask = word_mask(
-      ctx, (ctx->blend ? ctx->blend->base.rt[0].colormask : PIPE_MASK_RGBA) &
-              target_mask(ctx));
+   unsigned mask = word_mask(ctx, colour_mask(ctx) & target_mask(ctx));
 
    memset(st, 0, sizeof(*st));
    st->depth_func = depth_func(ctx);
@@ -1833,17 +1834,16 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
    if (sgx_cbuf(ctx)->texture) {
       /* the colour epilogue: blend, then the colour mask (sgxws_blend) */
       bool has_alpha = util_format_has_alpha(sgx_cbuf(ctx)->format);
-      unsigned mask =
-         (ctx->blend ? ctx->blend->base.rt[0].colormask : PIPE_MASK_RGBA) &
-         target_mask(ctx);
+      unsigned mask = colour_mask(ctx) & target_mask(ctx);
+      unsigned br = sgx_blend_rt(ctx->blend, ctx->rt_index);
 
       enum pipe_format cf = sgx_cbuf(ctx)->format;
       bool int_rt = util_format_is_pure_integer(cf);
 
       /* an integer target isn't blended (GL); its packed word is masked by
        * byte, an R32 word being all of R */
-      if (ctx->blend && ctx->blend->enable && !int_rt)
-         epi = ctx->blend->hw[has_alpha];
+      if (ctx->blend && ctx->blend->enable[br] && !int_rt)
+         epi = ctx->blend->hw[br][has_alpha];
       if (int_rt && sgx_tex_raw32(cf))
          mask = word_mask(ctx, mask);
       else if (int_rt && !has_alpha)

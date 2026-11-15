@@ -227,6 +227,11 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    caps->constant_buffer_offset_alignment = 16;
    /* a pass a colour buffer (sgx_draw_vbo); SGX_DEBUG=nomrt for one */
    caps->max_render_targets = sgx_drv_debug & SGX_DEBUG_NO_MRT ? 1 : 4;
+   /* each target's pass has its own colour epilogue (sgx_blend_rt): its own
+    * blend and colour mask, GL_EXT_draw_buffers2 and
+    * GL_ARB_draw_buffers_blend (Portal and other Source games use
+    * glColorMaskIndexedEXT, issue #5) */
+   caps->indep_blend_enable = caps->indep_blend_func = true;
    /* 1.30 with SGX_DEBUG=glsl130 (native integers, EXT_texture_integer),
     * for the GL 3.0 work's tests on a board */
    caps->glsl_feature_level = caps->glsl_feature_level_compatibility =
