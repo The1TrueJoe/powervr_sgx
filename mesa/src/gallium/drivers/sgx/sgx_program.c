@@ -275,6 +275,42 @@ lower_txs_int(nir_builder *b, nir_tex_instr *tex)
    return true;
 }
 
+/* A 3D texture is one texel (max_texture_3d_levels = 1: the volume layout
+ * isn't the driver's yet, TEX.md section 14), kept as a 1x1 2D texture
+ * (sgx_resource), which every (s, t, r) reads whatever the wrap and filter:
+ * its samples become 2D ones at (s, t). Sizes and level counts keep the
+ * volume's (lower_txs). */
+static bool
+lower_tex_3d(nir_builder *b, nir_instr *instr, void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+
+   if (tex->sampler_dim != GLSL_SAMPLER_DIM_3D || tex->op == nir_texop_txs ||
+       tex->op == nir_texop_query_levels || tex->op == nir_texop_lod ||
+       tex->op == nir_texop_texture_samples)
+      return false;
+   b->cursor = nir_before_instr(instr);
+   for (unsigned i = 0; i < tex->num_srcs; i++) {
+      switch (tex->src[i].src_type) {
+      case nir_tex_src_coord:
+      case nir_tex_src_ddx:
+      case nir_tex_src_ddy:
+      case nir_tex_src_offset:
+         if (tex->src[i].src.ssa->num_components > 2)
+            nir_src_rewrite(&tex->src[i].src,
+                            nir_trim_vector(b, tex->src[i].src.ssa, 2));
+         break;
+      default:
+         break;
+      }
+   }
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->coord_components = 2;
+   return true;
+}
+
 /* textureSize (level 0) of a fragment program, which st's lowering of
  * rectangle lookups asks for (coords / textureSize): the size from driver
  * constants (SGX_K_TEXSIZE) the draw fills, as floats, where the program
@@ -527,6 +563,8 @@ assign_varyings(nir_shader *nir, struct sgx_varyings *vary, bool sprite)
       v->comp = frac;
       v->comps = comps;
       v->precision = var->data.precision;
+      v->noperspective =
+         var->data.interpolation == INTERP_MODE_NOPERSPECTIVE;
       if (split) {
          /* (whole numbers to 65535: an F32 iteration) */
          v->split = true;
@@ -608,7 +646,8 @@ same_varyings(const struct sgx_varyings *a, const struct sgx_varyings *b)
       const struct sgx_varying *x = &a->v[i], *y = &b->v[i];
 
       if (strcmp(x->name, y->name) || x->set != y->set || x->comp != y->comp ||
-          x->rows != y->rows || x->comps != y->comps)
+          x->rows != y->rows || x->comps != y->comps ||
+          x->noperspective != y->noperspective)
          return false;
    }
    return true;
@@ -628,9 +667,11 @@ struct prog_info {
       bool f16;       /* the texel returns F16, two registers from raw */
       bool fetch;     /* a texelFetch: state of its own (sgx_draw.c) */
       unsigned plane; /* an RG32 / RGBA32 unit's plane (channel) */
+      unsigned state; /* its texture state block */
       uint64_t smp;
    } deps[SGX_MAX_DEP_SAMPLES];
    unsigned n_deps;
+   unsigned n_states; /* texture state blocks (sgx_shader.n_dep_states) */
    unsigned branch_at[64]; /* flat indices of the branches */
    unsigned n_branches;
 };
@@ -737,8 +778,14 @@ read_program(const struct sgx_shader *out, struct sgx_pipe_shader *so,
       info->deps[info->n_deps].f16 = x->f16;
       info->deps[info->n_deps].fetch = x->fetch;
       info->deps[info->n_deps].plane = x->plane;
+      info->deps[info->n_deps].state = x->state;
+      if (x->state >= out->n_dep_states)
+         return info->why = "dependent sample without texture state", false;
       info->n_deps++;
    }
+   info->n_states = info->n_deps ? out->n_dep_states : 0;
+   if (info->n_states > SGX_MAX_DEP_STATES)
+      return info->why = "too many dependent texture states", false;
    for (unsigned i = 0; i < out->n_blocks; i++) {
       if (out->blocks[i].kind != SGX_BLOCK_BRANCH)
          continue;
@@ -1141,6 +1188,8 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
       if (srgb_filter)
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_srgb_filter,
                   nir_metadata_control_flow, &srgb_filter);
+      NIR_PASS(_, nir, nir_shader_instructions_pass, lower_tex_3d,
+               nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_lower_tex, &tex);
    }
    /* textureGrad, the Offset variants and texelFetch as smp can do them;
@@ -1165,6 +1214,18 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
 
       vary = *fs_vary;
       vary.point_size = sprite || psize;
+      /* Interpolation is the fragment shader's to say: a TGSI vertex
+       * shader's outputs (u_blitter's, st's) carry none, and one left
+       * perspective under a noperspective input never wrote the w the
+       * fragment shader divides by, so every pixel read the same texel (a
+       * blit from an FBO to the window one colour: OpenArena's
+       * renderer_opengl2, issue #5) */
+      nir_foreach_shader_out_variable (var, nir) {
+         for (unsigned i = 0; var->name && i < fs_vary->n; i++)
+            if (fs_vary->v[i].noperspective &&
+                !strcmp(var->name, fs_vary->v[i].name))
+               var->data.interpolation = INTERP_MODE_NOPERSPECTIVE;
+      }
    }
    so->reads_pointcoord =
       nir->info.stage == MESA_SHADER_FRAGMENT && vary.point_size;
@@ -1281,7 +1342,7 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
        * don't fit to memory (mem_dwords), so this only catches a program
        * whose SA use still runs past (a guard, not drawn). */
       unsigned end = (vertex ? 10 : 9) + MAX2(so->const_dwords, out.sa_slots) +
-                     (vertex ? 0 : 4 * info.n_deps);
+                     (vertex ? 0 : 4 * info.n_states);
 
       if (end > 128) {
          fprintf(
@@ -1345,11 +1406,11 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
       if (info.n_deps) {
          unsigned sa[SGX_MAX_DEP_SAMPLES], n;
 
-         if (MAX2(so->const_dwords, out.sa_slots) + 4 * info.n_deps >
+         if (MAX2(so->const_dwords, out.sa_slots) + 4 * info.n_states >
              SGX_MAX_CONSTS) {
             fprintf(stderr,
-                    "sgx: %u SA slots and %u dependent samples: not drawn\n",
-                    out.sa_slots, info.n_deps);
+                    "sgx: %u SA slots and %u dependent texture states: not drawn\n",
+                    out.sa_slots, info.n_states);
             simple_mtx_unlock(&screen->lock);
             sgx_shader_free(&out);
             ralloc_free(nir);
@@ -1361,16 +1422,21 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
             SGX_DBG(NIR, "fragment program: %u SA slots, %u in list C\n",
                     out.sa_slots, so->const_dwords);
          so->const_dwords = MAX2(so->const_dwords, out.sa_slots);
+         /* one block of 4 words per texture state, the dependent samples
+          * that share it reading the same registers */
+         for (unsigned k = 0; k < info.n_states; k++)
+            so->dep_sa[k] = 9 + so->const_dwords + 4 * k;
          for (unsigned j = 0; j < info.n_deps; j++) {
-            so->dep_sa[j] = 9 + so->const_dwords + 4 * j;
-            so->dep_sampler[j] = info.deps[j].sampler;
-            so->dep_f16[j] = info.deps[j].f16;
-            so->dep_fetch[j] = info.deps[j].fetch;
-            so->dep_plane[j] = info.deps[j].plane;
-            sa[j] = so->dep_sa[j];
+            unsigned k = info.deps[j].state;
+
+            so->dep_sampler[k] = info.deps[j].sampler;
+            so->dep_f16[k] = info.deps[j].f16;
+            so->dep_fetch[k] = info.deps[j].fetch;
+            so->dep_plane[k] = info.deps[j].plane;
+            sa[j] = so->dep_sa[k];
          }
-         so->n_deps = info.n_deps;
-         so->const_dwords += 4 * info.n_deps;
+         so->n_deps = info.n_states;
+         so->const_dwords += 4 * info.n_states;
          if (out.n_code1) {
             /* each phase's dependent samples into its own block */
             struct prog_info i0 = info, i1 = info;

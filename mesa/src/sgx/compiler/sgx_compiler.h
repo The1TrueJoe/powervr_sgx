@@ -154,6 +154,11 @@ struct sgx_varying {
     * low ones in set + 2 * row, the high ones in the next (rows counts
     * both) */
    bool split;
+   /* noperspective in the stage the layout came from (the gallium driver's
+    * fragment layouts): a vertex shader compiled to it writes v * w and w
+    * (SGX_NOPERSPECTIVE_W) though its own output doesn't say noperspective,
+    * as a TGSI vertex shader's never do */
+   bool noperspective;
 };
 
 /* noperspective: the vertex shader writes v * w (gl_Position.w) and w
@@ -241,6 +246,11 @@ struct sgx_sample_info {
    /* dependent: a tex_r32x4 / tex_r32x2 unit's plane (channel), 0-3; the
     * driver's state addresses that plane */
    uint8_t plane;
+   /* dependent: its texture state block, 0 .. n_dep_states - 1. Dependent
+    * samples that read a unit the same way (sampler, f16, fetch, plane)
+    * share one; the driver puts block k's four words in SA after the
+    * constants, at 4k on */
+   uint8_t state;
    uint64_t smp; /* dependent: the smp, destination r0, texture state #0 */
 };
 
@@ -262,7 +272,9 @@ struct sgx_block {
    unsigned at, n;
 };
 
-#define SGX_MAX_SAMPLES 16
+/* texture reads a program may make (a game's post-processing pass: a blur's
+ * taps, each effect's own reads under a uniform branch) */
+#define SGX_MAX_SAMPLES 256
 
 struct sgx_shader {
    unsigned stage; /* MESA_SHADER_VERTEX / _FRAGMENT */
@@ -307,6 +319,9 @@ struct sgx_shader {
    unsigned n_code;
    unsigned n_samples;
    struct sgx_sample_info samples[SGX_MAX_SAMPLES];
+   /* fragment: the dependent samples' texture state blocks (4 SA dwords
+    * each, after sa_slots) */
+   unsigned n_dep_states;
    struct sgx_block *blocks;
    unsigned n_blocks;
    /* split_phases: phase 1's program and its blocks (0: one block) */

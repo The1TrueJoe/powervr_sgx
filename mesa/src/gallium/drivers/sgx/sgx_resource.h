@@ -26,6 +26,8 @@ struct sgx_tex_copy {
 
 #define SGX_TEX_SPARES_MAX 15
 
+struct sgx_vbo_entry;
+
 struct sgx_resource {
    struct pipe_resource base;
 
@@ -51,6 +53,8 @@ struct sgx_resource {
     * vbo_seq is the last kick that reads it */
    struct sgxws_bo vbo;
    uint32_t vbo_seq;
+   /* vbo is this slab entry's (sgx_screen.vbo_slabs), not a BO of its own */
+   struct sgx_vbo_entry *vbo_entry;
    /* write maps open (a stream uploader keeps its buffer mapped while it
     * writes more into it: sgx_buffer_vbo) */
    unsigned write_maps;
@@ -125,6 +129,7 @@ struct sgx_transfer {
 };
 
 void sgx_resource_screen_init(struct sgx_screen *screen);
+void sgx_resource_screen_fini(struct sgx_screen *screen);
 /* with the screen lock held: a buffer's device copy, made if need be */
 bool sgx_buffer_vbo(struct sgx_context *ctx, struct sgx_resource *res,
                     uint32_t off, uint32_t size);

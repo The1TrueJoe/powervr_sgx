@@ -847,10 +847,17 @@ native border mode, if the replays find one, replaces it.
   it). The DDK's desktop GL lists `EXT_texture3D`. The DDK's ES2 doesn't
   list `OES_texture_3D` (**capture**, `PROBE_EXTS=1`, 2026-11-11), so no ES2
   capture can show a volume; the step 3 tests below are the evidence.
-- **The open driver has none:** `caps->max_texture_3d_levels = 0`, and
-  `sgx_resource.c` gives a PIPE_TEXTURE_3D no device copy. Mesa still
-  advertises GL 2.1, since its version check doesn't look at 3D levels below
-  4.1. GL 1.2 makes them core, and 35 piglit tests fail.
+- **The open driver has one-texel volumes only:** `caps->max_texture_3d_levels
+  = 1`, so GL_MAX_3D_TEXTURE_SIZE is 1. A 3D texture of one slice gets a
+  device copy laid out as a 2D texture's (`sgx_resource.c`), and the driver
+  turns its samples into 2D ones at (s, t) (`sgx_program.c` lower_tex_3d),
+  which read the one texel whatever the wrap, filter or r. That much is for
+  programs that make 1x1x1 textures and never sample a real volume: wined3d
+  makes them at start-up for its unbound units, and with 0 levels every
+  glTexImage3D failed (GTA Vice City under Wine, issue #5). Mesa advertises
+  GL 2.1 either way, since its version check doesn't look at 3D levels below
+  4.1. GL 1.2 makes volumes core, and the piglit tests that need bigger ones
+  still fail.
 - **The sample instruction.** `smp` dimension 2 is "3D". The vendor
   assembler accepts it, and the DDK's compiler uses it for samplerCube (ISA.md,
   hw 1c: **oracle**, corpus). A volume sample is likely dim 2 as well, with

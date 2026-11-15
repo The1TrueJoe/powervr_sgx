@@ -216,7 +216,10 @@ sgx_resource_create(struct pipe_screen *pscreen,
    if (!res->data)
       goto fail;
    /* (a depth buffer that isn't sampled has none: the ISP keeps depth) */
-   if (sgx_tex_format(templ->format) && templ->target != PIPE_TEXTURE_3D &&
+   /* (a 3D texture of one slice is laid out and sampled as a 2D one:
+    * max_texture_3d_levels, lower_tex_3d) */
+   if (sgx_tex_format(templ->format) &&
+       (templ->target != PIPE_TEXTURE_3D || templ->depth0 == 1) &&
        templ->last_level < ARRAY_SIZE(res->level_offset) &&
        (!sgx_tex_depth(templ->format) ||
         (templ->bind & PIPE_BIND_SAMPLER_VIEW))) {
@@ -449,6 +452,110 @@ vbo_retire(struct sgx_screen *screen, struct sgxws_bo *bo, uint32_t seq)
    }
 }
 
+/*
+ * Small buffers' device copies come from slabs (sgx_screen.vbo_slabs), one
+ * BO cut into entries of a power-of-two size, 64 bytes to 64 KiB.  Past an
+ * entry's end is the next entry, or the slab's spare page past its last:
+ * mapped, for the vertex DMA's and the VDM's reads past the end.  An entry
+ * freed goes back once the GPU is done with the kick that last read it.
+ */
+#define VBO_SLAB_MIN_ORDER 6
+#define VBO_SLAB_MAX_ORDER 16
+#define VBO_SLAB_BYTES     (128u << 10)
+
+struct sgx_vbo_entry {
+   struct pb_slab_entry base;
+   uint32_t offset; /* in the slab's BO */
+   uint32_t seq;    /* the last kick that reads it, once freed */
+};
+
+struct sgx_vbo_slab {
+   struct pb_slab base;
+   struct sgxws_bo bo;
+   struct sgx_vbo_entry *entries;
+};
+
+static bool
+vbo_can_reclaim(void *priv, struct pb_slab_entry *entry)
+{
+   struct sgx_screen *screen = priv;
+   const struct sgx_vbo_entry *e = (const struct sgx_vbo_entry *)entry;
+
+   return !screen->hw || !sgxws_seq_after(e->seq, screen->vbo_done);
+}
+
+/* (called with the screen lock held: from pb_slab_alloc and pb_slab_free) */
+static struct pb_slab *
+vbo_slab_alloc(void *priv, unsigned heap, unsigned entry_size,
+               unsigned group_index)
+{
+   struct sgx_screen *screen = priv;
+   struct sgx_vbo_slab *slab = CALLOC_STRUCT(sgx_vbo_slab);
+   unsigned n = MAX2(VBO_SLAB_BYTES / entry_size, 4);
+
+   if (!slab)
+      return NULL;
+   slab->entries = calloc(n, sizeof(*slab->entries));
+   if (!slab->entries ||
+       sgxws_bo_alloc(screen->dev, &slab->bo, SGXWS_MEM_VERTEX,
+                      n * entry_size + 4096, 0x1000)) {
+      free(slab->entries);
+      FREE(slab);
+      return NULL;
+   }
+   slab->base.num_entries = slab->base.num_free = n;
+   slab->base.group_index = group_index;
+   slab->base.entry_size = entry_size;
+   list_inithead(&slab->base.free);
+   for (unsigned i = 0; i < n; i++) {
+      slab->entries[i].base.slab = &slab->base;
+      slab->entries[i].offset = i * entry_size;
+      list_addtail(&slab->entries[i].base.head, &slab->base.free);
+   }
+   return &slab->base;
+}
+
+/* (every entry is back: the GPU is done with them) */
+static void
+vbo_slab_free(void *priv, struct pb_slab *pslab)
+{
+   struct sgx_screen *screen = priv;
+   struct sgx_vbo_slab *slab = (struct sgx_vbo_slab *)pslab;
+
+   sgxws_bo_free(screen->dev, &slab->bo);
+   free(slab->entries);
+   FREE(slab);
+}
+
+void
+sgx_resource_screen_fini(struct sgx_screen *screen)
+{
+   if (!screen->vbo_slabs_ok)
+      return;
+   simple_mtx_lock(&screen->lock);
+   if (screen->hw)
+      sgxws_wait_idle(screen->hw, 2000);
+   pb_slabs_deinit(&screen->vbo_slabs);
+   screen->vbo_slabs_ok = false;
+   simple_mtx_unlock(&screen->lock);
+}
+
+/* A buffer's device copy that renders may still read goes: a slab entry
+ * back to its slab (used again once they're done), a BO of its own to
+ * vbo_retire (screen lock held) */
+static void
+vbo_release(struct sgx_screen *screen, struct sgx_resource *res)
+{
+   if (res->vbo_entry) {
+      res->vbo_entry->seq = res->vbo_seq;
+      pb_slab_free(&screen->vbo_slabs, &res->vbo_entry->base);
+      res->vbo_entry = NULL;
+      memset(&res->vbo, 0, sizeof(res->vbo));
+      return;
+   }
+   vbo_retire(screen, &res->vbo, res->vbo_seq);
+}
+
 /* The buffer's device copy for a draw that reads bytes [off, off + size) of
  * it (screen lock held).  Unmaps copy what was written, so a copy is current
  * unless the buffer is mapped for writes still (a stream uploader writes more
@@ -471,6 +578,26 @@ sgx_buffer_vbo(struct sgx_context *ctx, struct sgx_resource *res, uint32_t off,
          memcpy((uint8_t *)res->vbo.map + off, (const uint8_t *)res->data + off,
                 size);
       return true;
+   }
+   /* a small one from a slab */
+   if (screen->vbo_slabs_ok &&
+       res->base.width0 <= (1u << VBO_SLAB_MAX_ORDER)) {
+      struct pb_slab_entry *pe;
+
+      screen->vbo_done =
+         screen->hw ? sgxws_done_seq(screen->hw) : screen->vbo_done;
+      pe = pb_slab_alloc(&screen->vbo_slabs, MAX2(res->base.width0, 16), 0);
+      if (pe) {
+         struct sgx_vbo_entry *e = (struct sgx_vbo_entry *)pe;
+         struct sgx_vbo_slab *slab = (struct sgx_vbo_slab *)pe->slab;
+
+         res->vbo_entry = e;
+         res->vbo = slab->bo;
+         res->vbo.va += e->offset;
+         res->vbo.map = (uint32_t *)((uint8_t *)slab->bo.map + e->offset);
+         memcpy(res->vbo.map, res->data, res->base.width0);
+         return true;
+      }
    }
    /* past the end, a page the vertex DMA and the VDM's index reads may run
     * into */
@@ -545,7 +672,7 @@ sgx_resource_destroy(struct pipe_screen *pscreen, struct pipe_resource *prsc)
    }
    if (sgxws_bo_valid(&res->vbo)) {
       simple_mtx_lock(&screen->lock);
-      vbo_retire(screen, &res->vbo, res->vbo_seq);
+      vbo_release(screen, res);
       simple_mtx_unlock(&screen->lock);
    }
    if (res->scanout)
@@ -916,7 +1043,7 @@ sgx_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
             simple_mtx_lock(&screen->lock);
             if (screen->hw &&
                 sgxws_seq_after(res->vbo_seq, sgxws_done_seq(screen->hw)))
-               vbo_retire(screen, &res->vbo, res->vbo_seq);
+               vbo_release(screen, res);
             simple_mtx_unlock(&screen->lock);
          }
       }
@@ -1197,6 +1324,11 @@ sgx_resource_screen_init(struct sgx_screen *screen)
    screen->base.resource_create = sgx_resource_create;
    screen->base.resource_from_user_memory = sgx_resource_from_user_memory;
    screen->base.resource_destroy = sgx_resource_destroy;
+   screen->vbo_slabs_ok =
+      !(sgx_drv_debug & SGX_DEBUG_NO_VBO_SLABS) &&
+      pb_slabs_init(&screen->vbo_slabs, VBO_SLAB_MIN_ORDER, VBO_SLAB_MAX_ORDER,
+                    1, false, screen, vbo_can_reclaim, vbo_slab_alloc,
+                    vbo_slab_free);
    if (sgxws_dev_has_dmabuf(screen->dev)) {
       screen->base.resource_from_handle = sgx_resource_from_handle;
       screen->base.resource_get_handle = sgx_resource_get_handle;
