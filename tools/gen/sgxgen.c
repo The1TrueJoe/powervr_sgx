@@ -1208,7 +1208,19 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	uint32_t rows, va;
 
 	memcpy(b.p, blk, n * 4);
-	if (!c->state_emit[n])
+	/* SGXGEN_STATE_PTR (bring-up probe, SGX530): the MTE takes the first emitted word
+	 * as an address, so emit one word, the block's address, and let it fetch the block */
+	if (getenv("SGXGEN_STATE_PTR")) {
+		struct sgx_ptr q = ring_alloc(&c->pds_vtx, 16, DMA_ALIGN);
+
+		memset(q.p, 0, 16);
+		q.p[0] = b.va + env_u32("SGXGEN_STATE_PTR_ADD");
+		b = q;
+		dma_dwords = 1;
+		kind = 0;
+		if (!c->state_emit[1])
+			c->state_emit[1] = usse_load(c, usse_state_emit[1], 1);
+	} else if (!c->state_emit[n])
 		c->state_emit[n] = usse_load(c, usse_state_emit[n], 1);
 	/* Bring-up probes (SGX530), once per run, ahead of the first state program:
 	 * SGXGEN_LEAD_EMPTY an empty update (DOUTU of the empty vertex task),
@@ -1245,7 +1257,8 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	pds_d0(&p, 3, 0);
 	/* SGXGEN_DOUTU_B4: b4, set in every 530 vendor DOUTU of a task that emits to the MTE
 	 * (0x00200f1a, 0x0020111a, 0x00201a1a, 0x0000281a) and in none of the others */
-	pds_d0(&p, 4, doutu_w0(c, getenv("SGXGEN_STATE_EMPTYTASK") ? c->empty_v : c->state_emit[n], 1, 0) |
+	pds_d0(&p, 4, doutu_w0(c, getenv("SGXGEN_STATE_EMPTYTASK") ? c->empty_v :
+			       c->state_emit[getenv("SGXGEN_STATE_PTR") ? 1 : n], 1, 0) |
 		      (getenv("SGXGEN_STATE_BIT21") ? 0x200000 : 0) | (getenv("SGXGEN_DOUTU_B4") ? 0x10 : 0));
 	pds_d0(&p, 5, 0);
 	CODE(&p, TST1(S1_DS0(0)));
