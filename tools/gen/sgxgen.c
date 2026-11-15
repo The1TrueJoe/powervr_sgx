@@ -1169,6 +1169,10 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	CODE(&p, MOVS(MV, 2, 0, 0, 1, 2, 0, DOUTU));
 	CODE(&p, HALT);
 	va = pds_emit(&c->pds_vtx, &p, &rows);
+	/* SGXGEN_VDM_PDS_ADD: bytes added to the state program's address in the VDM word
+	 * (bring-up probe: point the PDS at an unmapped page to see whether its fetch faults) */
+	if (getenv("SGXGEN_VDM_PDS_ADD"))
+		va += env_u32("SGXGEN_VDM_PDS_ADD");
 	vdm(c, 0x40000000 | vdm_pds(c, va));
 	/* info: rows, the rotating buffer index + 0x2000, 0x2020400, dwords */
 	/* SGXGEN_VDMINFO530: the 530 vendor stream's low bits, 0x2a200 | dwords */
