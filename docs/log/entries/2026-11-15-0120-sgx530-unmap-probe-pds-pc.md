@@ -282,3 +282,21 @@ this session's scope.
 window < 32 KiB). The kernel spaces code bases 512 KiB apart and code objects can sit
 anywhere in that window, so the 530 needs a per-core window: kernel code-base spacing,
 UPLOAD_CODE placement, and the DOUTU encoders in sgxgen and Mesa.
+
+## Follow-up 22:23 UTC: the per-core window fix on the board, no knobs
+
+Modules and frame tool from 5c9de4ec (7.3.3), image `sgx530_inv23`, the 530 client knobs
+(`DMA530` … `PDS_TIGHT`), **no `DOUTU530`, no `CODE_RING`**. sgxgen reports "code window
+2^15, DOUTU offset in bytes" from DEV_QUERY.
+
+| variant | result |
+|---|---|
+| `STATE_INFO=0x16100`, device-driven | runs, fault at 0xd000 (BIF 0x4002), as with the knobs |
+| `STATE_INFO=0x16100`, `DOUTU530` + `CODE_RING=0x4000` (control) | the same |
+| default 0x2a200, device-driven | waits at the state program; EVENT_STATUS2 0x10, 0xb10 +3, PDS_PC 0x0020048c |
+
+So the kernel's per-core window and the cap reproduce the probe knobs exactly (C). No frame.
+
+**Hazard:** reading the SGX register file through `/dev/mem` while the GPU is idle after
+insmod (runtime-suspended, clocks off) hung the SoC and it rebooted. Sample the register
+file only while the driver holds the GPU powered (mid-job), or through debugfs `status`.
