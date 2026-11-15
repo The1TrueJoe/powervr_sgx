@@ -131,6 +131,16 @@ MODULE_PARM_DESC(edm_init, "Start the open microkernel via the §9 launch folded
 static unsigned int probe_a74;
 module_param(probe_a74, uint, 0444);
 MODULE_PARM_DESC(probe_a74, "Bring-up (SGX530): value written to 0xa74 at init instead of the script's (default 0, off)");
+static unsigned int probe_a58, probe_clkgate;
+module_param(probe_a58, uint, 0444);
+MODULE_PARM_DESC(probe_a58, "Bring-up (SGX530): event PDS enable value instead of the core's (default 0, off)");
+module_param(probe_clkgate, uint, 0444);
+MODULE_PARM_DESC(probe_clkgate, "Bring-up (SGX530): CLKGATECTL value at start instead of the core's (default 0, off)");
+
+static bool probe_530(struct pvrsgx_device *sdev, unsigned int v)
+{
+	return v && sdev->family->core == 530;
+}
 
 static u32 *fw_words(struct pvrsgx_device *sdev, enum pvrsgx_fw_buf b)
 {
@@ -599,7 +609,8 @@ static int init_script_part2(struct pvrsgx_device *sdev)
 	err = check_event_pds(sdev);
 	if (err)
 		return err;
-	sgx_wr(sdev, cr->event_pds_enable, cr->event_pds_enable_all);
+	sgx_wr(sdev, cr->event_pds_enable,
+	       probe_530(sdev, probe_a58) ? probe_a58 : cr->event_pds_enable_all);
 	return 0;
 }
 
@@ -680,7 +691,7 @@ int pvrsgx_fw_start(struct pvrsgx_device *sdev)
 	mutex_unlock(&sdev->ccb_lock);
 
 	/* Every unit's clock gated automatically, but the DPM's: it stays on. */
-	sgx_wr(sdev, SGX_CR_CLKGATECTL,
+	sgx_wr(sdev, SGX_CR_CLKGATECTL, probe_530(sdev, probe_clkgate) ? probe_clkgate :
 	       (SGX_CLKG_ALL(cr->clkgatectl_units, SGX_CLKG_AUTO) & ~cr->clkgatectl_dpm) |
 	       field_prep(cr->clkgatectl_dpm, SGX_CLKG_ON));
 	sgx_wr_opt(sdev, cr->clkgatectl2, SGX_CLKG_ALL(cr->clkgatectl2_units, SGX_CLKG_AUTO));
