@@ -1217,7 +1217,10 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 		pds_d0(&p, 1, dma_ctrl(dma_dwords, 0, kind, 1));
 	pds_d0(&p, 2, 0);
 	pds_d0(&p, 3, 0);
-	pds_d0(&p, 4, doutu_w0(c, getenv("SGXGEN_STATE_EMPTYTASK") ? c->empty_v : c->state_emit[n], 1, 0) | (getenv("SGXGEN_STATE_BIT21") ? 0x200000 : 0));
+	/* SGXGEN_DOUTU_B4: b4, set in every 530 vendor DOUTU of a task that emits to the MTE
+	 * (0x00200f1a, 0x0020111a, 0x00201a1a, 0x0000281a) and in none of the others */
+	pds_d0(&p, 4, doutu_w0(c, getenv("SGXGEN_STATE_EMPTYTASK") ? c->empty_v : c->state_emit[n], 1, 0) |
+		      (getenv("SGXGEN_STATE_BIT21") ? 0x200000 : 0) | (getenv("SGXGEN_DOUTU_B4") ? 0x10 : 0));
 	pds_d0(&p, 5, 0);
 	CODE(&p, TST1(S1_DS0(0)));
 	CODE(&p, BRA_P0(6));
@@ -1266,6 +1269,8 @@ static void vdm_draw(struct sgx_ctx *c, uint32_t prim, uint32_t count, uint32_t 
 	 * probe: is a fault the vertex program's or the TA's behind it?) */
 	if (getenv("SGXGEN_DRAW_EMPTYVS"))
 		vs_w0 = doutu_w0(c, c->empty_v, 1, 0);
+	if (getenv("SGXGEN_DOUTU_B4"))
+		vs_w0 |= 0x10;
 	pds_d0(&p, 0, vb);
 	pds_d0(&p, 1, attr_dwords - 1);		/* DOUTD: dwords-1, attribute register 0 */
 	pds_d1(&p, 0, stride);
