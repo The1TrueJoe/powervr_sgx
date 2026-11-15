@@ -195,3 +195,23 @@ task did. It doesn't, with or without its DMA (`SGXGEN_STATE_NODMA`, whose DS0[0
 its own `tst; bra` skip the DOUTD). The PC still sits on that program. The programs that
 ran carried info form 0x16100; this one carries the TA-block form 0x2a200 (the vendor's, for
 its first program too). Next: `SGXGEN_STATE_INFO` (efc7ec99) overrides that form.
+
+## Follow-up 02:55-03:00 UTC: with the code in the window and the 0x16100 form, the TA moves on
+
+With `SGXGEN_CODE_RING=0x4000` the code rings sit at window offset 0x4000 (0x0fc04000,
+0x0f404000), and with `SGXGEN_DOUTU530` their tasks are reachable:
+
+| variant | result |
+|---|---|
+| LEAD_EMPTY | the empty task **runs without a fault**; PC on to the clear program (0x0e001230), which stalls as before |
+| plain | the clear program stalls (form 0x2a200) |
+| `SGXGEN_STATE_INFO=0x16100` | **the clear program runs**: PC on to the clear draw's vertex fetch at 0x0e001280 (PC 0x002004ac). Then a **page fault at 0x0000d000**, requestor b1 (BIF status 0x4002) |
+| + STATE_PRIMARY + VSEC530 | the same: vertex fetch, fault at 0x0000d000 |
+
+So on our stack, the TA-block info form (0x2a200, which the vendor stream uses for its own
+first program) holds the PDS before the program starts. The secondary-DMA form lets it run.
+What the 0x2a200 form waits for is open. The vertex fetch program is DOUTD (0x01801900,
+ctrl 3) with the vendor's code and DOUTU at window offset 0x4180. Something then reads
+0xd000, which is mapped in no heap. It is not `BIF_TA_REQ_BASE`-relative: that register is
+set (0x08400000) and named in the GPL 530 header. Next: shift the gen ring
+(`SGXGEN_GEN_PAD`, 3e00e344) to see whether the fault follows the vertex/index data.
