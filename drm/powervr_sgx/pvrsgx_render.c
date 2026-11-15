@@ -340,6 +340,11 @@ static unsigned int pvrsgx_ta_revert;
 module_param_named(ta_revert, pvrsgx_ta_revert, uint, 0444);
 MODULE_PARM_DESC(ta_revert, "Bring-up: use the SGX545's TA command values (b0 tiles, b1 screen, b2 TE AA, b3 VDM ctl; default 0)");
 
+/* Bring-up: a VDM control word (the TA command's, written to 0x23c) in place of the core's. */
+static unsigned int pvrsgx_probe_vdm_ctl;
+module_param_named(probe_vdm_ctl, pvrsgx_probe_vdm_ctl, uint, 0444);
+MODULE_PARM_DESC(probe_vdm_ctl, "Bring-up: VDM control word for every TA kick instead of the core's (default 0, off)");
+
 static u32 core_tile_w_log2(const struct pvrsgx_core_family *f)
 {
 	return pvrsgx_ta_revert & BIT(0) ? 5 : f->tile_w_log2;
@@ -894,7 +899,7 @@ int pvrsgx_render_job_build(struct pvrsgx_job *job, u32 k, u32 data[6])
 	cmd->mt_tiles = s->n.mt_tiles;
 	cmd->ta_flags2 = rj->kick[k].sgx545_ta_kick.ta_flags2 | (last ? PVRSGX_TA2_RENDER : 0);
 	cmd->vdm_base = (u32)rj->kick[k].base.vdm_base;
-	cmd->vdm_ctl = pvrsgx_ta_revert & BIT(3) ? 0xa2 : fam->vdm_ctl;
+	cmd->vdm_ctl = pvrsgx_probe_vdm_ctl ?: pvrsgx_ta_revert & BIT(3) ? 0xa2 : fam->vdm_ctl;
 	cmd->region_headers = rgn_this;
 	cmd->tail_pointers = kobj_va(s->tailptr);
 	cmd->eps[0] = F32_1E_6;
