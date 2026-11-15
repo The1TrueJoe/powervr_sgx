@@ -177,7 +177,14 @@ def to530(lines):
 def NOPHAS(lines):
     if os.environ.get("MKUSSE_530_PHAS"):
         return lines
-    return [ln for ln in lines if not ln.startswith("phas.i")]
+    out = [ln for ln in lines if not ln.startswith("phas.i")]
+    last = max(i for i, ln in enumerate(out) if not ln.endswith(":"))
+    for i, ln in enumerate(out):     # one phase: only the last instruction ends it
+        if i != last and "[" in ln:
+            head, flags = ln.split("[", 1)
+            f = [x for x in flags.rstrip("]").split() if x != "end"]
+            out[i] = head.rstrip() + (f" [{' '.join(f)}]" if f else "")
+    return out
 
 
 EMIT530 = []
