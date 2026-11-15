@@ -28,6 +28,12 @@
  *            between draws, every texel checked; the time an update takes
  *   drawbuffers2  four colour buffers, a colour mask each for a clear and a
  *            draw, blending on one: GL_EXT_draw_buffers2, ARB_draw_buffers_blend
+ *   copyx    an RGB FBO, and then the default framebuffer, green with alpha 0
+ *            written, copied into an RGBA texture with glCopyTexSubImage2D and
+ *            drawn blended (SRC_ALPHA) over red: an RGB source's alpha is 1, so
+ *            green, unless the framebuffer has alpha (red) (Minecraft's
+ *            title-screen panorama copies its XRGB window this way: run it with
+ *            SGX_GAMEFIX_RGBX=1)
  *   bigfbo   blended full-target frames into 2048x1200 and 1448x848 FBOs: the
  *            time a frame takes (run it and look for job timeouts)
  *
@@ -74,7 +80,7 @@ L(const char *n)
    X(glClear)                                                                  \
    X(glClearColor)                                                             \
    X(glClearDepth)                                                             \
-   X(glCompileShader)                                                          \
+   X(glCompileShader) X(glCopyTexSubImage2D)                                                          \
    X(glCreateProgram)                                                          \
    X(glCreateShader)                                                           \
    X(glDeleteBuffers)                                                          \
@@ -597,6 +603,102 @@ blit_part(const char *name)
    }
 }
 
+/* glCopyTexSubImage2D from an RGB (X8) framebuffer into an RGBA texture: the
+ * copy's alpha is 1 (GL), whatever the X byte holds */
+static void
+want_green(unsigned x, unsigned y, float c[4])
+{
+   (void)x;
+   (void)y;
+   c[0] = 0;
+   c[1] = 255;
+   c[2] = 0;
+   c[3] = 255;
+}
+
+static bool copyx_red;
+
+static void
+want_copyx(unsigned x, unsigned y, float c[4])
+{
+   want_green(x, y, c);
+   if (copyx_red) {
+      c[0] = 255;
+      c[1] = 0;
+   }
+}
+
+/* the bound texture filled from the bound read framebuffer, then drawn over red */
+static void
+copyx_draw(GLuint p, GLuint dst, const char *name)
+{
+   glBindTexture_(GL_TEXTURE_2D, dst);
+   glCopyTexSubImage2D_(GL_TEXTURE_2D, 0, 0, 0, 0, 0, S, S);
+   glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+   glViewport_(0, 0, S, S);
+   glClearColor_(1, 0, 0, 1);
+   glClear_(GL_COLOR_BUFFER_BIT);
+   glUniform1i_(glGetUniformLocation_(p, "t"), 0);
+   glUniform1f_(glGetUniformLocation_(p, "a"), -1.0f);
+   glEnable_(GL_BLEND);
+   glBlendFunc_(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+   fullscreen();
+   glDisable_(GL_BLEND);
+   result(name, check(name, want_copyx, 1), S * S);
+}
+
+static void
+copyx(void)
+{
+   const char *fs = "#version 110\n"
+                    "uniform sampler2D t;\n"
+                    "uniform float a;\n"
+                    "varying vec2 uv;\n"
+                    "void main() {\n"
+                    "   gl_FragColor = a < 0.0 ? texture2D(t, uv) : vec4(0.0, 1.0, 0.0, a);\n"
+                    "}\n";
+   GLuint fb, src, dst;
+   GLuint p = program(vs_uv, fs);
+
+   glGenFramebuffers_(1, &fb);
+   glBindFramebuffer_(GL_FRAMEBUFFER, fb);
+   glGenTextures_(1, &src);
+   glBindTexture_(GL_TEXTURE_2D, src);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGB8, S, S, 0, GL_RGB, GL_UNSIGNED_BYTE,
+                 NULL);
+   glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           src, 0);
+   if (glCheckFramebufferStatus_(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+      printf("copyx: RGB framebuffer incomplete\n");
+   glViewport_(0, 0, S, S);
+   /* green, its alpha 0 cleared and drawn: what lands in the X byte */
+   glClearColor_(0, 1, 0, 0);
+   glClear_(GL_COLOR_BUFFER_BIT);
+   glUniform1f_(glGetUniformLocation_(p, "a"), 0.0f);
+   fullscreen();
+
+   glGenTextures_(1, &dst);
+   glBindTexture_(GL_TEXTURE_2D, dst);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 NULL);
+   copyx_red = false;
+   copyx_draw(p, dst, "copyx fbo");
+
+   /* the default framebuffer as the source, as a game copies its window */
+   glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+   glViewport_(0, 0, S, S);
+   glClearColor_(0, 1, 0, 0);
+   glClear_(GL_COLOR_BUFFER_BIT);
+   glUniform1f_(glGetUniformLocation_(p, "a"), 0.0f);
+   fullscreen();
+   copyx_red = !noalpha_fb;
+   copyx_draw(p, dst, noalpha_fb ? "copyx window (RGBX)" : "copyx window (RGBA)");
+}
+
 static void
 blit(void)
 {
@@ -1061,6 +1163,7 @@ main(int argc, char **argv)
                 {"npot", npot},
                 {"rtnpot", rtnpot},
                 {"subimg", subimg},
+                {"copyx", copyx},
                 {"bigfbo", bigfbo},
                 {"drawbuffers2", drawbuffers2}};
    for (unsigned i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
