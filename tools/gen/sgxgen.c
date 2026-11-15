@@ -257,9 +257,14 @@ static uint32_t usse_load(struct sgx_ctx *c, const struct usse_prog *pr, int ver
 	struct sgx_ptr p;
 
 	/* Probe (SGX530): the SGX535's one-phase state and vertex emits. */
-	if (getenv("SGXGEN_EMIT530"))
+	/* =state or =vs limits it to the state-emit or the vertex programs */
+	const char *e530 = getenv("SGXGEN_EMIT530");
+
+	if (e530)
 		for (unsigned i = 0; i < sizeof(usse_emit530) / sizeof(usse_emit530[0]); i++)
-			if (usse_emit530[i][0] == pr) {
+			if (usse_emit530[i][0] == pr &&
+			    !(!strcmp(e530, "state") && strncmp(pr->name, "state_emit", 10)) &&
+			    !(!strcmp(e530, "vs") && !strncmp(pr->name, "state_emit", 10))) {
 				pr = usse_emit530[i][1];
 				break;
 			}
