@@ -254,7 +254,16 @@ void sgx_ctx_rewind(struct sgx_ctx *c)
 static uint32_t usse_load(struct sgx_ctx *c, const struct usse_prog *pr, int vertex)
 {
 	struct sgx_ring *r = vertex ? &c->usse_vtx : &c->usse_pix;
-	struct sgx_ptr p = ring_alloc(r, pr->n * 8, USSE_ALIGN);
+	struct sgx_ptr p;
+
+	/* Probe (SGX530): the SGX535's one-phase state and vertex emits. */
+	if (getenv("SGXGEN_EMIT530"))
+		for (unsigned i = 0; i < sizeof(usse_emit530) / sizeof(usse_emit530[0]); i++)
+			if (usse_emit530[i][0] == pr) {
+				pr = usse_emit530[i][1];
+				break;
+			}
+	p = ring_alloc(r, pr->n * 8, USSE_ALIGN);
 	/* from the start of its 512 KiB code base window, not the heap (ISA.md) */
 	uint32_t pc0 = ((p.va - c->dev->heap_base[vertex ? H_VTXSHADER : H_PIXSHADER]) & 0x7ffff) / 8;
 
