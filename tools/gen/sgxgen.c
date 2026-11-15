@@ -582,6 +582,16 @@ int sgx_dev_open(struct sgx_dev *d, const char *node, const char *trace)
 	d->heap_base[H_PDSVERTEX] = h[DRM_POWERVR_SGX_HEAP_PDS_VERTEX].base;
 	d->heap_base[H_PIXSHADER] = h[DRM_POWERVR_SGX_HEAP_USSE_PIXEL].base;
 	d->heap_base[H_VTXSHADER] = h[DRM_POWERVR_SGX_HEAP_USSE_VERTEX].base;
+	/* SGXGEN_MAP_PDS0=<fill> (bring-up probe, SGX530): map the PDS pixel heap's first
+	 * page (PDS_EXEC_BASE + 0), filled with <fill>, so an access there doesn't fault */
+	if (getenv("SGXGEN_MAP_PDS0")) {
+		static struct sgx_bo pad0;
+
+		d->heap_next[H_PDSPIXEL] = d->heap_base[H_PDSPIXEL];
+		bo_alloc(d, &pad0, H_PDSPIXEL, 0, 0x1000, 0x1000);
+		for (unsigned i = 0; i < 0x400; i++)
+			pad0.map[i] = env_u32("SGXGEN_MAP_PDS0");
+	}
 	return 0;
 }
 
