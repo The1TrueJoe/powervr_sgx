@@ -29,6 +29,7 @@
  * buffer's other users (X, the display, other clients) order against it.
  */
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -463,6 +464,10 @@ psgx_bo_alloc(struct sgxws_dev *d, struct sgxws_bo *bo, enum sgx_heap heap,
       simple_mtx_unlock(&dd->lock);
       if (impl) {
          d->bo_cached++;
+         /* its free took the last reference: one again, or the next free
+          * takes it below zero and the buffer is never freed (each buffer
+          * the cache gave out leaked, until the process exited) */
+         impl->refs = 1;
          impl->write_point = 0;
          impl->base.cpu_dirty = false;
          /* zero as new pages are, but textures: their contents are
@@ -565,6 +570,7 @@ psgx_bo_free(struct sgxws_dev *d, struct sgxws_bo *bo)
    struct psgx_bo *impl = dbo(bo);
 
    simple_mtx_lock(&dd->lock);
+   assert(impl->refs);
    if (--impl->refs) {
       simple_mtx_unlock(&dd->lock);
       return;
