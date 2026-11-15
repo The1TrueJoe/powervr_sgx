@@ -4,7 +4,9 @@
 #
 #   upgrade   the previous release installed, then `apt upgrade`; then mesa-sgx:i386
 #   i386      the previous release installed, then only `apt install mesa-sgx:i386`:
-#             Mesa's two architectures and the kernel must all move to the new release
+#             Mesa's two architectures move to the new release, and the kernel with them
+#             when the new Mesa breaks the installed one (mesa/debian/BREAKS: a uAPI
+#             change, as 0.1.x to 0.2.0); a release on the same uAPI leaves it
 #   fresh     the docs/INSTALL.md install, both Mesa architectures
 #   ci        CI-build versions that sort above the release (the 0.1.x CI artifacts did),
 #             then the --allow-downgrades command the release notes give
@@ -59,7 +61,19 @@ have mesa-sgx:i386 "$M"; have mesa-sgx:amd64 "$M"
 echo "== i386"
 old
 apt-get install -y mesa-sgx:i386
-have mesa-sgx:i386 "$M"; have mesa-sgx:amd64 "$M"; have linux-image-7.3.3-sgx "$K"
+have mesa-sgx:i386 "$M"; have mesa-sgx:amd64 "$M"
+bound=
+for f in "$SITE"/pool/main/*/*/mesa-sgx_*_amd64.deb; do
+	if [ "$(dpkg-deb -f "$f" Version)" = "$M" ]; then
+		bound=$(dpkg-deb -f "$f" Breaks | sed -n 's/.*linux-image-7\.3\.3-sgx (<< \([^)]*\)).*/\1/p')
+	fi
+done
+oldk=$(dpkg-deb -f "$(ls "$OLD"/linux-image-7.3.3-sgx_*_amd64.deb | head -1)" Version)
+if [ -n "$bound" ] && dpkg --compare-versions "$oldk" lt "$bound"; then
+	have linux-image-7.3.3-sgx "$K"
+else
+	have linux-image-7.3.3-sgx "$oldk"
+fi
 
 echo "== fresh"
 clean
