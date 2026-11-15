@@ -40,6 +40,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "fixed-function fragment programs at highp (F32), not mediump (F16; texture coordinates F32)"},
    {"nozerocopy", SGX_DEBUG_NO_ZERO_COPY,
     "vertex inputs gathered into f32 x 4, not DMAed where they are"},
+   {"novboslabs", SGX_DEBUG_NO_VBO_SLABS,
+    "every buffer's device copy a BO of its own, not small ones cut from shared slabs"},
    {"nolazyscanout", SGX_DEBUG_NO_LAZY_SCANOUT,
     "scanout buffers on a dumb-buffer display (kmsro) are the display's from the start, not when a KMS handle is asked for"},
    {"nophasesplit", SGX_DEBUG_NO_PHASE_SPLIT,
@@ -210,7 +212,11 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
       MIN3(f->max_texture_size, screen->info->rt_max_width,
            screen->info->rt_max_height);
    caps->max_texture_cube_levels = f->max_cube_levels;
-   caps->max_texture_3d_levels = 0;
+   /* 3D textures of one texel, which sample as a 1x1 2D texture
+    * (sgx_program.c lower_tex_3d); the volume layout isn't the driver's yet
+    * (TEX.md section 14).  0 would refuse every glTexImage3D, and wined3d
+    * makes 1x1x1 ones at start-up for its unbound units (issue #5) */
+   caps->max_texture_3d_levels = 1;
    /* uniform blocks (SGX_DEBUG=ubo): 64 KiB, as most drivers have (GL 3.1
     * asks 16 KiB, and st takes ARB_uniform_buffer_object at no less; piglit's
     * generated blocks reach 32 KiB). Each is copied into the frame
@@ -370,6 +376,8 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    case PIPE_TEXTURE_2D:
    case PIPE_TEXTURE_RECT:
    case PIPE_TEXTURE_CUBE:
+   /* one texel, kept as a 2D texture (max_texture_3d_levels) */
+   case PIPE_TEXTURE_3D:
       return true;
    default:
       return false;
@@ -389,6 +397,7 @@ sgx_screen_destroy(struct pipe_screen *pscreen)
 {
    struct sgx_screen *screen = sgx_screen(pscreen);
 
+   sgx_resource_screen_fini(screen);
    /* Keep the services connection and a hardware context for the process's
     * next screen instead of tearing them down: when srvinit started the
     * microkernel, a render context's cleanup never completes (the bridge

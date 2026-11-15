@@ -151,6 +151,7 @@ sgx_finish_program(struct sgx_ctx *c, struct sgx_shader *out)
          o->f16 = s->f16_return;
          o->fetch = s->fetch;
          o->plane = s->plane;
+         o->state = s->state;
          o->reg = s->dependent ? phys(c, &s->ins->op[0]) : s->pa;
          if (s->dependent && smp_template(c, s, &o->smp))
             goto fail;
@@ -211,6 +212,7 @@ sgx_finish_program(struct sgx_ctx *c, struct sgx_shader *out)
 
    out->sa_base = c->sa_base;
    out->sa_slots = c->n_sa_phys;
+   out->n_dep_states = c->n_dep_states;
    out->mem_dwords = c->mem_dwords;
    out->n_mem_bases = c->n_mem_bases;
    for (unsigned j = 0; j < c->n_mem_bases; j++)

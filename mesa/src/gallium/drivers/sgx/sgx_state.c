@@ -688,7 +688,23 @@ sgx_blit_cpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
 
 /* A colour blit into a render target from anything the TPU samples, drawn
  * by u_blitter through our own shaders: the swap's copy of the back buffer
- * to fb0 (a CPU copy reads the back buffer out of uncached memory). */
+ * to fb0 (a CPU copy reads the back buffer out of uncached memory), and a
+ * game's FBO presented to its window.  Into a texture the PBE renders (an
+ * FBO's, in a render-target format) too: a post-processing chain's scaled
+ * copies between FBOs went through the CPU, reading every source back from
+ * the device (OpenArena's renderer_opengl2: a quarter of its frame time). */
+static bool
+blit_dst_ok(struct pipe_screen *pscreen, const struct sgx_resource *dst,
+            enum pipe_format format)
+{
+   if (!dst->texture)
+      return dst->bo.va && dst->pitch;
+   return dst->base.target == PIPE_TEXTURE_2D && dst->base.array_size == 1 &&
+          dst->base.nr_samples <= 1 &&
+          pscreen->is_format_supported(pscreen, format, PIPE_TEXTURE_2D, 0, 0,
+                                       PIPE_BIND_RENDER_TARGET);
+}
+
 static bool
 sgx_blit_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
@@ -703,8 +719,9 @@ sgx_blit_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
        info->render_condition_enable || info->alpha_blend ||
        info->num_window_rectangles || info->src.box.depth != 1 ||
        info->dst.box.depth != 1 || info->dst.level || info->src.level ||
-       !sgx_resource_sampleable(src) || dst->texture || !dst->bo.va ||
-       !dst->pitch || util_format_get_blocksize(info->dst.format) != 4 ||
+       !sgx_resource_sampleable(src) || src == dst ||
+       !blit_dst_ok(pctx->screen, dst, info->dst.format) ||
+       util_format_get_blocksize(info->dst.format) != 4 ||
        util_format_is_pure_integer(info->src.format) ||
        util_format_is_depth_or_stencil(info->src.format))
       return false;
@@ -734,6 +751,13 @@ sgx_blit_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
    util_blitter_save_fragment_constant_buffer_slot(
       ctx->blitter, &ctx->constants[MESA_SHADER_FRAGMENT]);
    util_blitter_save_render_condition(ctx->blitter, NULL, false, 0);
+   SGX_DBG(DRAW, "GPU blit %s %ux%u (%d,%d %dx%d) -> %s %ux%u (%d,%d %dx%d)\n",
+           util_format_short_name(info->src.format), info->src.resource->width0,
+           info->src.resource->height0, info->src.box.x, info->src.box.y,
+           info->src.box.width, info->src.box.height,
+           util_format_short_name(info->dst.format), info->dst.resource->width0,
+           info->dst.resource->height0, info->dst.box.x, info->dst.box.y,
+           info->dst.box.width, info->dst.box.height);
    util_blitter_blit(ctx->blitter, info, NULL);
    return true;
 }

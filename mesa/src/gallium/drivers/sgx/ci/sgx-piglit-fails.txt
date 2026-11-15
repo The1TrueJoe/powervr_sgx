@@ -1590,11 +1590,12 @@ spec@arb_pixel_buffer_object@cubemap npot pbo,Fail
 spec@arb_texture_cube_map@cubemap npot,Fail
 spec@arb_texture_cube_map@cubemap-shader bias,Fail
 
-# 3D textures: not implemented (GL_MAX_3D_TEXTURE_SIZE reads back as INT_MIN)
+# 3D textures: one texel only (GL_MAX_3D_TEXTURE_SIZE 1, kept as 2D, TEX.md section 14); tex3d-maxsize
+# divides by its width - 1 (tests/texturing/tex3d-maxsize.c, line 211): SIGFPE at that size (2026-11-14)
 spec@!opengl 1.2@copyteximage 3d,Fail
 spec@!opengl 1.2@getteximage-targets 3d,Fail
 spec@!opengl 1.2@tex3d,Fail
-spec@!opengl 1.2@tex3d-maxsize,Fail
+spec@!opengl 1.2@tex3d-maxsize,Crash
 spec@!opengl 1.2@texwrap 3d,Fail
 spec@!opengl 1.2@texwrap 3d bordercolor,Fail
 spec@!opengl 1.2@texwrap 3d proj,Fail

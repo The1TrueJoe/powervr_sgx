@@ -1044,6 +1044,57 @@ TEST_F(sgx_compile_test, fragment_dependent_sample)
       EXPECT_FALSE(out.iters[i].sample) << "a PDS sample";
 }
 
+/* a post-processing pass's taps: 40 dependent samples (past the 16 a
+ * program once had; a game's blur and effect passes take that many, issue
+ * #5) of two textures, which share two texture state blocks, one a texture,
+ * not one a sample (OpenArena's 16-tap downsample needed 16 blocks of SA) */
+TEST_F(sgx_compile_test, fragment_many_dependent_samples_share_state)
+{
+   start(MESA_SHADER_FRAGMENT);
+   nir_variable *uv =
+      var(nir_var_shader_in, glsl_vec_type(2), "uv", VARYING_SLOT_VAR0);
+   const glsl_type *st =
+      glsl_sampler_type(GLSL_SAMPLER_DIM_2D, false, false, GLSL_TYPE_FLOAT);
+   nir_variable *s0 = var(nir_var_uniform, st, "t0", -1);
+   nir_variable *s1 = var(nir_var_uniform, st, "t1", -1);
+   s0->data.binding = 0;
+   s1->data.binding = 1;
+   nir_variable *col = var(nir_var_shader_out, glsl_vec4_type(), "gl_FragColor",
+                           FRAG_RESULT_COLOR);
+   nir_def *c = nir_load_var(&b, uv);
+   nir_def *sum = nir_imm_vec4(&b, 0, 0, 0, 0);
+   for (unsigned i = 0; i < 40; i++) {
+      nir_deref_instr *sd = nir_build_deref_var(&b, i % 5 == 4 ? s1 : s0);
+      struct nir_tex_builder tb = {};
+      tb.coord = nir_fadd_imm(&b, nir_fmul(&b, c, c), 0.01 * i);
+      tb.texture_deref = sd;
+      tb.sampler_deref = sd;
+      tb.dim = GLSL_SAMPLER_DIM_2D;
+      tb.dest_type = nir_type_float32;
+      sum = nir_fadd(&b, sum, nir_build_tex_struct(&b, nir_texop_tex, tb));
+   }
+   nir_store_var(&b, col, nir_fmul_imm(&b, sum, 1.0 / 40), 0xf);
+
+   ASSERT_TRUE(compile()) << out.log;
+   expect_decodes();
+   ASSERT_EQ(out.n_samples, 40u);
+   EXPECT_EQ(out.n_dep_states, 2u);
+   int state_of[2] = {-1, -1};
+   for (unsigned i = 0; i < out.n_samples; i++) {
+      const struct sgx_sample_info *x = &out.samples[i];
+      ASSERT_TRUE(x->dependent) << i;
+      ASSERT_LT(x->sampler, 2u);
+      ASSERT_LT(x->state, out.n_dep_states);
+      if (state_of[x->sampler] < 0)
+         state_of[x->sampler] = x->state;
+      EXPECT_EQ((int)x->state, state_of[x->sampler])
+         << "sample " << i << ": one block a texture";
+   }
+   EXPECT_NE(state_of[0], state_of[1]);
+   /* SA: the constants, then 2 blocks of 4, inside sa0-sa127 */
+   EXPECT_LE(out.sa_base + out.sa_slots + 4 * out.n_dep_states, 128u);
+}
+
 /* a discard without split_phases: one program, the test into the keep
  * predicate and the feedback nop, no phase 1 */
 TEST_F(sgx_compile_test, fragment_discard_one_phase)
