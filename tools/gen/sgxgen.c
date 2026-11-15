@@ -381,9 +381,25 @@ static int pds_2dwords = 1;
 
 /* Lay a program out as 16-byte data rows, code after. DS0/DS1 interleave per the
  * device's rule (pvrsgx_pds_interleave.h); 2-dword is DS0 DS0 DS1 DS1 per row. */
+/* SGXGEN_PDS_TIGHT (8-word interleave): only the rows up to the last data word, with
+ * DS1[0] always inside, as the 530 vendor stream's 3-row (48-byte) programs; the
+ * default rounds each 8-word block pair up to 4 rows. */
+static uint32_t pds_rows(const struct pds *p)
+{
+	uint32_t last = 0;
+
+	if (pds_2dwords || !getenv("SGXGEN_PDS_TIGHT"))
+		return pvrsgx_pds_ds_rows(p->n0, p->n1, pds_2dwords);
+	if (p->n0)
+		last = pvrsgx_pds_ds_word(p->n0 - 1, 0);
+	if (pvrsgx_pds_ds_word(0x40 + (p->n1 ? p->n1 - 1 : 0), 0) > last)
+		last = pvrsgx_pds_ds_word(0x40 + (p->n1 ? p->n1 - 1 : 0), 0);
+	return last / 4 + 1;
+}
+
 static uint32_t pds_emit(struct sgx_ring *r, const struct pds *p, uint32_t *rows_out)
 {
-	uint32_t rows = pvrsgx_pds_ds_rows(p->n0, p->n1, pds_2dwords);
+	uint32_t rows = pds_rows(p);
 	struct sgx_ptr m = ring_alloc(r, rows * 16 + p->nc * 4, PDS_ALIGN);
 
 	memset(m.p, 0, rows * 16);
