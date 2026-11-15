@@ -132,3 +132,35 @@ job. The fluctuating reads mid-hang aren't the TA's. Something on the microkerne
 memory continuously while the GPU sits idle. Next: read the EDM-task progress pair (0xb10,
 0xb1c; `read_ukregs`, 9ec87647) at idle and mid-hang, to see whether an EDM task stays
 resident.
+
+## Follow-up 02:13-02:25 UTC: the EDM-task counters; the vendor's host init values, all null
+
+**0xb10/0xb1c** are the registers the GPL host reads as "EDM tasks" for its lockup check
+("the PDS timer should be running"). Read only (`read_ukregs`, 9ec87647):
+
+| | 0xb10 | 0xb1c |
+|---|---|---|
+| idle, 5 samples over 1.5 s | 0x00010000 | 0x00010000 |
+| mid-hang, 3 samples | 0x00010003 | 0x00010000 |
+
+The pair doesn't tick at idle (our microkernel runs no timer task). 0xb10's low bits step by
+3 at the kick and then stay put, so no EDM task keeps running while the TA hangs. The memory
+reads seen at idle come from somewhere else.
+
+**The vendor's host-side init values** (sgx530-vendor-setup.md §1/§7), through `probe_a58` and
+`probe_clkgate` (7a205e0a, off by default, SGX530 only), all with tight rows:
+
+| variant | result |
+|---|---|
+| event enable 0x2204f00f (adds SW_EVENT b14) | the same hang; PDS PC 0x0020048c |
+| CLKGATECTL 0x00222220 (DPM auto, 2D off) | the same hang; CLKGATESTATUS 0x00101000 (DPM gated) |
+| both, plus 0xa74 = 0x003f8200 | the same hang |
+
+That exhausts the host-side differences the vendor setup doc lists. `0xa6c`/`0xa70` already
+match under `edm_init=1`. The PDS still takes the VDM's first program address and never
+fetches it.
+
+**What's left** is the part of the kick the host doesn't do: the microkernel's own TA-start
+sequence on the SGX530. That is out of scope for this session (see the hand-over note). On
+the client side, the VDM info word's bits 8-17 vary per program in the vendor stream (0x2a2,
+0x161, 0x2c2). Ours is always 0x2a2, which matches only the vendor's first program.
