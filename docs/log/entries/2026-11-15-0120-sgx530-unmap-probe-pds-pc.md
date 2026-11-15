@@ -246,3 +246,39 @@ doesn't touch.
 - 530 DOUTU word 0: byte offset at b4, window under 32 KiB (the vendor's b4/b21 meanings are U).
 - The 0x16100 info form runs a state program at once. Its emitted first word is taken as an address (requestor b1).
 - 0xb10/0xb1c count EDM tasks (0xb10 steps by 3 per TA kick on ours).
+
+## Follow-up 06:10-06:20 UTC: the TA-block form waits for the MTE
+
+Code in the window (`DOUTU530`, `CODE_RING=0x4000`) throughout.
+
+- **The vendor's DOUTU b4 isn't it.** Every 530 vendor DOUTU of a task that emits (state
+  emits 0x00200f1a/0x0020111a/0x00201a1a, vertex 0x0000281a, pixel 0x00201310/0x00001410)
+  sets b4, and the non-emitting ones (0x200a, 0x100a, 0x000a) don't. `SGXGEN_DOUTU_B4`
+  (5f7c6068) sets it on our state emits and draws: the same wait at the state program.
+- **Under the TA-block form, even a non-emitting task waits.** The state program launching
+  the empty task (`STATE_EMPTYTASK`), with or without its DMA, waits at the program. A lead
+  HALT program before it runs (PC on to it, 0x0020049c).
+- **Info-word sweep** (`SGXGEN_STATE_INFO`, one 2-bit field at a time from the vendor's
+  0x2a200):
+
+  | form | b8-9 | b13 | result |
+  |---|---|---|---|
+  | 0x2a200 (vendor) | 2 | 1 | waits at the state program |
+  | 0x2a100, 0x2a000 | 1, 0 | 1 | runs; the MTE reads the header word as an address, fault at 0xd000 |
+  | 0x28200 | 2 | 0 | **runs, no fault**; then waits at the draw's vertex fetch |
+  | 0x16200, 0x1a200, 0x0a200, 0x26200, 0x22200 | 2 | 1 | waits |
+
+  So b9 together with b13 is the state update to the MTE. With b13 off, the state program
+  goes through and the next MTE-bound item, the draw, waits instead.
+
+**Conclusion (C for the observations, G for the cause).** Every item bound for the MTE
+waits, while PDS-only work (HALT, empty update, secondary loads) runs. The client stream is
+right; **the MTE never becomes ready to take input**. Its readiness, and the DPM's PB pages
+it allocates into, come from the TA start the microkernel performs. No host-side value
+changes it (above). That sequence on the SGX530 is the next and only lead, and it is outside
+this session's scope.
+
+**Also worth landing once a frame proves it:** the 530 DOUTU code offset (byte offset at b4,
+window < 32 KiB). The kernel spaces code bases 512 KiB apart and code objects can sit
+anywhere in that window, so the 530 needs a per-core window: kernel code-base spacing,
+UPLOAD_CODE placement, and the DOUTU encoders in sgxgen and Mesa.
