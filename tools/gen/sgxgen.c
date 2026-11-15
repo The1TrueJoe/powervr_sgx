@@ -624,7 +624,7 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 {
 	struct sgx_ctx *c = calloc(1, sizeof *c);
 	struct sgx_bo dummy;
-	uint32_t hw[17] = { 0 }, rows;
+	uint32_t hw[17] = { 0 };
 	struct sgx_ptr p;
 	struct pds t = { 0 };
 	int e;
@@ -698,7 +698,7 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 		c->state_emit[n] = 0;	/* loaded on first use */
 
 	/* VDM state programs that every frame ends with */
-	c->empty_state = pds_secondary(&c->pds_vtx, 0, 0, doutu_w0(c, c->empty_v, 1, 0), 0, NULL);
+	c->empty_state = pds_secondary(&c->pds_vtx, 0, 0, doutu_w0(c, c->empty_v, 1, 0), 0, &c->empty_rows);
 	/* TA terminate (VDM type 6): DOUTA (0x2000, 0), 3 x (0x16000e, 0x100), then
 	 * a state-emit task for the two attributes [D; the values' meaning G] */
 	c->state_emit[2] = usse_load(c, &usse_state_emit_2, 1);
@@ -715,7 +715,7 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 		CODE(&t, MOVS(MV, 1, 0x18, 0, 1, 2, 2, DOUTA));
 	CODE(&t, MOVS(MV, 2, 0, 0, 1, 2, 2, DOUTU));
 	CODE(&t, HALT);
-	c->terminate = pds_emit(&c->pds_vtx, &t, &rows);
+	c->terminate = pds_emit(&c->pds_vtx, &t, &c->term_rows);
 	/* SGXGEN_PRETERM530: the vendor stream on the 530 runs a type 4 program of
 	 * DOUTA (0x800, 0), DOUTA (0, 0x100) and a task just before the terminate */
 	{
@@ -731,7 +731,7 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 		CODE(&q, MOVS(MV, 1, 0x18, 0, 1, 2, 2, DOUTA));
 		CODE(&q, MOVS(MV, 2, 0, 0, 1, 2, 2, DOUTU));
 		CODE(&q, HALT);
-		c->preterm = pds_emit(&c->pds_vtx, &q, &rows);
+		c->preterm = pds_emit(&c->pds_vtx, &q, &c->preterm_rows);
 	}
 
 	/* pixel programs shared by every object without inputs, and the clear's */
@@ -1375,7 +1375,9 @@ int sgx_draw(struct sgx_ctx *c, const struct sgx_draw *d)
 		vsec.p[6 + i] = vs->sec_init[i];
 	sec = pds_secondary(&c->pds_vtx, vsec.va, dma_ctrl(10, 0, 1, 1), doutu_w0(c, c->empty_v, 1, 0), 0, &vrows);
 	vdm(c, 0x40000000 | vdm_pds(c, sec));
-	vdm(c, vrows << 26 | (getenv("SGXGEN_VDMINFO530") ? 0x2a200 : 0xe100) | (10 + 3) >> 2);
+	/* SGXGEN_VSEC530: the 530 vendor stream's secondary-DMA form, 0x16100 (0xc016103 for 10 dwords) */
+	vdm(c, vrows << 26 | (getenv("SGXGEN_VSEC530") ? 0x16100 : getenv("SGXGEN_VDMINFO530") ? 0x2a200 : 0xe100) |
+	    (10 + 3) >> 2);
 
 	/* SGXGEN_FAULT: vertices from an unmapped address, a TA page fault (recovery tests) */
 	if (getenv("SGXGEN_FAULT"))
@@ -1395,13 +1397,15 @@ static uint32_t vdm_end(struct sgx_ctx *c)
 	int i530 = getenv("SGXGEN_VDMINFO530") != NULL;
 
 	vdm(c, 0x40000000 | vdm_pds(c, c->empty_state));
-	vdm(c, 1u << 26 | (i530 ? 0x16100 : 0xe100));
+	/* each word's rows are its program's own (the 8-word interleave gives 4 where
+	 * the 2-dword one gives 1 or 3; a mismatch starts the PDS inside the data) */
+	vdm(c, c->empty_rows << 26 | (i530 ? 0x16100 : 0xe100));
 	if (getenv("SGXGEN_PRETERM530")) {
 		vdm(c, 0x40000000 | vdm_pds(c, c->preterm));
-		vdm(c, 3u << 26 | 0x2c201);
+		vdm(c, c->preterm_rows << 26 | 0x2c201);
 	}
 	vdm(c, 0x60000000 | vdm_pds(c, c->terminate));
-	vdm(c, 3u << 26 | (i530 ? 0x2a201 : 0x2022401));
+	vdm(c, c->term_rows << 26 | (i530 ? 0x2a201 : 0x2022401));
 	vdm(c, 0xc0000000);
 	return at;
 }
