@@ -363,6 +363,28 @@ encode_rect(struct sgx_resource *res, unsigned level, const uint8_t *src,
                   yb = MIN2(by + t, y1);
          uint8_t *out = whole ? tile : d;
 
+         if (bpp == 4 && !widen) {
+            /* RGBA8 and its kin, most textures: a word a texel, copied
+             * inline (a memcpy call of a run-time size a texel was most of
+             * a lightmap update's time: issue #5, QuakeSpasm) */
+            const uint32_t set = rgbx ? 0xff000000u : 0;
+
+            for (unsigned y = ya; y < yb; y++) {
+               const uint8_t *s = src + y * src_stride + (size_t)xa * 4;
+               uint32_t sy = spread[y - by];
+
+               for (unsigned x = xa; x < xb; x++, s += 4) {
+                  uint32_t v;
+
+                  memcpy(&v, s, 4);
+                  v |= set;
+                  memcpy(out + (size_t)(sy | spread[x - bx] << 1) * 4, &v, 4);
+               }
+            }
+            if (whole)
+               memcpy(d, tile, (size_t)t * t * 4);
+            continue;
+         }
          for (unsigned y = ya; y < yb; y++) {
             const uint8_t *s = src + y * src_stride;
 
