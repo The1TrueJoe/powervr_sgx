@@ -1369,6 +1369,12 @@ void sgx_clear(struct sgx_ctx *c, const float rgba[4], float depth)
 	blk[10] = 5;						/* one 4-component set */
 	blk[11] = 0;
 	/* SGXGEN_CLEAR_KIND: the DMA kind (ours 3; the 530 vendor's 10-dword state block uses 1) */
+	/* SGXGEN_CLEAR_PDSADD=<bytes> (bring-up probe): move the block's secondary PDS word
+	 * by <bytes> and its primary by twice that, to see whether a fault follows them */
+	if (getenv("SGXGEN_CLEAR_PDSADD")) {
+		blk[3] += env_u32("SGXGEN_CLEAR_PDSADD") >> 4;
+		blk[5] += env_u32("SGXGEN_CLEAR_PDSADD") >> 3;
+	}
 	/* SGXGEN_CLEAR_NOB15 (bring-up probe): the clear's block without its last group
 	 * (header 0x54c3, 11 dwords), to see whether a fault address follows the header */
 	if (getenv("SGXGEN_CLEAR_NOB15")) {
