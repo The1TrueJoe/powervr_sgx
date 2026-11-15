@@ -290,6 +290,12 @@ static uint32_t doutu_w0(struct sgx_ctx *c, uint32_t va, int vertex, uint32_t te
 {
 	uint32_t off = va - c->dev->heap_base[vertex ? H_VTXSHADER : H_PIXSHADER];
 
+	/* SGXGEN_DOUTU530: the 530 takes the offset in 8-byte units at b7 (byte offset << 4).
+	 * Board, 2026-11-15: an empty task at window offset 0x8100 encoded the 545 way faulted
+	 * at 0x0fc01000 (it fetched at 0x1020); the vendor stream's words 0x281a, 0x0f1a,
+	 * 0x200a, 0x100a read as offsets 0x280, 0xf0, 0x200, 0x100 this way. b4-6 are U. */
+	if (getenv("SGXGEN_DOUTU530"))
+		return ((temps + 3) >> 2) << 24 | ((off >> 19) + (vertex ? 10 : 0)) | ((off & 0x1fff8) << 4);
 	return ((temps + 3) >> 2) << 24 | ((off >> 19) + (vertex ? 10 : 0)) | ((off & 0x7ffff) >> 3) << 4;
 }
 
@@ -1189,7 +1195,9 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 		lead_done = 1;
 	}
 	/* the DDK's static state program: tst; bra; doutd; tst; bra; doutd; doutu */
-	pds_d0(&p, 0, b.va);
+	/* SGXGEN_STATE_NODMA: DS0[0] = 0, so the program's own tst/bra skips the DOUTD
+	 * (bring-up probe: does the PDS block in the DMA?) */
+	pds_d0(&p, 0, getenv("SGXGEN_STATE_NODMA") ? 0 : b.va);
 	/* SGXGEN_STATE_PRIMARY: the 530 vendor's TA state block DMA, 0x00e00007 for 8 dwords:
 	 * kind (dwords - 1) & 7 and no secondary bit (its vertex secondary DMA has it) */
 	if (getenv("SGXGEN_STATE_PRIMARY"))
