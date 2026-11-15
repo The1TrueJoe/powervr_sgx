@@ -138,7 +138,7 @@ module_param(probe_clkgate, uint, 0444);
 MODULE_PARM_DESC(probe_clkgate, "Bring-up (SGX530): CLKGATECTL value at start instead of the core's (default 0, off)");
 
 /* Bring-up probe (SGX530): extra init writes, reg,value pairs, after the core's script. */
-static unsigned int probe_init[16];
+static unsigned int probe_init[32];
 static int probe_init_n;
 module_param_array(probe_init, uint, &probe_init_n, 0444);
 MODULE_PARM_DESC(probe_init, "Bring-up (SGX530): reg,value pairs written after the init script (default none)");
