@@ -127,6 +127,11 @@ bool pvrsgx_edm_init;
 module_param_named(edm_init, pvrsgx_edm_init, bool, 0444);
 MODULE_PARM_DESC(edm_init, "Start the open microkernel via the §9 launch folded into real init (single-context cores)");
 
+/* Bring-up probe (SGX530): a value for 0xa74 in place of the init script's (0 = the script's). */
+static unsigned int probe_a74;
+module_param(probe_a74, uint, 0444);
+MODULE_PARM_DESC(probe_a74, "Bring-up (SGX530): value written to 0xa74 at init instead of the script's (default 0, off)");
+
 static u32 *fw_words(struct pvrsgx_device *sdev, enum pvrsgx_fw_buf b)
 {
 	return sdev->fw.cpu[b];
@@ -552,8 +557,15 @@ static int init_script_part2(struct pvrsgx_device *sdev)
 	struct pvrsgx_fw *f = &sdev->fw;
 	int err;
 
-	for (u32 i = 0; i < fam->num_init_regs; i++)
-		sgx_wr(sdev, fam->init_regs[i].reg, fam->init_regs[i].val);
+	for (u32 i = 0; i < fam->num_init_regs; i++) {
+		u32 val = fam->init_regs[i].val;
+
+		if (probe_a74 && fam->core == 530 && fam->init_regs[i].reg == 0xa74) {
+			drm_warn(&sdev->base, "probe: 0xa74 = 0x%08x\n", probe_a74);
+			val = probe_a74;
+		}
+		sgx_wr(sdev, fam->init_regs[i].reg, val);
+	}
 	/*
 	 * Code bases 0-9 the pixel shader heap, 10-13 the vertex shader heap, 15
 	 * ours. A client's PDS program can name any of them, so 14 is a second
