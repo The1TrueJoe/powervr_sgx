@@ -191,7 +191,12 @@ EMIT530 = []
 for name in list(PROGS):
     if name.startswith("state_emit_"):
         n = int(name.rsplit("_", 1)[1])
-        PROGS[name + "_530"] = NOPHAS(PROGS[name][:-3] + [f"emit.t1 r0, #{n}, #0 [end f3_20]"])
+        # MKUSSE_530_EMIT535: the SGX535's one emit; by default the SGX545's three-emit
+        # ending, which delivers o0 to the SGX530's MTE (the one-emit form delivers 0)
+        if os.environ.get("MKUSSE_530_EMIT535"):
+            PROGS[name + "_530"] = NOPHAS(PROGS[name][:-3] + [f"emit.t1 r0, #{n}, #0 [end f3_20]"])
+        else:
+            PROGS[name + "_530"] = NOPHAS(PROGS[name])
         EMIT530.append(name)
     elif to530(PROGS[name]):
         PROGS[name + "_530"] = NOPHAS(to530(PROGS[name]))
