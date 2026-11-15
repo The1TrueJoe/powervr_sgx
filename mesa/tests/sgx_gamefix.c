@@ -24,6 +24,10 @@
  *   npot     a 60x44 texture sampled over the target, plainly and at a
  *            computed coordinate
  *   rtnpot   the same of a 60x44 texture rendered into first
+ *   subimg   a sampled 128x128 texture updated by rows and small rectangles
+ *            between draws, every texel checked; the time an update takes
+ *   bigfbo   blended full-target frames into 2048x1200 and 1448x848 FBOs: the
+ *            time a frame takes (run it and look for job timeouts)
  *
  *   sgx_gamefix [part...]
  *
@@ -35,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #define EGL_EGL_PROTOTYPES 0
 #define GL_GLEXT_PROTOTYPES 1
 #include <EGL/egl.h>
@@ -95,6 +100,8 @@ L(const char *n)
    X(glShaderSource)                                                           \
    X(glTexImage2D)                                                             \
    X(glTexImage3D)                                                             \
+   X(glTexSubImage2D)                                                          \
+   X(glBlendFunc)                                                              \
    X(glTexParameteri)                                                          \
    X(glUniform1f)                                                              \
    X(glUniform1i)                                                              \
@@ -728,6 +735,157 @@ rtnpot(void)
    }
 }
 
+static double
+now_ms(void)
+{
+   struct timespec ts;
+
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
+/* subimg: a 128x128 texture the GPU samples, updated between draws with
+ * rows the width of the texture a few high (as Quake's lightmaps are) and
+ * small odd rectangles, then every texel checked; and the time an update
+ * takes */
+#define SW 128
+
+static unsigned char sub_model[SW * SW * 4];
+
+static void
+sub_texel(unsigned x, unsigned y, unsigned r, unsigned char *c)
+{
+   c[0] = (x * 2 + r * 31) & 0xff;
+   c[1] = (y * 2 + r * 17) & 0xff;
+   c[2] = (x ^ y ^ (r * 5)) & 0xff;
+   c[3] = 255;
+}
+
+static void
+sub_fill(unsigned x0, unsigned y0, unsigned w, unsigned h, unsigned r,
+         unsigned char *buf)
+{
+   for (unsigned y = 0; y < h; y++)
+      for (unsigned x = 0; x < w; x++) {
+         sub_texel(x0 + x, y0 + y, r, &buf[(y * w + x) * 4]);
+         memcpy(&sub_model[((y0 + y) * SW + x0 + x) * 4], &buf[(y * w + x) * 4], 4);
+      }
+}
+
+static void
+subimg(void)
+{
+   static unsigned char buf[SW * SW * 4], px[SW * SW * 4];
+   const char *fs = "#version 110\n"
+                    "uniform sampler2D t;\n"
+                    "varying vec2 uv;\n"
+                    "void main() { gl_FragColor = texture2D(t, uv); }\n";
+   double band_ms = 0;
+   unsigned bands = 0, bad = 0;
+   GLuint t;
+
+   fbw = fbh = SW;
+   fbo(NULL, false);
+   fbw = fbh = S;
+   GLuint p = program(vs_uv, fs);
+   glActiveTexture_(GL_TEXTURE0);
+   glGenTextures_(1, &t);
+   glBindTexture_(GL_TEXTURE_2D, t);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   sub_fill(0, 0, SW, SW, 0, buf);
+   glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, SW, SW, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, buf);
+   glUniform1i_(glGetUniformLocation_(p, "t"), 0);
+   fullscreen();
+   /* the time an update takes, the texture idle (its copy no render reads,
+    * as a game's lightmap is by the time it's updated again) */
+   glFinish_();
+   for (unsigned r = 1; r <= 200; r++) {
+      unsigned y = (r * 13) % (SW - 16);
+
+      sub_fill(0, y, SW, 16, r, buf);
+      double t0 = now_ms();
+      glTexSubImage2D_(GL_TEXTURE_2D, 0, 0, y, SW, 16, GL_RGBA,
+                       GL_UNSIGNED_BYTE, buf);
+      band_ms += now_ms() - t0;
+      bands++;
+   }
+   /* and correct under renders that read it (the second copy) */
+   for (unsigned r = 201; r <= 260; r++) {
+      unsigned y = (r * 13) % (SW - 5), x = (r * 29) % (SW - 4) + 1;
+
+      sub_fill(0, y, SW, 5, r, buf);
+      glTexSubImage2D_(GL_TEXTURE_2D, 0, 0, y, SW, 5, GL_RGBA,
+                       GL_UNSIGNED_BYTE, buf);
+      sub_fill(x, (r * 7) % (SW - 3), 3, 3, r + 1000, buf);
+      glTexSubImage2D_(GL_TEXTURE_2D, 0, x, (r * 7) % (SW - 3), 3, 3, GL_RGBA,
+                       GL_UNSIGNED_BYTE, buf);
+      fullscreen(); /* the texture is in use by the next update */
+   }
+   glReadPixels_(0, 0, SW, SW, GL_RGBA, GL_UNSIGNED_BYTE, px);
+   for (unsigned i = 0; i < SW * SW; i++)
+      if (memcmp(&px[i * 4], &sub_model[i * 4], 4)) {
+         if (bad < 4)
+            printf("subimg: texel (%u,%u) = %u,%u,%u, want %u,%u,%u\n",
+                   i % SW, i / SW, px[i * 4], px[i * 4 + 1], px[i * 4 + 2],
+                   sub_model[i * 4], sub_model[i * 4 + 1], sub_model[i * 4 + 2]);
+         bad++;
+      }
+   printf("subimg: %.3f ms a %ux16 update of an idle texture (%u updates)\n",
+          band_ms / bands, SW, bands);
+   result("subimg", bad, SW * SW);
+}
+
+/* bigfbo: frames of 30 blended full-target quads into a 2048x1200 FBO and a
+ * 1448x848 one, each frame waited for: the time a frame takes, and whether
+ * the GPU gets through them (dmesg: job timeouts) */
+static void
+bigfbo(void)
+{
+   const char *fs = "#version 110\n"
+                    "uniform sampler2D t;\n"
+                    "varying vec2 uv;\n"
+                    "void main() {\n"
+                    "   gl_FragColor = 0.25 * (texture2D(t, uv) + texture2D(t, uv.yx) +\n"
+                    "      texture2D(t, uv * 2.0) + texture2D(t, 1.0 - uv)) * 0.1;\n"
+                    "}\n";
+   static const int sz[2][2] = {{1448, 848}, {2048, 1200}};
+
+   for (unsigned k = 0; k < 2; k++) {
+      double worst = 0, sum = 0;
+      const unsigned frames = 60;
+
+      fbw = sz[k][0];
+      fbh = sz[k][1];
+      fbo(NULL, true);
+      GLuint p = program(vs_uv, fs);
+      glActiveTexture_(GL_TEXTURE0);
+      pattern(0);
+      glUniform1i_(glGetUniformLocation_(p, "t"), 0);
+      glEnable_(GL_BLEND);
+      glBlendFunc_(GL_ONE, GL_ONE);
+      for (unsigned f = 0; f < frames; f++) {
+         double t0 = now_ms();
+
+         glClearColor_(0, 0, 0, 1);
+         glClear_(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+         for (unsigned i = 0; i < 30; i++)
+            fullscreen();
+         glFinish_();
+         double ms = now_ms() - t0;
+         sum += ms;
+         worst = ms > worst ? ms : worst;
+      }
+      glDisable_(GL_BLEND);
+      printf("bigfbo %dx%d: %.1f ms a frame, worst %.1f ms\n", fbw, fbh,
+             sum / frames, worst);
+      result(k ? "bigfbo 2048x1200" : "bigfbo 1448x848",
+             glGetError_() != GL_NO_ERROR, 1);
+   }
+   fbw = fbh = S;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -799,7 +957,9 @@ main(int argc, char **argv)
                 {"blit", blit},
                 {"blitnpot", blitnpot},
                 {"npot", npot},
-                {"rtnpot", rtnpot}};
+                {"rtnpot", rtnpot},
+                {"subimg", subimg},
+                {"bigfbo", bigfbo}};
    for (unsigned i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
       bool on = argc < 2;
       for (int a = 1; a < argc; a++)
