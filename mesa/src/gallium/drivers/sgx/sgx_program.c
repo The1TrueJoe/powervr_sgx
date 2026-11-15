@@ -563,6 +563,8 @@ assign_varyings(nir_shader *nir, struct sgx_varyings *vary, bool sprite)
       v->comp = frac;
       v->comps = comps;
       v->precision = var->data.precision;
+      v->noperspective =
+         var->data.interpolation == INTERP_MODE_NOPERSPECTIVE;
       if (split) {
          /* (whole numbers to 65535: an F32 iteration) */
          v->split = true;
@@ -644,7 +646,8 @@ same_varyings(const struct sgx_varyings *a, const struct sgx_varyings *b)
       const struct sgx_varying *x = &a->v[i], *y = &b->v[i];
 
       if (strcmp(x->name, y->name) || x->set != y->set || x->comp != y->comp ||
-          x->rows != y->rows || x->comps != y->comps)
+          x->rows != y->rows || x->comps != y->comps ||
+          x->noperspective != y->noperspective)
          return false;
    }
    return true;
@@ -1211,6 +1214,18 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
 
       vary = *fs_vary;
       vary.point_size = sprite || psize;
+      /* Interpolation is the fragment shader's to say: a TGSI vertex
+       * shader's outputs (u_blitter's, st's) carry none, and one left
+       * perspective under a noperspective input never wrote the w the
+       * fragment shader divides by, so every pixel read the same texel (a
+       * blit from an FBO to the window one colour: OpenArena's
+       * renderer_opengl2, issue #5) */
+      nir_foreach_shader_out_variable (var, nir) {
+         for (unsigned i = 0; var->name && i < fs_vary->n; i++)
+            if (fs_vary->v[i].noperspective &&
+                !strcmp(var->name, fs_vary->v[i].name))
+               var->data.interpolation = INTERP_MODE_NOPERSPECTIVE;
+      }
    }
    so->reads_pointcoord =
       nir->info.stage == MESA_SHADER_FRAGMENT && vary.point_size;

@@ -154,6 +154,11 @@ struct sgx_varying {
     * low ones in set + 2 * row, the high ones in the next (rows counts
     * both) */
    bool split;
+   /* noperspective in the stage the layout came from (the gallium driver's
+    * fragment layouts): a vertex shader compiled to it writes v * w and w
+    * (SGX_NOPERSPECTIVE_W) though its own output doesn't say noperspective,
+    * as a TGSI vertex shader's never do */
+   bool noperspective;
 };
 
 /* noperspective: the vertex shader writes v * w (gl_Position.w) and w
