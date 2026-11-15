@@ -137,6 +137,12 @@ MODULE_PARM_DESC(probe_a58, "Bring-up (SGX530): event PDS enable value instead o
 module_param(probe_clkgate, uint, 0444);
 MODULE_PARM_DESC(probe_clkgate, "Bring-up (SGX530): CLKGATECTL value at start instead of the core's (default 0, off)");
 
+/* Bring-up probe (SGX530): extra init writes, reg,value pairs, after the core's script. */
+static unsigned int probe_init[16];
+static int probe_init_n;
+module_param_array(probe_init, uint, &probe_init_n, 0444);
+MODULE_PARM_DESC(probe_init, "Bring-up (SGX530): reg,value pairs written after the init script (default none)");
+
 static bool probe_530(struct pvrsgx_device *sdev, unsigned int v)
 {
 	return v && sdev->family->core == 530;
@@ -575,6 +581,12 @@ static int init_script_part2(struct pvrsgx_device *sdev)
 			val = probe_a74;
 		}
 		sgx_wr(sdev, fam->init_regs[i].reg, val);
+	}
+	for (int i = 0; fam->core == 530 && i + 1 < probe_init_n; i += 2) {
+		if (probe_init[i] >= 0x4000 || probe_init[i] & 3)
+			continue;
+		drm_warn(&sdev->base, "probe: init 0x%04x = 0x%08x\n", probe_init[i], probe_init[i + 1]);
+		sgx_wr(sdev, probe_init[i], probe_init[i + 1]);
 	}
 	/*
 	 * Code bases 0-9 the pixel shader heap, 10-13 the vertex shader heap, 15
