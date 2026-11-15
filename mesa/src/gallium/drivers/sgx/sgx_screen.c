@@ -42,6 +42,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "vertex inputs gathered into f32 x 4, not DMAed where they are"},
    {"novboslabs", SGX_DEBUG_NO_VBO_SLABS,
     "every buffer's device copy a BO of its own, not small ones cut from shared slabs"},
+   {"notexblits", SGX_DEBUG_NO_TEX_BLITS,
+    "blits into a texture through the CPU, as 0.2.0 did (only render targets on the GPU)"},
    {"nolazyscanout", SGX_DEBUG_NO_LAZY_SCANOUT,
     "scanout buffers on a dumb-buffer display (kmsro) are the display's from the start, not when a KMS handle is asked for"},
    {"nophasesplit", SGX_DEBUG_NO_PHASE_SPLIT,

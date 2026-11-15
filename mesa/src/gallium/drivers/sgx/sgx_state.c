@@ -704,6 +704,8 @@ blit_dst_ok(struct pipe_screen *pscreen, const struct sgx_resource *dst,
 {
    if (!dst->texture)
       return dst->bo.va && dst->pitch;
+   if (sgx_drv_debug & SGX_DEBUG_NO_TEX_BLITS)
+      return false;
    return dst->base.target == PIPE_TEXTURE_2D && dst->base.array_size == 1 &&
           dst->base.nr_samples <= 1 &&
           pscreen->is_format_supported(pscreen, format, PIPE_TEXTURE_2D, 0, 0,
