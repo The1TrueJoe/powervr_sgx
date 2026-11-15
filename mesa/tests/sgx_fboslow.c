@@ -20,6 +20,8 @@
  *   -C k      a new GL context (and FBOs) every k rounds
  *   -D file   after each round, the lines of file (a driver's debugfs status, say)
  *             that name a DPM register
+ *   -q x0,y0,x1,y1  the quad's corners in clip space (default -1,-1,1,1); x0 > x1: no
+ *             draw, the clear alone
  *   rounds    default 30
  *
  * It prints the milliseconds a frame per size per round, the renders so far, the
@@ -218,6 +220,7 @@ print_dpm(const char *path)
 }
 
 static GLuint tex[NSIZES], fbo[NSIZES];
+static GLfloat quad_box[4] = {-1, -1, 1, 1};
 
 static void
 make_fbos(unsigned mask)
@@ -266,7 +269,12 @@ shader(GLenum type, const char *src)
 static void
 setup_state(void)
 {
-   static const GLfloat quad[] = {-1, -1, 1, -1, -1, 1, 1, 1};
+   static GLfloat quad[8];
+
+   quad[0] = quad[4] = quad_box[0];
+   quad[1] = quad[3] = quad_box[1];
+   quad[2] = quad[6] = quad_box[2];
+   quad[5] = quad[7] = quad_box[3];
    GLuint prog = glCreateProgram_();
 
    glAttachShader_(prog, shader(GL_VERTEX_SHADER,
@@ -294,7 +302,8 @@ draw_frames(int s, int frames)
    t0 = now_ms();
    for (int i = 0; i < frames; i++) {
       glClear_(GL_COLOR_BUFFER_BIT);
-      glDrawArrays_(GL_TRIANGLE_STRIP, 0, 4);
+      if (quad_box[0] < quad_box[2])
+         glDrawArrays_(GL_TRIANGLE_STRIP, 0, 4);
       glFlush_();
    }
    glFinish_();
@@ -314,7 +323,7 @@ main(int argc, char **argv)
    EGLContext ctx;
    bool fail = false;
 
-   while ((opt = getopt(argc, argv, "z:s:f:R:C:D:")) != -1) {
+   while ((opt = getopt(argc, argv, "z:s:f:R:C:D:q:")) != -1) {
       switch (opt) {
       case 'z': {
          char *p = optarg;
@@ -336,9 +345,14 @@ main(int argc, char **argv)
       case 'R': refbo = atoi(optarg); break;
       case 'C': rectx = atoi(optarg); break;
       case 'D': dpm = optarg; break;
+      case 'q':
+         if (sscanf(optarg, "%f,%f,%f,%f", &quad_box[0], &quad_box[1], &quad_box[2],
+                    &quad_box[3]) != 4)
+            return 2;
+         break;
       default:
          fprintf(stderr, "usage: sgx_fboslow [-z WxH,...] [-s mask] [-f frames] [-R k] [-C k] "
-                         "[-D file] [rounds]\n");
+                         "[-D file] [-q x0,y0,x1,y1] [rounds]\n");
          return 2;
       }
    }
