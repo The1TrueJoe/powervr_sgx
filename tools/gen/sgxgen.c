@@ -1171,7 +1171,12 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 		c->state_emit[n] = usse_load(c, usse_state_emit[n], 1);
 	/* the DDK's static state program: tst; bra; doutd; tst; bra; doutd; doutu */
 	pds_d0(&p, 0, b.va);
-	pds_d0(&p, 1, dma_ctrl(dma_dwords, 0, kind, 1));
+	/* SGXGEN_STATE_PRIMARY: the 530 vendor's TA state block DMA, 0x00e00007 for 8 dwords:
+	 * kind (dwords - 1) & 7 and no secondary bit (its vertex secondary DMA has it) */
+	if (getenv("SGXGEN_STATE_PRIMARY"))
+		pds_d0(&p, 1, dma_ctrl(dma_dwords, 0, (dma_dwords - 1) & 7, 0));
+	else
+		pds_d0(&p, 1, dma_ctrl(dma_dwords, 0, kind, 1));
 	pds_d0(&p, 2, 0);
 	pds_d0(&p, 3, 0);
 	pds_d0(&p, 4, doutu_w0(c, c->state_emit[n], 1, 0) | (getenv("SGXGEN_STATE_BIT21") ? 0x200000 : 0));
