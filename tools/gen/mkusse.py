@@ -171,14 +171,23 @@ def to530(lines):
     return out
 
 
+# SGXGEN_EMIT530 twins have no phas.i, as the SGX535's tasks don't: on the 530 a
+# phas.i #0 looks to start a next phase at the code window's base. Built when
+# MKUSSE_530_PHAS is unset; set it to keep the phas.i line.
+def NOPHAS(lines):
+    if os.environ.get("MKUSSE_530_PHAS"):
+        return lines
+    return [ln for ln in lines if not ln.startswith("phas.i")]
+
+
 EMIT530 = []
 for name in list(PROGS):
     if name.startswith("state_emit_"):
         n = int(name.rsplit("_", 1)[1])
-        PROGS[name + "_530"] = PROGS[name][:-3] + [f"emit.t1 r0, #{n}, #0 [end f3_20]"]
+        PROGS[name + "_530"] = NOPHAS(PROGS[name][:-3] + [f"emit.t1 r0, #{n}, #0 [end f3_20]"])
         EMIT530.append(name)
     elif to530(PROGS[name]):
-        PROGS[name + "_530"] = to530(PROGS[name])
+        PROGS[name + "_530"] = NOPHAS(to530(PROGS[name]))
         EMIT530.append(name)
 
 
