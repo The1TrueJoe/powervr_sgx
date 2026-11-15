@@ -19,6 +19,11 @@
  *   blit     an FBO with an RGBA8 and a 24-bit depth texture blitted to the
  *            default framebuffer, straight and flipped (ioquake3's
  *            renderer_opengl2 and wined3d present their frames that way)
+ *   blitnpot the same from a 60x44 FBO (NPOT: a linear texture, as a
+ *            window-sized one is)
+ *   npot     a 60x44 texture sampled over the target, plainly and at a
+ *            computed coordinate
+ *   rtnpot   the same of a 60x44 texture rendered into first
  *
  *   sgx_gamefix [part...]
  *
@@ -91,6 +96,7 @@ L(const char *n)
    X(glTexImage2D)                                                             \
    X(glTexImage3D)                                                             \
    X(glTexParameteri)                                                          \
+   X(glUniform1f)                                                              \
    X(glUniform1i)                                                              \
    X(glUniform2f)                                                              \
    X(glUseProgram)                                                             \
@@ -142,6 +148,9 @@ program(const char *vs, const char *fs)
    return p;
 }
 
+/* the FBO's size (blitnpot changes it) */
+static int fbw = S, fbh = S;
+
 /* a 64x64 RGBA8 colour texture (and a 24-bit depth one) as the FBO's */
 static GLuint
 fbo(GLuint *colour, bool depth)
@@ -154,15 +163,15 @@ fbo(GLuint *colour, bool depth)
    glBindTexture_(GL_TEXTURE_2D, t[0]);
    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-   glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                 NULL);
+   glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, fbw, fbh, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, NULL);
    glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                            t[0], 0);
    if (depth) {
       glBindTexture_(GL_TEXTURE_2D, t[1]);
       glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
       glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-      glTexImage2D_(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, S, S, 0,
+      glTexImage2D_(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, fbw, fbh, 0,
                     GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
       glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                               GL_TEXTURE_2D, t[1], 0);
@@ -171,7 +180,7 @@ fbo(GLuint *colour, bool depth)
       printf("framebuffer incomplete\n");
    if (colour)
       *colour = t[0];
-   glViewport_(0, 0, S, S);
+   glViewport_(0, 0, fbw, fbh);
    return fb;
 }
 
@@ -519,21 +528,28 @@ static unsigned blit_flip;
 static void
 quadrant(unsigned x, unsigned y, float c[4])
 {
-   unsigned q = (x >= S / 2) + 2 * (y >= S / 2);
+   unsigned q = (x >= (unsigned)fbw / 2) + 2 * (y >= (unsigned)fbh / 2);
    const float v[4][4] = {
       {255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255}, {255, 255, 0, 255}};
 
    memcpy(c, v[q], sizeof(v[q]));
 }
 
+static bool noalpha_fb;
+
 static void
 want_blit(unsigned x, unsigned y, float c[4])
 {
-   quadrant(x, blit_flip ? S - 1 - y : y, c);
+   if (x >= (unsigned)fbw || y >= (unsigned)fbh) {
+      memset(c, 0, 4 * sizeof(float));
+      c[3] = noalpha_fb ? 255 : 0;
+      return;
+   }
+   quadrant(x, blit_flip ? fbh - 1 - y : y, c);
 }
 
 static void
-blit(void)
+blit_part(const char *name)
 {
    const char *fs = "#version 110\n"
                     "varying vec2 uv;\n"
@@ -553,17 +569,162 @@ blit(void)
    glDepthFunc_(GL_LESS);
    fullscreen();
    glDisable_(GL_DEPTH_TEST);
-   result("blit fbo", check("blit fbo", quadrant, 1), S * S);
+   if (fbw == S && fbh == S)
+      result("blit fbo", check("blit fbo", quadrant, 1), S * S);
    for (blit_flip = 0; blit_flip < 2; blit_flip++) {
+      char part[64];
       glBindFramebuffer_(GL_READ_FRAMEBUFFER, fb);
       glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, 0);
       glClearColor_(0, 0, 0, 0);
       glClear_(GL_COLOR_BUFFER_BIT);
-      glBlitFramebuffer_(0, 0, S, S, 0, blit_flip ? S : 0, S, blit_flip ? 0 : S,
-                         GL_COLOR_BUFFER_BIT, GL_NEAREST);
+      glBlitFramebuffer_(0, 0, fbw, fbh, 0, blit_flip ? fbh : 0, fbw,
+                         blit_flip ? 0 : fbh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
       glBindFramebuffer_(GL_FRAMEBUFFER, 0);
-      result(blit_flip ? "blit to default, flipped" : "blit to default",
-             check("blit", want_blit, 1), S * S);
+      snprintf(part, sizeof(part), "%s to default%s", name,
+               blit_flip ? ", flipped" : "");
+      result(part, check(part, want_blit, 1), S * S);
+   }
+}
+
+static void
+blit(void)
+{
+   fbw = fbh = S;
+   blit_part("blit");
+}
+
+/* the same from an NPOT FBO (a linear texture, as a window-sized one is) */
+static void
+blitnpot(void)
+{
+   fbw = 60;
+   fbh = 44;
+   blit_part("blitnpot");
+   fbw = fbh = S;
+}
+
+/* npot: a 60x44 texture (NPOT: laid out linear) sampled over the 64x64
+ * target, plainly (the PDS samples) and at a computed coordinate (smp in the
+ * program, as u_blitter's explicit-LOD read is), NEAREST: the texel each
+ * pixel centre falls in */
+#define NW 60
+#define NH 44
+
+static void
+npot_texel(unsigned x, unsigned y, unsigned char c[4])
+{
+   c[0] = x * 4;
+   c[1] = y * 5;
+   c[2] = (x ^ y) * 3;
+   c[3] = 255;
+}
+
+static void
+want_npot(unsigned x, unsigned y, float c[4])
+{
+   unsigned char u[4];
+
+   npot_texel((x * 2 + 1) * NW / (2 * S), (y * 2 + 1) * NH / (2 * S), u);
+   for (unsigned k = 0; k < 4; k++)
+      c[k] = u[k];
+}
+
+static void
+npot(void)
+{
+   static unsigned char px[NW * NH * 4];
+   const char *fs[2] = {"#version 110\n"
+                        "uniform sampler2D t;\n"
+                        "varying vec2 uv;\n"
+                        "void main() { gl_FragColor = texture2D(t, uv); }\n",
+                        "#version 110\n"
+                        "uniform sampler2D t;\n"
+                        "uniform float one;\n"
+                        "varying vec2 uv;\n"
+                        "void main() { gl_FragColor = texture2D(t, uv * one); }\n"};
+   GLuint t;
+
+   for (unsigned y = 0; y < NH; y++)
+      for (unsigned x = 0; x < NW; x++)
+         npot_texel(x, y, &px[(y * NW + x) * 4]);
+   glActiveTexture_(GL_TEXTURE0);
+   glGenTextures_(1, &t);
+   glBindTexture_(GL_TEXTURE_2D, t);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+   glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, NW, NH, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, px);
+   for (unsigned i = 0; i < 2; i++) {
+      fbo(NULL, false);
+      glBindTexture_(GL_TEXTURE_2D, t);
+      GLuint p = program(vs_uv, fs[i]);
+      glUniform1i_(glGetUniformLocation_(p, "t"), 0);
+      if (i)
+         glUniform1f_(glGetUniformLocation_(p, "one"), 1.0f);
+      fullscreen();
+      result(i ? "npot dependent" : "npot", check("npot", want_npot, 0),
+             S * S);
+   }
+}
+
+/* rtnpot: a 60x44 texture rendered into (the quadrant pattern), then
+ * sampled over a 64x64 target as npot does, as a render-to-texture post
+ * pass (and u_blitter's copy of an FBO to the window) reads it */
+static void
+want_rtnpot(unsigned x, unsigned y, float c[4])
+{
+   int sx = fbw, sy = fbh;
+
+   fbw = NW;
+   fbh = NH;
+   quadrant((x * 2 + 1) * NW / (2 * S), (y * 2 + 1) * NH / (2 * S), c);
+   fbw = sx;
+   fbh = sy;
+}
+
+static void
+rtnpot(void)
+{
+   const char *quad = "#version 110\n"
+                      "varying vec2 uv;\n"
+                      "void main() {\n"
+                      "   vec2 h = step(0.5, uv);\n"
+                      "   gl_FragColor = mix(mix(vec4(1.0, 0.0, 0.0, 1.0), "
+                      "vec4(0.0, 1.0, 0.0, 1.0), h.x), mix(vec4(0.0, 0.0, 1.0, 1.0), "
+                      "vec4(1.0, 1.0, 0.0, 1.0), h.x), h.y);\n"
+                      "}\n";
+   const char *fs[2] = {"#version 110\n"
+                        "uniform sampler2D t;\n"
+                        "varying vec2 uv;\n"
+                        "void main() { gl_FragColor = texture2D(t, uv); }\n",
+                        "#version 110\n"
+                        "uniform sampler2D t;\n"
+                        "uniform float one;\n"
+                        "varying vec2 uv;\n"
+                        "void main() { gl_FragColor = texture2D(t, uv * one); }\n"};
+   GLuint t;
+
+   fbw = NW;
+   fbh = NH;
+   fbo(&t, true);
+   fbw = fbh = S;
+   program(vs_uv, quad);
+   glClearColor_(0.5f, 0.5f, 0.5f, 1);
+   glClear_(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+   fullscreen();
+   for (unsigned i = 0; i < 2; i++) {
+      fbo(NULL, false);
+      glActiveTexture_(GL_TEXTURE0);
+      glBindTexture_(GL_TEXTURE_2D, t);
+      GLuint p = program(vs_uv, fs[i]);
+      glUniform1i_(glGetUniformLocation_(p, "t"), 0);
+      if (i)
+         glUniform1f_(glGetUniformLocation_(p, "one"), 1.0f);
+      fullscreen();
+      result(i ? "rtnpot dependent" : "rtnpot", check("rtnpot", want_rtnpot, 1),
+             S * S);
    }
 }
 
@@ -587,15 +748,38 @@ main(int argc, char **argv)
    if (!initialize(d, NULL, NULL))
       return 2;
    bindapi(EGL_OPENGL_API);
-   EGLint ca[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RED_SIZE, 8,
-                  EGL_ALPHA_SIZE, 8, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+   /* SGX_GAMEFIX_RGBX=1: a default framebuffer without alpha, as an X
+    * window of a 24-bit visual is */
+   const char *rgbx = getenv("SGX_GAMEFIX_RGBX");
+   bool noalpha = rgbx && *rgbx == '1';
+   /* SGX_GAMEFIX_WINDOW=1: the default framebuffer is EGL's window (the
+    * fbdev platform's framebuffer console): a render target, not a texture,
+    * as an X window's back buffer is, so blits to it go through the GPU */
+   const char *win = getenv("SGX_GAMEFIX_WINDOW");
+   bool window = win && *win == '1';
+   EGLint ca[] = {EGL_SURFACE_TYPE, window ? EGL_WINDOW_BIT : EGL_PBUFFER_BIT,
+                  EGL_RED_SIZE, 8, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
                   EGL_NONE};
-   EGLConfig cfg;
+   EGLConfig cfgs[64], cfg = NULL;
    EGLint n = 0;
-   if (!chooseconfig(d, ca, &cfg, 1, &n) || !n)
+   PFNEGLGETCONFIGATTRIBPROC getattr =
+      (void *)dlsym(egl, "eglGetConfigAttrib");
+   if (!chooseconfig(d, ca, cfgs, 64, &n) || !n)
       return 2;
+   for (EGLint i = 0; i < n && !cfg; i++) {
+      EGLint a = 0;
+      getattr(d, cfgs[i], EGL_ALPHA_SIZE, &a);
+      if (noalpha ? a == 0 : a == 8)
+         cfg = cfgs[i];
+   }
+   if (!cfg)
+      return 2;
+   noalpha_fb = noalpha;
    EGLint sa[] = {EGL_WIDTH, S, EGL_HEIGHT, S, EGL_NONE};
-   EGLSurface s = createpbuffer(d, cfg, sa);
+   PFNEGLCREATEWINDOWSURFACEPROC createwindow =
+      (void *)dlsym(egl, "eglCreateWindowSurface");
+   EGLSurface s = window ? createwindow(d, cfg, 0, NULL)
+                         : createpbuffer(d, cfg, sa);
    EGLContext c = createcontext(d, cfg, EGL_NO_CONTEXT, NULL);
    if (!s || !c || !makecurrent(d, s, s, c))
       return 2;
@@ -612,7 +796,10 @@ main(int argc, char **argv)
                 {"taps24", taps24},
                 {"tex3d", tex3d},
                 {"stream", stream},
-                {"blit", blit}};
+                {"blit", blit},
+                {"blitnpot", blitnpot},
+                {"npot", npot},
+                {"rtnpot", rtnpot}};
    for (unsigned i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
       bool on = argc < 2;
       for (int a = 1; a < argc; a++)
