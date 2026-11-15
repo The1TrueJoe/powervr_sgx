@@ -164,3 +164,34 @@ fetches it.
 sequence on the SGX530. That is out of scope for this session (see the hand-over note). On
 the client side, the VDM info word's bits 8-17 vary per program in the vendor stream (0x2a2,
 0x161, 0x2c2). Ours is always 0x2a2, which matches only the vendor's first program.
+
+## Follow-up 02:47-02:55 UTC: the PDS does fetch; the 530's DOUTU code offset; the clear program never launches
+
+**The PDS fetches and runs other programs.** `SGXGEN_LEAD_HALT` (4011a1b6) puts a
+HALT-only program, with the secondary-DMA info form 0x16100, first in the VDM stream. The
+PDS runs it and moves on: `PDS_PC_BASE` reads 0x0020049c, the clear program's code start
+(0x0e001270) behind it. So the earlier no-fault results mean **PDS fetch faults aren't
+reported**. They don't mean the PDS never fetches.
+
+**A USSE task launches, and its code fetch faults.** With `SGXGEN_LEAD_EMPTY`, the first
+program is the empty update (a DOUTU of the empty vertex task, form 0x16100). The job faults
+at **0x0fc01000**, requestor b2 (BIF status 0x4004). The empty task's code is at
+0x0fc08100: window offset 0x8100 from vertex code base 10 (0x0fc00000). Its DOUTU word 0 is
+0x0001020a, the SGX545 encoding (offset / 8 at b4). The 530 fetched at 0x1020.
+
+**The 530's DOUTU offset is a byte offset at b4, in a window under 32 KiB.**
+`SGXGEN_DOUTU530` (d56a6963) encodes `offset << 4`, which is word 0x0008100a. The fault
+moves to **0x0fc00000**: 0x8100 lost its b15. Both points fit `byte offset = (w >> 4) &
+mask`, with 0x1ff8 ⊆ mask and no b15. The vendor stream's words 0x281a, 0x0f1a, 0x200a and
+0x100a are small offsets under this reading. (b4 is set in two of them; the low 3 bits of
+an 8-byte instruction address are presumably ignored.) The microkernel's own entry is
+offset 0, so this was never exercised before. `SGXGEN_CODE_RING` (a227b720) shrinks the code
+rings so their code sits inside the window. The kernel's code-base spacing (512 KiB per
+base) also wants a per-core look.
+
+**The clear's state program never starts its task.** With DOUTU530, the clear program's
+DOUTU would launch its state-emit task at an out-of-window address and fault, as the empty
+task did. It doesn't, with or without its DMA (`SGXGEN_STATE_NODMA`, whose DS0[0] = 0 makes
+its own `tst; bra` skip the DOUTD). The PC still sits on that program. The programs that
+ran carried info form 0x16100; this one carries the TA-block form 0x2a200 (the vendor's, for
+its first program too). Next: `SGXGEN_STATE_INFO` (efc7ec99) overrides that form.
