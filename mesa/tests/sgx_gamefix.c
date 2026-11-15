@@ -26,6 +26,8 @@
  *   rtnpot   the same of a 60x44 texture rendered into first
  *   subimg   a sampled 128x128 texture updated by rows and small rectangles
  *            between draws, every texel checked; the time an update takes
+ *   drawbuffers2  four colour buffers, a colour mask each for a clear and a
+ *            draw, blending on one: GL_EXT_draw_buffers2, ARB_draw_buffers_blend
  *   bigfbo   blended full-target frames into 2048x1200 and 1448x848 FBOs: the
  *            time a frame takes (run it and look for job timeouts)
  *
@@ -102,6 +104,8 @@ L(const char *n)
    X(glTexImage3D)                                                             \
    X(glTexSubImage2D)                                                          \
    X(glBlendFunc)                                                              \
+   X(glDrawBuffers)                                                            \
+   X(glReadBuffer)                                                             \
    X(glTexParameteri)                                                          \
    X(glUniform1f)                                                              \
    X(glUniform1i)                                                              \
@@ -886,6 +890,104 @@ bigfbo(void)
    fbw = fbh = S;
 }
 
+/* drawbuffers2: four colour buffers, each with its own colour mask
+ * (glColorMaskIndexedEXT, GL_EXT_draw_buffers2) for a clear and a draw, and
+ * blending on the last one only (glEnableIndexedEXT, glBlendFunciARB): every
+ * channel of every buffer checked (Portal and other Source games, issue #5) */
+static void
+drawbuffers2(void)
+{
+   const char *ext = (const char *)glGetString_(GL_EXTENSIONS);
+   if (!strstr(ext, "GL_EXT_draw_buffers2") ||
+       !strstr(ext, "GL_ARB_draw_buffers_blend")) {
+      printf("drawbuffers2: GL_EXT_draw_buffers2 %s, GL_ARB_draw_buffers_blend %s\n",
+             strstr(ext, "GL_EXT_draw_buffers2") ? "yes" : "no",
+             strstr(ext, "GL_ARB_draw_buffers_blend") ? "yes" : "no");
+      result("drawbuffers2 offered", 1, 1);
+      return;
+   }
+   void (*mask_i)(GLuint, GLboolean, GLboolean, GLboolean, GLboolean) =
+      L("glColorMaskIndexedEXT");
+   void (*enable_i)(GLenum, GLuint) = L("glEnableIndexedEXT");
+   void (*disable_i)(GLenum, GLuint) = L("glDisableIndexedEXT");
+   void (*blendfunc_i)(GLuint, GLenum, GLenum) = L("glBlendFunciARB");
+   const char *fs = "#version 110\n"
+                    "void main() {\n"
+                    "   gl_FragData[0] = vec4(0.8, 0.2, 0.4, 0.6);\n"
+                    "   gl_FragData[1] = vec4(0.6, 0.8, 0.2, 0.4);\n"
+                    "   gl_FragData[2] = vec4(0.4, 0.6, 0.8, 0.2);\n"
+                    "   gl_FragData[3] = vec4(0.2, 0.4, 0.6, 0.8);\n"
+                    "}\n";
+   static const float c[4][4] = {{0.8f, 0.2f, 0.4f, 0.6f},
+                                 {0.6f, 0.8f, 0.2f, 0.4f},
+                                 {0.4f, 0.6f, 0.8f, 0.2f},
+                                 {0.2f, 0.4f, 0.6f, 0.8f}};
+   static const float A[4] = {0.1f, 0.2f, 0.3f, 0.4f}, B[4] = {0.9f, 0.7f, 0.5f, 0.3f};
+   /* the masks: all, R, none, G and A */
+   static const bool M[4][4] = {{1, 1, 1, 1}, {1, 0, 0, 0}, {0, 0, 0, 0}, {0, 1, 0, 1}};
+   const GLenum bufs[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                           GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+   GLuint fb, t[4];
+   float want[4][4];
+   unsigned bad = 0;
+
+   glGenFramebuffers_(1, &fb);
+   glBindFramebuffer_(GL_FRAMEBUFFER, fb);
+   glGenTextures_(4, t);
+   for (unsigned i = 0; i < 4; i++) {
+      glBindTexture_(GL_TEXTURE_2D, t[i]);
+      glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA,
+                    GL_UNSIGNED_BYTE, NULL);
+      glFramebufferTexture2D_(GL_FRAMEBUFFER, bufs[i], GL_TEXTURE_2D, t[i], 0);
+   }
+   glDrawBuffers_(4, bufs);
+   glViewport_(0, 0, S, S);
+   program(vs_uv, fs);
+   glClearColor_(A[0], A[1], A[2], A[3]);
+   glClear_(GL_COLOR_BUFFER_BIT);
+   for (unsigned i = 0; i < 4; i++)
+      mask_i(i, M[i][0], M[i][1], M[i][2], M[i][3]);
+   glClearColor_(B[0], B[1], B[2], B[3]);
+   glClear_(GL_COLOR_BUFFER_BIT);
+   for (unsigned i = 0; i < 4; i++)
+      for (unsigned k = 0; k < 4; k++)
+         want[i][k] = M[i][k] ? B[k] : A[k];
+   /* blending on buffer 3 only, adding */
+   for (unsigned i = 0; i < 3; i++)
+      disable_i(GL_BLEND, i);
+   enable_i(GL_BLEND, 3);
+   blendfunc_i(3, GL_ONE, GL_ONE);
+   fullscreen();
+   for (unsigned i = 0; i < 4; i++)
+      for (unsigned k = 0; k < 4; k++)
+         if (M[i][k])
+            want[i][k] = i == 3 ? (want[i][k] + c[i][k] > 1 ? 1 : want[i][k] + c[i][k])
+                                : c[i][k];
+   for (unsigned i = 0; i < 4; i++) {
+      static unsigned char px[S * S * 4];
+
+      glReadBuffer_(bufs[i]);
+      glReadPixels_(0, 0, S, S, GL_RGBA, GL_UNSIGNED_BYTE, px);
+      for (unsigned p = 0; p < S * S; p++)
+         for (unsigned k = 0; k < 4; k++) {
+            int d = (int)px[p * 4 + k] - (int)(want[i][k] * 255 + 0.5f);
+            if (d > 2 || d < -2) {
+               if (bad < 4)
+                  printf("drawbuffers2: buffer %u channel %u = %u, want %.0f\n",
+                         i, k, px[p * 4 + k], want[i][k] * 255);
+               bad++;
+               p = S * S;
+               break;
+            }
+         }
+   }
+   for (unsigned i = 0; i < 4; i++)
+      mask_i(i, 1, 1, 1, 1);
+   disable_i(GL_BLEND, 3);
+   result("drawbuffers2", bad, 4);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -959,7 +1061,8 @@ main(int argc, char **argv)
                 {"npot", npot},
                 {"rtnpot", rtnpot},
                 {"subimg", subimg},
-                {"bigfbo", bigfbo}};
+                {"bigfbo", bigfbo},
+                {"drawbuffers2", drawbuffers2}};
    for (unsigned i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
       bool on = argc < 2;
       for (int a = 1; a < argc; a++)
