@@ -696,6 +696,10 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 	ring_init(d, &c->pds_pix, H_PDSPIXEL, 0x10000);
 	ring_init(d, &c->pds_vtx, H_PDSVERTEX, 0x10000);
 	ring_init(d, &c->gen, H_GENERAL, 0x40000);
+	/* SGXGEN_GEN_PAD: bytes skipped at the gen ring's start, moving every buffer in it
+	 * (bring-up probe: does a fault address move with the vertex and index data?) */
+	if (getenv("SGXGEN_GEN_PAD"))
+		c->gen.used += env_u32("SGXGEN_GEN_PAD");
 	ring_init(d, &c->vdm, H_GENERAL, 0x5000);
 
 	/* fixed USSE programs */
