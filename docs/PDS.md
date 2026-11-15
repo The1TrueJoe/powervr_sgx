@@ -308,8 +308,8 @@ unknown. The notation shows it as `.hi`, and nothing should emit it.
   but `pds1`'s word does not. In this field that is the value 8, 32
   temporaries; that reading is a guess.
 
-**Word 0 on the SGX530.** The code offset is in **bytes** at bit 4, and a code
-base reaches less than 32 KiB:
+**Word 0 on the SGX530.** The code offset is in bytes, 8-byte aligned, with
+offset bits 3-14 at bits 7-18 and offset bit 15 at bit 4 (below):
 
 - Hardware (an OMAP3630 board, 2026-11-15; `docs/log/entries/2026-11-15-0120-sgx530-unmap-probe-pds-pc.md`):
   - An empty vertex task at window offset 0x8100 from code base 10, encoded the
@@ -324,10 +324,19 @@ base reaches less than 32 KiB:
   `drm_powervr_sgx_heap.usse_window_log2` (15) and the form as
   `DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES`, and it spaces the code bases one
   window apart.
+- **Bit 4 is code offset bit 15** (+32 KiB). Hardware (an OMAP3630 board,
+  2026-11-15; `docs/log/entries/2026-11-15-2245-sgx530-sgx535-ta-sequence.md`):
+  with bit 4 set on the state and vertex tasks' words, each task faulted on its
+  code fetch at code base 10 + 0x8000 + its offset, for code at window offsets
+  0x1000, 0x2000 and 0x4000 alike. With the bit-19 result above, the layout is
+  offset bits 3-14 at bits 7-18 and offset bit 15 at bit 4, so a code base
+  reaches 64 KiB. (Bits 5-6 are unknown; they may carry offset bits 16-17.)
 - Capture: the vendor stream's words 0x0000281a, 0x00200f1a, 0x0000200a and
-  0x0000100a are small offsets under this reading. Bit 4 is set in the words of
-  every task that emits to the MTE and in no other, and bit 21 in the state-emit
-  ones. What either bit does is unknown: setting bit 4 on ours changed nothing.
+  0x0000100a. Bit 4 is set in the words of every task that emits to the MTE and
+  in no other: the vendor puts that code 32 KiB or more above its code base.
+  Bit 21 is set in the state-emit ones; what it does is unknown. (Setting bit 4
+  on ours "changed nothing" while the PDS still held those tasks, 2026-11-15
+  before 0xa74 was fixed.)
 - Whether phas.i targets count from the window base as on the SGX545 isn't
   tested on this core yet (guess: they do).
 
