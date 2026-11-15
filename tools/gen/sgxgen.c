@@ -1229,7 +1229,11 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	vdm(c, 0x40000000 | vdm_pds(c, va));
 	/* info: rows, the rotating buffer index + 0x2000, 0x2020400, dwords */
 	/* SGXGEN_VDMINFO530: the 530 vendor stream's low bits, 0x2a200 | dwords */
-	if (getenv("SGXGEN_VDMINFO530"))
+	/* SGXGEN_STATE_INFO=<form>: the state program's info-word form instead (bring-up probe:
+	 * the 530 runs programs under 0x16100 but holds the PC at one under 0x2a200) */
+	if (getenv("SGXGEN_STATE_INFO"))
+		vdm(c, rows << 26 | env_u32("SGXGEN_STATE_INFO") | ((n + 3) >> 2));
+	else if (getenv("SGXGEN_VDMINFO530"))
 		vdm(c, rows << 26 | 0x2a200 | ((n + 3) >> 2));
 	else
 		vdm(c, rows << 26 | ((c->vdm_counter + 0x2000) | 0x2020400 | ((n + 3) >> 2)));
