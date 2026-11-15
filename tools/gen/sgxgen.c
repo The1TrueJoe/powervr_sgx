@@ -257,9 +257,31 @@ static uint32_t usse_load(struct sgx_ctx *c, const struct usse_prog *pr, int ver
 	struct sgx_ptr p;
 
 	/* Probe (SGX530): the SGX535's one-phase state and vertex emits. */
-	/* =state or =vs limits it to the state-emit or the vertex programs */
+	/* =state or =vs limits it to the state-emit or the vertex programs; =state1 is
+	 * =state with the one-emit ending, whose last instruction SGXGEN_STATE_LAST=lo,hi
+	 * replaces (an emit-encoding sweep) */
 	const char *e530 = getenv("SGXGEN_EMIT530");
+	static uint32_t patched[64];
 
+	if (e530 && !strcmp(e530, "state1")) {
+		for (unsigned i = 0; i < sizeof(usse_emit530s) / sizeof(usse_emit530s[0]); i++)
+			if (usse_emit530s[i][0] == pr) {
+				pr = usse_emit530s[i][1];
+				if (getenv("SGXGEN_STATE_LAST") && pr->n <= 32) {
+					static struct usse_prog cp;
+					const char *v = getenv("SGXGEN_STATE_LAST");
+
+					memcpy(patched, pr->w, pr->n * 8);
+					patched[2 * pr->n - 2] = (uint32_t)strtoul(v, NULL, 0);
+					patched[2 * pr->n - 1] = (uint32_t)strtoul(strchr(v, ',') + 1, NULL, 0);
+					cp = *pr;
+					cp.w = patched;
+					pr = &cp;
+				}
+				break;
+			}
+		e530 = NULL;
+	}
 	if (e530)
 		for (unsigned i = 0; i < sizeof(usse_emit530) / sizeof(usse_emit530[0]); i++)
 			if (usse_emit530[i][0] == pr &&
