@@ -198,7 +198,10 @@ int main(int argc, char **argv)
 		memset(s->color.map, 0, s->stride * h * 4);
 		sgx_set_framebuffer(c, s);
 		sgx_clear(c, clear, 1.0f);
-		if ((e = sgx_draw(c, &d))) {
+		/* SGXGEN_CLEAR_ONLY (bring-up): the clear alone, so the centre wants the clear colour */
+		if (getenv("SGXGEN_CLEAR_ONLY"))
+			want_tri = want_bg;
+		else if ((e = sgx_draw(c, &d))) {
 			fprintf(stderr, "powervr_sgx_frame: draw: %d\n", e);
 			return 1;
 		}
