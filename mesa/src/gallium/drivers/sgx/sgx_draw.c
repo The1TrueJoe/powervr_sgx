@@ -1736,6 +1736,13 @@ sgx_draw_fini(struct sgx_context *ctx)
    ctx->vcache = NULL;
 }
 
+/* a draw that records nothing, and why (SGX_DEBUG=draw) */
+#define SKIP(why)                                                              \
+   do {                                                                        \
+      SGX_DBG(DRAW, "draw skipped: %s\n", why);                               \
+      return;                                                                  \
+   } while (0)
+
 static void
 sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
                   unsigned drawid_offset,
@@ -1764,11 +1771,11 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
    unsigned raw_bytes[16];
 
    if (indirect || !ctx->vs || !ctx->fs)
-      return;
+      SKIP("indirect, or no vertex or fragment shader");
    /* the fragment shader as these textures need it (sRGB decoded) */
    struct sgx_pipe_shader *fs = sgx_fs_for(ctx, ctx->fs);
    if (!fs)
-      return;
+      SKIP("no fragment shader variant");
    /* cube maps sampled without mipmapping, from their level-0 copy: brought
     * up to date before anything of this draw is recorded (it may wait).
     * Only the units the shader samples: a view left bound to another unit
@@ -1802,7 +1809,7 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
                            view->u.tex.last_level);
       if (view && sgx_tex_uses_cube0(view, ctx->samplers[unit]) &&
           !sgx_resource_cube0(ctx, sgx_resource(view->texture)))
-         return;
+         SKIP("no level-0 copy of a cube map");
    }
    build_state(ctx, &st);
    if (ctx->rasterizer) {
@@ -1817,7 +1824,7 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       st.bias_factor = st.depth_bias ? rs->offset_scale : 0.0f;
    }
    if (!build_clip(ctx, &st.clip))
-      return; /* nothing visible: a zero-area scissor or viewport */
+      SKIP("a zero-area scissor or viewport");
    /* both faces culled: no triangle survives (lines and points aren't culled) */
    if (ctx->rasterizer &&
        ctx->rasterizer->base.cull_face == PIPE_FACE_FRONT_AND_BACK &&
@@ -1889,12 +1896,12 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       /* the fragment shader's sets (gl_PointCoord: the vertex shader's
        * varyings move up to leave set 0 free) */
       if (vfs && fs->reads_pointcoord && !ctx->vs->writes_psize)
-         return;
+         SKIP("gl_PointCoord without a point size");
       if (vfs || raw || points) {
          if (raw && !(vs = sgx_vs_for(ctx, ctx->vs, vfs, vfmt, points)))
             raw = false;
          if (!raw && !(vs = sgx_vs_for(ctx, ctx->vs, vfs, NULL, points)))
-            return;
+            SKIP("no vertex shader variant");
       }
       if (vfs)
          st.sprite = fs->reads_pointcoord && info->mode == MESA_PRIM_POINTS;
@@ -1909,14 +1916,14 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       d.vs_consts = vsc;
       n_fetch = ctx->vs->n_attribs;
    } else if (ctx->vs->kind != SGX_SHADER_VS_POSITION) {
-      return;
+      SKIP("a vertex shader that isn't compiled");
    }
    if (fs->kind == SGX_SHADER_COMPILED) {
       fsp = fs->prog;
       if (blend) {
          fsp.code = sgx_fs_program(ctx, fs, blend);
          if (!fsp.code)
-            return;
+            SKIP("no blend variant of the fragment program");
       }
       /* pass type: a blend 1; discard 4, or 2 with a blend; a depthf
        * (gl_FragDepth) 5 (ISA.md, H10) */
@@ -2027,6 +2034,15 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
          sgx_tex_words(view, ctx->samplers[unit - 1], tex[unit - 1]);
          sgx_resource(view->texture)->use_seq = sgxws_next_seq(ctx->hw);
          sampled |= 1u << (unit - 1);
+         SGX_DBG(DRAW,
+                 "  sample (PDS) %u: unit %u %s %ux%u target %u levels %u-%u, %s, state %08x %08x %08x %08x\n",
+                 i, unit - 1, util_format_short_name(view->format),
+                 view->texture->width0, view->texture->height0,
+                 view->texture->target, view->u.tex.first_level,
+                 view->u.tex.last_level,
+                 sgx_resource(view->texture)->texture ? "texture" : "render target",
+                 tex[unit - 1][0], tex[unit - 1][1], tex[unit - 1][2],
+                 tex[unit - 1][3]);
       }
       d.tex = (const uint32_t (*)[4])tex;
    } else {
@@ -2045,12 +2061,12 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
             (const uint8_t *)constant_data(ctx, MESA_SHADER_FRAGMENT);
 
          if (!cb)
-            return;
+            SKIP("no constant buffer for a uniform colour");
          memcpy(color, cb + fs->ubo_offset, sizeof(color));
          break;
       }
       default:
-         return;
+         SKIP("a fragment shader that isn't compiled");
       }
       d.fs = &ctx->fs_uniform;
       fsc[SGXWS_FS_UNIFORM_OFF] = sgxws_f16(color[0]) | sgxws_f16(color[1])
@@ -2093,7 +2109,7 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
    }
    for (unsigned e = 0; e < n_fetch; e++) {
       if (!setup_fetch(ctx, e, &f[e]))
-         return;
+         SKIP("a vertex input it can't fetch");
       if (compiled) {
          f[e].dwords = 4;
          f[e].defaults = true;
@@ -2332,6 +2348,13 @@ sgx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    struct sgx_context *ctx = sgx_context(pctx);
    uint64_t t = 0;
 
+   SGX_DBG(DRAW, "draw_vbo %s x%u, %u instances, into %s %ux%u\n",
+           u_prim_name(info->mode), num_draws ? draws[0].count : 0,
+           info->instance_count,
+           ctx->framebuffer.nr_cbufs && ctx->framebuffer.cbufs[0].texture
+              ? util_format_short_name(ctx->framebuffer.cbufs[0].format)
+              : "-",
+           ctx->framebuffer.width, ctx->framebuffer.height);
    if (!info->instance_count)
       return;
    /* Primitive restart, split on the CPU: no restart index is known in the
