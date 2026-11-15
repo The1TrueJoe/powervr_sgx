@@ -20,6 +20,8 @@
  *   -C k      a new GL context (and FBOs) every k rounds
  *   -D file   after each round, the lines of file (a driver's debugfs status, say)
  *             that name a DPM register
+ *   -K file   after each round, words 0x35..0x39 of file's ta3dctl dump (the driver's
+ *             debugfs ctlblk: a UK_DPMLOG microkernel's DPM samples)
  *   -q x0,y0,x1,y1  the quad's corners in clip space (default -1,-1,1,1); x0 > x1: no
  *             draw, the clear alone
  *   rounds    default 30
@@ -219,6 +221,37 @@ print_dpm(const char *path)
    fclose(f);
 }
 
+/* words 0x35..0x39 of the ta3dctl block in a ctlblk dump: 8 words a line */
+static void
+print_ctl(const char *path)
+{
+   char line[256];
+   bool in = false;
+   unsigned w = 0, v[8];
+   FILE *f = fopen(path, "r");
+
+   if (!f)
+      return;
+   printf("    ctl");
+   while (fgets(line, sizeof(line), f)) {
+      if (!strncmp(line, "ta3dctl", 7)) {
+         in = true;
+         continue;
+      }
+      if (!in)
+         continue;
+      int n = sscanf(line, " %x %x %x %x %x %x %x %x", &v[0], &v[1], &v[2], &v[3],
+                     &v[4], &v[5], &v[6], &v[7]);
+      if (n <= 0)
+         break;
+      for (int i = 0; i < n; i++, w++)
+         if (w >= 0x35 && w <= 0x39)
+            printf(" [%#x]=%08x", w, v[i]);
+   }
+   printf("\n");
+   fclose(f);
+}
+
 static GLuint tex[NSIZES], fbo[NSIZES];
 static GLfloat quad_box[4] = {-1, -1, 1, 1};
 
@@ -316,14 +349,14 @@ main(int argc, char **argv)
    static const EGLint ctx_attr[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
    unsigned mask = 31;
    int frames = 8, rounds = 30, refbo = 0, rectx = 0, opt, big = -1;
-   const char *dpm = NULL;
+   const char *dpm = NULL, *ctl = NULL;
    double best[NSIZES], last[NSIZES];
    long renders = 0;
    EGLDisplay dpy;
    EGLContext ctx;
    bool fail = false;
 
-   while ((opt = getopt(argc, argv, "z:s:f:R:C:D:q:")) != -1) {
+   while ((opt = getopt(argc, argv, "z:s:f:R:C:D:K:q:")) != -1) {
       switch (opt) {
       case 'z': {
          char *p = optarg;
@@ -345,6 +378,7 @@ main(int argc, char **argv)
       case 'R': refbo = atoi(optarg); break;
       case 'C': rectx = atoi(optarg); break;
       case 'D': dpm = optarg; break;
+      case 'K': ctl = optarg; break;
       case 'q':
          if (sscanf(optarg, "%f,%f,%f,%f", &quad_box[0], &quad_box[1], &quad_box[2],
                     &quad_box[3]) != 4)
@@ -420,6 +454,8 @@ main(int argc, char **argv)
       printf("  %7ld  %9ld  %7ld\n", renders, shmem_kb(), drm_kb());
       if (dpm)
          print_dpm(dpm);
+      if (ctl)
+         print_ctl(ctl);
       fflush(stdout);
    }
 
