@@ -118,3 +118,17 @@ from the kernel code heap work. What to look at, in order:
    master that misses.
 3. **The BIF reset wait.** The GPL single-context reset waits for `BIF_MEM_REQ_STAT` to drain
    after INVALDC; ours doesn't (vendor-setup §8). Cheap to add, though nothing yet points at it.
+
+## Follow-up 01:56 UTC: the vendor's 3-row PDS programs; the memory reads are idle traffic
+
+**Tight data rows don't change it.** Every vendor VDM state program has 3 data rows
+(48 bytes): its rows run to the last data word, with DS1[0] inside. Ours round each 8-word
+block pair up to 4. `SGXGEN_PDS_TIGHT` (sgxgen 94d436f5) gives the vendor's count. The
+clear block's program moves to 0x0e001200 with 3 rows. `PDS_PC_BASE` follows to 0x0020048c
+(0x0e001230, its code start), and the hang is the same, with and without CLEAR_KIND=1.
+
+**`BIF_MEM_REQ_STAT` is 1-2 at idle too**, sampled 1 s after the module loads, before any
+job. The fluctuating reads mid-hang aren't the TA's. Something on the microkernel side reads
+memory continuously while the GPU sits idle. Next: read the EDM-task progress pair (0xb10,
+0xb1c; `read_ukregs`, 9ec87647) at idle and mid-hang, to see whether an EDM task stays
+resident.
