@@ -215,3 +215,34 @@ ctrl 3) with the vendor's code and DOUTU at window offset 0x4180. Something then
 0xd000, which is mapped in no heap. It is not `BIF_TA_REQ_BASE`-relative: that register is
 set (0x08400000) and named in the GPL 530 header. Next: shift the gen ring
 (`SGXGEN_GEN_PAD`, 3e00e344) to see whether the fault follows the vertex/index data.
+
+## Follow-up 05:47-05:52 UTC: the 0xd000 fault is the state block's header, read as an address
+
+All runs have the code in the window (`DOUTU530`, `CODE_RING=0x4000`) and the clear's state
+program on the 0x16100 form.
+
+| variant | result |
+|---|---|
+| `SGXGEN_GEN_PAD` 0, 0x1000, 0x10000 (vertex data at 0x01801900, 0x01802900, 0x01811900) | fault stays at **0x0000d000**: not the vertex or index data |
+| `SGXGEN_DRAW_EMPTYVS` (the draw launches the empty vertex task) | still 0x0000d000: not the vertex program |
+| `SGXGEN_STATE_EMPTYTASK` (the state program launches the empty task) | **no fault**; hang with the PC on the vertex fetch |
+| `SGXGEN_STATE_NODMA` (state emit runs, nothing DMA'd) | fault at **0x00000000** |
+
+So the address comes from what the state-emit task sends to the MTE. With the block DMA'd,
+the first word is the header 0x0000d4c3, which is in page 0xd000. With nothing DMA'd, it is
+0. Under the secondary-DMA form, the MTE takes the first emitted word as an address, so that
+form is wrong for a TA state block. The TA-block form 0x2a200 (the vendor's) is the right
+one. On our stack, that form holds the PDS at the program before it starts.
+
+**Where this leaves it.** Client side, the clear's state program now matches the vendor's
+form for form: info word, 8-word interleave and 3 rows, DMA control, and a DOUTU offset that
+works on this core. The program still waits before it starts, and only under the TA-block
+form. What admits a TA-block state update (MTE/TA state the microkernel sets at TA start) is
+what's left. That is the microkernel's TA-start sequence on the SGX530, which this session
+doesn't touch.
+
+**Facts for docs/ from this run (all C, board):**
+- PDS fetch faults are not reported. USSE code-fetch faults (requestor b2) and VDM stream-read faults (b4) are.
+- 530 DOUTU word 0: byte offset at b4, window under 32 KiB (the vendor's b4/b21 meanings are U).
+- The 0x16100 info form runs a state program at once. Its emitted first word is taken as an address (requestor b1).
+- 0xb10/0xb1c count EDM tasks (0xb10 steps by 3 per TA kick on ours).
