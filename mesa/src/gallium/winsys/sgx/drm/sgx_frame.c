@@ -3005,8 +3005,18 @@ sgxws_get_stats(struct sgxws_ctx *c, struct sgxws_stats *st, bool reset)
    st->bo_allocs = c->dev->bo_allocs;
    st->bo_cached = c->dev->bo_cached;
    st->bo_busy = c->dev->bo_busy;
+   st->gem_live = c->dev->gem_live;
+   st->gem_bytes = c->dev->gem_bytes;
+   st->gem_made = c->dev->gem_made;
+   st->gem_closed = c->dev->gem_closed;
+   st->code_resets = c->dev->code_resets;
+   st->zombies = c->dev->zombies;
+   st->zombie_bytes = c->dev->zombie_bytes;
+   st->cached = c->dev->cached;
+   st->cached_bytes = c->dev->cached_bytes;
    if (reset) {
       c->dev->bo_allocs = c->dev->bo_cached = c->dev->bo_busy = 0;
+      c->dev->gem_made = c->dev->gem_closed = c->dev->code_resets = 0;
       c->state_sent = c->state_skipped = 0;
       c->ns_flush = c->ns_cmd = c->ns_kick = c->ns_target_wait =
          c->ns_slot_wait = 0;

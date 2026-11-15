@@ -83,6 +83,13 @@ struct sgxws_dev {
    /* buffers allocated; of those, the backend's cache gave; and cached ones
     * of the size passed over, still in use (SGX_STATS) */
    unsigned bo_allocs, bo_cached, bo_busy;
+   /* the backend's GEM objects (SGX_STATS): live, and their bytes; made and
+    * closed since the last report; of those made, code chunks emptied */
+   unsigned gem_live, gem_made, gem_closed, code_resets;
+   uint64_t gem_bytes;
+   /* freed buffers the backend holds: for the GPU to finish, and cached */
+   unsigned zombies, cached;
+   uint64_t zombie_bytes, cached_bytes;
 };
 
 /* the PBE writes the target twiddled, not in rows */

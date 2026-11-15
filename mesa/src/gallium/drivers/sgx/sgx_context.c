@@ -186,6 +186,12 @@ sgx_stats_report(struct sgx_context *ctx)
       ctx->stats.frames ? (double)ws.gpu_indices / ctx->stats.frames : 0.0,
       ctx->stats.frames ? (double)ws.gpu_verts / ctx->stats.frames : 0.0,
       ws.state_sent, ws.state_skipped, ws.bo_allocs, ws.bo_cached, ws.bo_busy);
+   fprintf(stderr,
+           "sgx stats: GEM objects %u live (%llu KiB): %u made, %u closed, %u code chunks emptied; freed and held: %u for the GPU (%llu KiB), %u cached (%llu KiB)\n",
+           ws.gem_live, (unsigned long long)(ws.gem_bytes >> 10), ws.gem_made,
+           ws.gem_closed, ws.code_resets, ws.zombies,
+           (unsigned long long)(ws.zombie_bytes >> 10), ws.cached,
+           (unsigned long long)(ws.cached_bytes >> 10));
    fprintf(
       stderr,
       "sgx stats %.1f s: %.1f FPS, %u flushes (%u for texture writes, %u rings full), %u draws, "

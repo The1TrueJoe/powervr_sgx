@@ -29,6 +29,7 @@
  * buffer's other users (X, the display, other clients) order against it.
  */
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -45,6 +46,7 @@
 #include "util/libsync.h"
 #include "util/macros.h"
 #include "util/simple_mtx.h"
+#include "util/u_atomic.h"
 #include "util/u_math.h"
 #include "util/vma.h"
 
@@ -218,12 +220,25 @@ vm_unmap(struct psgx_dev *dd, uint64_t va, uint64_t size)
                 (unsigned long long)size, e);
 }
 
+/* a GEM object made or opened (an import), and closed: SGX_STATS counts
+ * them (with or without the lock) */
 static void
-gem_close(struct psgx_dev *dd, uint32_t handle)
+gem_made(struct psgx_dev *dd, uint64_t size)
+{
+   p_atomic_inc(&dd->base.gem_live);
+   p_atomic_inc(&dd->base.gem_made);
+   p_atomic_add(&dd->base.gem_bytes, size);
+}
+
+static void
+gem_close(struct psgx_dev *dd, uint32_t handle, uint64_t size)
 {
    struct drm_gem_close a = {.handle = handle};
 
    xioctl(dd->fd, DRM_IOCTL_GEM_CLOSE, &a);
+   p_atomic_dec(&dd->base.gem_live);
+   p_atomic_inc(&dd->base.gem_closed);
+   p_atomic_add(&dd->base.gem_bytes, -(int64_t)size);
 }
 
 /* unmap and close the zombies the GPU is done with; with the lock held */
@@ -265,10 +280,12 @@ reap(struct psgx_dev *dd, bool all)
          dd->zombies[n++] = *z;
          continue;
       }
-      gem_close(dd, z->handle);
+      gem_close(dd, z->handle, z->size);
+      dd->base.zombie_bytes -= z->size;
       util_vma_heap_free(&dd->vma[z->heap], z->va, z->size);
    }
    dd->n_zombies = n;
+   dd->base.zombies = n;
 }
 
 /* a buffer's handle, address and mapping go; with the lock held.  Its unmap
@@ -293,9 +310,11 @@ bo_release(struct psgx_dev *dd, struct psgx_bo *impl, uint64_t point)
       dd->zombies[dd->n_zombies++] = (struct zombie){
          impl->handle, impl->va, impl->base.size, impl->heap, point,
       };
+      dd->base.zombies = dd->n_zombies;
+      dd->base.zombie_bytes += impl->base.size;
    } else {
       vm_unmap(dd, impl->va, impl->base.size);
-      gem_close(dd, impl->handle);
+      gem_close(dd, impl->handle, impl->base.size);
       util_vma_heap_free(&dd->vma[impl->heap], impl->va, impl->base.size);
    }
    if (impl->code)
@@ -326,6 +345,8 @@ cache_trim(struct psgx_dev *dd, uint64_t keep)
       memmove(dd->cache, dd->cache + n, (dd->n_cache - n) * sizeof(*dd->cache));
       dd->n_cache -= n;
    }
+   dd->base.cached = dd->n_cache;
+   dd->base.cached_bytes = dd->cache_bytes;
 }
 
 /* allocation sizes above 16 KiB in quarter steps of a power of two, so a
@@ -366,6 +387,8 @@ cache_take(struct psgx_dev *dd, enum sgx_heap heap, uint64_t bytes,
       dd->cache_bytes -= bytes;
       memmove(c, c + 1, (dd->n_cache - i - 1) * sizeof(*c));
       dd->n_cache--;
+      dd->base.cached = dd->n_cache;
+      dd->base.cached_bytes = dd->cache_bytes;
       return impl;
    }
    return NULL;
@@ -391,6 +414,8 @@ cache_put(struct psgx_dev *dd, struct psgx_bo *impl)
       impl, dd->point, sgxws_now_ns(),
    };
    dd->cache_bytes += impl->base.size;
+   dd->base.cached = dd->n_cache;
+   dd->base.cached_bytes = dd->cache_bytes;
    cache_trim(dd, PSGX_CACHE_BYTES);
    return true;
 }
@@ -435,6 +460,8 @@ create_bo(struct psgx_dev *dd, uint64_t size, bool code, uint32_t *handle)
    int e = xioctl(dd->fd, DRM_IOCTL_POWERVR_SGX_CREATE_BO, &a);
 
    *handle = a.handle;
+   if (!e)
+      gem_made(dd, size);
    return e;
 }
 
@@ -463,6 +490,10 @@ psgx_bo_alloc(struct sgxws_dev *d, struct sgxws_bo *bo, enum sgx_heap heap,
       simple_mtx_unlock(&dd->lock);
       if (impl) {
          d->bo_cached++;
+         /* its free took the last reference: one again, or the next free
+          * takes it below zero and the buffer is never freed (each buffer
+          * the cache gave out leaked, until the process exited) */
+         impl->refs = 1;
          impl->write_point = 0;
          impl->base.cpu_dirty = false;
          /* zero as new pages are, but textures: their contents are
@@ -553,7 +584,7 @@ fail_map:
    else if (impl->map)
       munmap(impl->map, bytes);
 fail_bo:
-   gem_close(dd, impl->handle);
+   gem_close(dd, impl->handle, bytes);
    free(impl);
    return e;
 }
@@ -565,6 +596,7 @@ psgx_bo_free(struct sgxws_dev *d, struct sgxws_bo *bo)
    struct psgx_bo *impl = dbo(bo);
 
    simple_mtx_lock(&dd->lock);
+   assert(impl->refs);
    if (--impl->refs) {
       simple_mtx_unlock(&dd->lock);
       return;
@@ -613,8 +645,9 @@ psgx_bo_import(struct sgxws_dev *d, struct sgxws_bo *bo, int fd, uint32_t size)
    }
    simple_mtx_unlock(&dd->lock);
 
+   gem_made(dd, bytes);
    if (!(impl = calloc(1, sizeof(*impl)))) {
-      gem_close(dd, handle);
+      gem_close(dd, handle, bytes);
       return -ENOMEM;
    }
    impl->base.kif = &psgx_kif;
@@ -677,7 +710,7 @@ fail_map:
 fail:
    if (impl->dmabuf_fd >= 0)
       close(impl->dmabuf_fd);
-   gem_close(dd, handle);
+   gem_close(dd, handle, bytes);
    free(impl);
    return e;
 }
@@ -767,8 +800,9 @@ psgx_code_reset(struct sgxws_dev *d, struct sgxws_bo *bo)
    if ((e = create_bo(dd, impl->base.size, true, &handle)))
       return e;
    vm_unmap(dd, impl->va, impl->base.size);
-   gem_close(dd, impl->handle);
+   gem_close(dd, impl->handle, impl->base.size);
    impl->handle = handle;
+   dd->base.code_resets++;
    return vm_map(dd, handle, impl->va, impl->base.size);
 }
 
