@@ -318,9 +318,9 @@ offset bits 3-14 at bits 7-18 and offset bit 15 at bit 4 (below):
   - Encoded as offset << 4 (0x0008100a), it faulted at the window's first page:
     offset bit 15 was dropped.
   - At window offset 0x4100, encoded the same way, the task ran without a fault.
-- So the offset field is bytes, 8-byte aligned, at bits 4-18 (offset bits
-  3-14), and a window is 32 KiB (4096 instructions). Whether bits 13 and 14 are
-  both kept is shown only for bit 14. The kernel reports the window in
+- So offset bits 3-14 are at bits 7-18 (bit 15 is not at bit 19; it is at bit 4,
+  below). The kernel's 32 KiB windows use only bits 7-18. Whether bits 13 and 14
+  are both kept is shown only for bit 14. The kernel reports the window in
   `drm_powervr_sgx_heap.usse_window_log2` (15) and the form as
   `DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES`, and it spaces the code bases one
   window apart.
