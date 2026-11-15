@@ -1260,6 +1260,10 @@ static void vdm_draw(struct sgx_ctx *c, uint32_t prim, uint32_t count, uint32_t 
 	struct pds p = { 0 };
 	uint32_t rows, va, vpt = vertices_per_task(out_dwords), batch = 16;
 
+	/* SGXGEN_DRAW_EMPTYVS: launch the empty vertex task instead of the draw's (bring-up
+	 * probe: is a fault the vertex program's or the TA's behind it?) */
+	if (getenv("SGXGEN_DRAW_EMPTYVS"))
+		vs_w0 = doutu_w0(c, c->empty_v, 1, 0);
 	pds_d0(&p, 0, vb);
 	pds_d0(&p, 1, attr_dwords - 1);		/* DOUTD: dwords-1, attribute register 0 */
 	pds_d1(&p, 0, stride);
