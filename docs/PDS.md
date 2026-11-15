@@ -331,6 +331,10 @@ offset bits 3-14 at bits 7-18 and offset bit 15 at bit 4 (below):
   0x1000, 0x2000 and 0x4000 alike. With the bit-19 result above, the layout is
   offset bits 3-14 at bits 7-18 and offset bit 15 at bit 4, so a code base
   reaches 64 KiB. (Bits 5-6 are unknown; they may carry offset bits 16-17.)
+- The public SGX535 driver (MIT) encodes a task's entry the same way: bank in
+  bits 0-3, the entry in 16-byte units with its low 11 bits at bits 8-18 and its
+  high bits at bits 4-7. That is offset bits 4-14 at bits 8-18 and bits 15-18 at
+  bits 4-7, which fits both SGX530 results.
 - Capture: the vendor stream's words 0x0000281a, 0x00200f1a, 0x0000200a and
   0x0000100a. Bit 4 is set in the words of every task that emits to the MTE and
   in no other: the vendor puts that code 32 KiB or more above its code base.
