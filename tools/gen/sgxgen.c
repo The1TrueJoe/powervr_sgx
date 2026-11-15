@@ -1169,6 +1169,25 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	memcpy(b.p, blk, n * 4);
 	if (!c->state_emit[n])
 		c->state_emit[n] = usse_load(c, usse_state_emit[n], 1);
+	/* Bring-up probes (SGX530), once per run, ahead of the first state program:
+	 * SGXGEN_LEAD_EMPTY an empty update (DOUTU of the empty vertex task),
+	 * SGXGEN_LEAD_HALT a program that is only HALT. Whether the PDS then moves on
+	 * to this program tells a blocked fetch from a blocked DMA/task. */
+	static int lead_done;
+	if (!lead_done && (getenv("SGXGEN_LEAD_EMPTY") || getenv("SGXGEN_LEAD_HALT"))) {
+		uint32_t lrows = c->empty_rows, lva = c->empty_state;
+
+		if (getenv("SGXGEN_LEAD_HALT")) {
+			struct pds h = { 0 };
+
+			pds_d0(&h, 0, 0);
+			CODE(&h, HALT);
+			lva = pds_emit(&c->pds_vtx, &h, &lrows);
+		}
+		vdm(c, 0x40000000 | vdm_pds(c, lva));
+		vdm(c, lrows << 26 | 0x16100);
+		lead_done = 1;
+	}
 	/* the DDK's static state program: tst; bra; doutd; tst; bra; doutd; doutu */
 	pds_d0(&p, 0, b.va);
 	/* SGXGEN_STATE_PRIMARY: the 530 vendor's TA state block DMA, 0x00e00007 for 8 dwords:
