@@ -1909,12 +1909,26 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
          if (ss && ss->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE)
             compare[unit] = ss->compare_func + 1;
       }
+      /* An X8 colour format is sampled as its alpha twin (sgx_tex_format), so
+       * the X byte would come back as alpha: GL reads it as 1.  The state
+       * tracker's views say so in their swizzle, u_blitter's source views
+       * don't (a CopyTexSubImage from an XRGB window drawn on the GPU took
+       * the X byte, 0, as alpha: Minecraft's title-screen panorama) */
+      unsigned sw[4] = {v->swizzle_r, v->swizzle_g, v->swizzle_b, v->swizzle_a};
+
+      if (util_format_get_blocksize(v->format) == 4 &&
+          !util_format_has_alpha(v->format) &&
+          !util_format_is_depth_or_stencil(v->format) &&
+          util_format_description(v->format)->channel[3].type == UTIL_FORMAT_TYPE_VOID) {
+         for (unsigned c = 0; c < 4; c++)
+            if (sw[c] == PIPE_SWIZZLE_W)
+               sw[c] = PIPE_SWIZZLE_1;
+      }
       /* XYZW: none, 0 */
-      if (v->swizzle_r != PIPE_SWIZZLE_X || v->swizzle_g != PIPE_SWIZZLE_Y ||
-          v->swizzle_b != PIPE_SWIZZLE_Z || v->swizzle_a != PIPE_SWIZZLE_W) {
+      if (sw[0] != PIPE_SWIZZLE_X || sw[1] != PIPE_SWIZZLE_Y ||
+          sw[2] != PIPE_SWIZZLE_Z || sw[3] != PIPE_SWIZZLE_W) {
          /* b15 marks one: XXXX packs to 0 */
-         swz[unit] = 0x8000 | v->swizzle_r | v->swizzle_g << 3 |
-                     v->swizzle_b << 6 | v->swizzle_a << 9;
+         swz[unit] = 0x8000 | sw[0] | sw[1] << 3 | sw[2] << 6 | sw[3] << 9;
          any_swz = true;
       }
    }
