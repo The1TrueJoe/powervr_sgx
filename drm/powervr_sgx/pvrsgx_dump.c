@@ -40,6 +40,8 @@ static void dump_ukregs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 	static const u16 regs[] = {
 		0x138, 0x218, 0x274, 0x408, 0x624, 0x628, 0x630, 0x700,
 		0x710, 0x724, 0x72c, 0x734, 0x804, 0xa74,
+		/* the EDM-task progress pair the vendor's host XORs (sgx530-vendor-setup.md §7) */
+		0xb10, 0xb1c,
 	};
 
 	if (!pvrsgx_read_ukregs || sdev->family->core != 530)
