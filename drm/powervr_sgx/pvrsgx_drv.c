@@ -117,7 +117,9 @@ static int pvrsgx_ioctl_dev_query(struct drm_device *drm, void *data, struct drm
 			.pb_max_pages = pvrsgx_heaps(sdev)->pb_max_pages,
 			.max_ta_kicks = PVRSGX_MAX_TA_KICKS,
 			.va_bits = sdev->family->va_bits,
-			.caps = DRM_POWERVR_SGX_CAP_BACKWARD_BLITS,
+			.caps = DRM_POWERVR_SGX_CAP_BACKWARD_BLITS |
+				(sdev->family->features & PVRSGX_FEATURE_DOUTU_OFFSET_BYTES ?
+				 DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES : 0),
 			.max_layers = 1,
 		};
 

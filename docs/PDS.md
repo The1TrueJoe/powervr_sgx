@@ -308,6 +308,29 @@ unknown. The notation shows it as `.hi`, and nothing should emit it.
   but `pds1`'s word does not. In this field that is the value 8, 32
   temporaries; that reading is a guess.
 
+**Word 0 on the SGX530.** The code offset is in **bytes** at bit 4, and a code
+base reaches less than 32 KiB:
+
+- Hardware (an OMAP3630 board, 2026-11-15; `docs/log/entries/2026-11-15-0120-sgx530-unmap-probe-pds-pc.md`):
+  - An empty vertex task at window offset 0x8100 from code base 10, encoded the
+    SGX545 way (word 0x0001020a), faulted at the page 0x1000 into the window: it
+    fetched at 0x1020.
+  - Encoded as offset << 4 (0x0008100a), it faulted at the window's first page:
+    offset bit 15 was dropped.
+  - At window offset 0x4100, encoded the same way, the task ran without a fault.
+- So the offset field is bytes, 8-byte aligned, at bits 4-18 (offset bits
+  3-14), and a window is 32 KiB (4096 instructions). Whether bits 13 and 14 are
+  both kept is shown only for bit 14. The kernel reports the window in
+  `drm_powervr_sgx_heap.usse_window_log2` (15) and the form as
+  `DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES`, and it spaces the code bases one
+  window apart.
+- Capture: the vendor stream's words 0x0000281a, 0x00200f1a, 0x0000200a and
+  0x0000100a are small offsets under this reading. Bit 4 is set in the words of
+  every task that emits to the MTE and in no other, and bit 21 in the state-emit
+  ones. What either bit does is unknown: setting bit 4 on ours changed nothing.
+- Whether phas.i targets count from the window base as on the SGX545 isn't
+  tested on this core yet (guess: they do).
+
 **Word 1:**
 
 - bit 24 = the pixel program has plain iterations; bit 25 = it has texture

@@ -66,7 +66,7 @@ static void client_heaps(const struct pvrsgx_device *sdev,
 			.size = from[i].r->end - from[i].r->base,
 			.page_size_log2 = SGX_MMU_PAGE_SHIFT,
 			.usse_base_index = from[i].usse_base_index,
-			.usse_window_log2 = usse ? PVRSGX_USSE_WINDOW_LOG2 : 0,
+			.usse_window_log2 = usse ? h->usse_window_log2 : 0,
 		};
 	}
 }

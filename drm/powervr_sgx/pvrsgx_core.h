@@ -25,6 +25,11 @@ struct pvrsgx_cmd_core;
  * the GPL sgxconfig.h refuses any other layout.
  */
 #define PVRSGX_FEATURE_EDM_VERTEX_PDSADDR_FULL_RANGE	BIT(3)
+/*
+ * A DOUTU's word 0 holds the code offset in bytes at b4, not the offset / 8
+ * (SGX530, hardware: docs/PDS.md "DOUTU word 0 on the SGX530").
+ */
+#define PVRSGX_FEATURE_DOUTU_OFFSET_BYTES	BIT(4)
 
 /* Errata the kernel works around (the GPL headers' FIX_HW_BRN_*). */
 /* A BIF directory or table invalidate and a data invalidate never in one command. */
@@ -61,6 +66,11 @@ struct pvrsgx_heap_layout {
 	struct pvrsgx_va_range texture;
 	/* The largest PB, in pages, the 3D parameters heap holds. */
 	u32 pb_max_pages;
+	/*
+	 * Log2 of the bytes each USE code base window covers: how far a DOUTU's
+	 * code offset reaches from its base, and what phas.i targets count from.
+	 */
+	u32 usse_window_log2;
 };
 
 /*

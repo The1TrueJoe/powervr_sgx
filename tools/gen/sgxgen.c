@@ -284,19 +284,24 @@ void sgx_bo_alloc(struct sgx_dev *d, struct sgx_bo *bo, uint32_t heap, uint32_t 
 	bo_alloc(d, bo, heap, attribs, size, align);
 }
 
-/* DOUTU word 0 (PDS.md): code base register (pixel 0-9 at the pixel heap +
- * n*512K, vertex 10+), offset/8 in that window at b4, temporaries in fours at b24 */
+/* The device's code base window and DOUTU offset form (DEV_QUERY: the USSE heaps'
+ * usse_window_log2, DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES); the SGX545's by default */
+static uint32_t usse_window_log2 = 19;
+static int doutu_offset_bytes;
+
+/* DOUTU word 0 (PDS.md): code base register (pixel 0-9 at the pixel heap + n windows,
+ * vertex 10+), the offset in that window at b4, temporaries in fours at b24 */
 static uint32_t doutu_w0(struct sgx_ctx *c, uint32_t va, int vertex, uint32_t temps)
 {
 	uint32_t off = va - c->dev->heap_base[vertex ? H_VTXSHADER : H_PIXSHADER];
+	uint32_t win = usse_window_log2, in = off & ((1u << win) - 1);
+	uint32_t w0 = ((temps + 3) >> 2) << 24 | ((off >> win) + (vertex ? 10 : 0));
 
-	/* SGXGEN_DOUTU530: the 530 takes the offset in 8-byte units at b7 (byte offset << 4).
-	 * Board, 2026-11-15: an empty task at window offset 0x8100 encoded the 545 way faulted
-	 * at 0x0fc01000 (it fetched at 0x1020); the vendor stream's words 0x281a, 0x0f1a,
-	 * 0x200a, 0x100a read as offsets 0x280, 0xf0, 0x200, 0x100 this way. b4-6 are U. */
-	if (getenv("SGXGEN_DOUTU530"))
-		return ((temps + 3) >> 2) << 24 | ((off >> 19) + (vertex ? 10 : 0)) | ((off & 0x1fff8) << 4);
-	return ((temps + 3) >> 2) << 24 | ((off >> 19) + (vertex ? 10 : 0)) | ((off & 0x7ffff) >> 3) << 4;
+	/* The SGX530 (DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES) takes the offset in bytes at
+	 * b4, in a 32 KiB window (docs/PDS.md); SGXGEN_DOUTU530 forces that form. */
+	if (doutu_offset_bytes || getenv("SGXGEN_DOUTU530"))
+		return w0 | (in & ~7u) << 4;
+	return w0 | (in >> 3) << 4;
 }
 
 /* Main vertex/pixel shader DOUTU. SGXGEN_SHADER_BIT21 probe: the 530 may drop a
@@ -533,6 +538,11 @@ int sgx_dev_open(struct sgx_dev *d, const char *node, const char *trace)
 	struct drm_powervr_sgx_ioctl_create_vm_context_args vm = {};
 	int e;
 
+	struct drm_powervr_sgx_dev_query_limits lim = {};
+	struct drm_powervr_sgx_ioctl_dev_query_args ql = {
+		.type = DRM_POWERVR_SGX_DEV_QUERY_LIMITS_GET, .size = sizeof(lim), .pointer = (uintptr_t)&lim,
+	};
+
 	(void)trace;
 	memset(d, 0, sizeof *d);
 	/* Bring-up: SGXGEN_PDS_8WORD selects the 530 interleave. The proper source
@@ -544,8 +554,14 @@ int sgx_dev_open(struct sgx_dev *d, const char *node, const char *trace)
 	if (d->fd < 0)
 		return -errno;
 	if ((e = xioctl(d->fd, DRM_IOCTL_POWERVR_SGX_DEV_QUERY, &q)) ||
+	    (e = xioctl(d->fd, DRM_IOCTL_POWERVR_SGX_DEV_QUERY, &ql)) ||
 	    (e = xioctl(d->fd, DRM_IOCTL_POWERVR_SGX_CREATE_VM_CONTEXT, &vm)))
 		return e;
+	usse_window_log2 = h[DRM_POWERVR_SGX_HEAP_USSE_PIXEL].usse_window_log2;
+	doutu_offset_bytes = !!(lim.caps & DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES);
+	if (usse_window_log2 != 19 || doutu_offset_bytes)
+		fprintf(stderr, "sgxgen: code window 2^%u, DOUTU offset in %s\n", usse_window_log2,
+			doutu_offset_bytes ? "bytes" : "instructions");
 	d->vm = vm.handle;
 	d->heap_base[H_GENERAL] = h[DRM_POWERVR_SGX_HEAP_GENERAL].base;
 	d->heap_base[H_PDSPIXEL] = h[DRM_POWERVR_SGX_HEAP_PDS_PIXEL].base;
@@ -689,7 +705,8 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 	/* SGXGEN_CODE_RING: the code rings' size, and so (aligned to it) their window offset.
 	 * The 530's DOUTU offset reaches less than 32 KiB (board, 2026-11-15), so 0x4000
 	 * puts the code at window offset 0x4000. */
-	uint32_t code_ring = getenv("SGXGEN_CODE_RING") ? env_u32("SGXGEN_CODE_RING") : 0x8000;
+	uint32_t code_ring = getenv("SGXGEN_CODE_RING") ? env_u32("SGXGEN_CODE_RING") :
+			     usse_window_log2 < 17 ? 1u << (usse_window_log2 - 1) : 0x8000;
 
 	ring_init(d, &c->usse_pix, H_PIXSHADER, code_ring);
 	ring_init(d, &c->usse_vtx, H_VTXSHADER, code_ring);

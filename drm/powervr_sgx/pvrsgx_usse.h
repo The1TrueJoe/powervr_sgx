@@ -39,7 +39,7 @@ enum pvrsgx_usse_refusal {
 };
 
 s64 pvrsgx_usse_scan(enum pvrsgx_isa isa, const u64 *w, u32 n, u32 first, u32 obj_insts,
-		     s64 place, bool *abs, enum pvrsgx_usse_refusal *why);
+		     s64 place, u32 window_insts, bool *abs, enum pvrsgx_usse_refusal *why);
 const char *pvrsgx_usse_refusal_name(enum pvrsgx_usse_refusal why);
 
 #endif /* PVRSGX_USSE_H */

@@ -58,7 +58,8 @@ static void usse_test_words(struct kunit *test)
 	for (int i = 0; i < ARRAY_SIZE(validate_words); i++) {
 		const u64 *w = &validate_words[i].w;
 		bool abs = false;
-		s64 bad = pvrsgx_usse_scan(PVRSGX_ISA_SGX545, w, 1, 2, 512, 0x100, &abs, NULL);
+		s64 bad = pvrsgx_usse_scan(PVRSGX_ISA_SGX545, w, 1, 2, 512, 0x100,
+					   PVRSGX_USSE_WINDOW_INSTS, &abs, NULL);
 
 		KUNIT_EXPECT_EQ_MSG(test, bad, validate_words[i].ok ? -1 : 0, "%s",
 				    validate_words[i].what);
@@ -68,24 +69,33 @@ static void usse_test_words(struct kunit *test)
 /* phas.i with a target needs a place, and says it had one. */
 static void usse_test_phas_place(struct kunit *test)
 {
+	const u32 win = PVRSGX_USSE_WINDOW_INSTS;
 	u64 w = W(0xfa440000, 0x00000102);
 	enum pvrsgx_usse_refusal why;
 	bool abs = false;
 
 	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 512,
-					       PVRSGX_USSE_PLACE_NONE, &abs, &why), 0);
+					       PVRSGX_USSE_PLACE_NONE, PVRSGX_USSE_WINDOW_INSTS, &abs, &why), 0);
 	KUNIT_EXPECT_EQ(test, why, PVRSGX_USSE_REFUSAL_PHAS);
-	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 512, 0x100, &abs,
-					       &why), -1);
+	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 512, 0x100,
+					       PVRSGX_USSE_WINDOW_INSTS, &abs, &why), -1);
 	KUNIT_EXPECT_EQ(test, why, PVRSGX_USSE_REFUSAL_NONE);
 	KUNIT_EXPECT_TRUE(test, abs);
 
 	/* An object with a target must not cross into the next window. */
-	w = W(0xfa440000, PVRSGX_USSE_WINDOW_INSTS - 0x100 + 2);
-	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 0x100,
-					       PVRSGX_USSE_WINDOW_INSTS - 0x100, &abs, &why), -1);
-	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 0x101,
-					       PVRSGX_USSE_WINDOW_INSTS - 0x100, &abs, &why), 0);
+	w = W(0xfa440000, win - 0x100 + 2);
+	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 0x100, win - 0x100,
+					       win, &abs, &why), -1);
+	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 0x101, win - 0x100,
+					       win, &abs, &why), 0);
+	KUNIT_EXPECT_EQ(test, why, PVRSGX_USSE_REFUSAL_PHAS);
+
+	/* The same on a core with a 32 KiB window (4096 instructions, the SGX530's). */
+	w = W(0xfa440000, 0x1000 - 0x100 + 2);
+	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 0x100, 0x1000 - 0x100,
+					       0x1000, &abs, &why), -1);
+	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 0x101, 0x1000 - 0x100,
+					       0x1000, &abs, &why), 0);
 	KUNIT_EXPECT_EQ(test, why, PVRSGX_USSE_REFUSAL_PHAS);
 }
 
@@ -108,7 +118,7 @@ static void usse_test_reasons(struct kunit *test)
 		bool abs = false;
 
 		KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &cases[i].w, 1, 2, 512,
-						       0x100, &abs, &why), 0);
+						       0x100, PVRSGX_USSE_WINDOW_INSTS, &abs, &why), 0);
 		KUNIT_EXPECT_EQ(test, why, cases[i].why);
 	}
 }

@@ -64,7 +64,7 @@ static s64 code_place(const struct pvrsgx_heap_layout *h, u64 addr, u64 offset)
 
 	if (start < 0)
 		return PVRSGX_USSE_PLACE_NONE;
-	return (start / 8) & (PVRSGX_USSE_WINDOW_INSTS - 1);
+	return (start / 8) & (BIT(h->usse_window_log2 - 3) - 1);
 }
 
 /*
@@ -175,7 +175,8 @@ static s64 scan_halves(struct pvrsgx_device *sdev, const u64 *buf, u32 n, u32 fi
 		return -ENOMEM;
 	for (u32 i = 0; i < n; i++)
 		lo[i] = lower_32_bits(buf[i]);
-	bad = pvrsgx_usse_scan(sdev->family->isa, lo, n, first, obj_insts, place, &abs, why);
+	bad = pvrsgx_usse_scan(sdev->family->isa, lo, n, first, obj_insts, place,
+			       BIT(pvrsgx_heaps(sdev)->usse_window_log2 - 3), &abs, why);
 	kvfree(lo);
 	return bad;
 }
@@ -228,7 +229,8 @@ int pvrsgx_ioctl_upload_code(struct drm_device *drm, void *data, struct drm_file
 	}
 	place = code_place_mapped(obj);
 	bad = pvrsgx_usse_scan(sdev->family->isa, buf, args->size / 8, args->offset / 8,
-			       obj->size / 8, place, &abs, &why);
+			       obj->size / 8, place, BIT(pvrsgx_heaps(sdev)->usse_window_log2 - 3),
+			       &abs, &why);
 	if (bad < 0)
 		bad = scan_halves(sdev, buf, args->size / 8, args->offset / 8, obj->size / 8,
 				  place, &why);

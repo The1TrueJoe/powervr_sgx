@@ -72,6 +72,7 @@ static const struct pvrsgx_heap_layout sgx545_heaps = {
 	.general = { PVRSGX_HEAP_GENERAL, PVRSGX_HEAP_TEXTURE },
 	.texture = { PVRSGX_HEAP_TEXTURE, SZ_4G },
 	.pb_max_pages = 0x8000,
+	.usse_window_log2 = PVRSGX_USSE_WINDOW_LOG2,
 };
 
 /*
@@ -152,6 +153,8 @@ static const struct pvrsgx_heap_layout sgx530_heaps = {
 	.usse_vertex = { 0x0fc00000, 0x0fe00000 },
 	/* Half the 64 MiB heap, as the SGX545's: the rest holds the free list and VM objects. */
 	.pb_max_pages = 0x2000,
+	/* 32 KiB: a DOUTU reaches no further on this core (docs/PDS.md, SGX530). */
+	.usse_window_log2 = 15,
 };
 
 static const struct pvrsgx_core_family families[] = {
@@ -184,6 +187,7 @@ static const struct pvrsgx_core_family families[] = {
 		.core_id = 0x01120000,
 		.regs = &sgx530_regs,
 		.isa = PVRSGX_ISA_SGX545,
+		.features = PVRSGX_FEATURE_DOUTU_OFFSET_BYTES,
 		.num_dir_lists = 1,
 		.va_bits = 28,
 		.heaps = &sgx530_heaps,
