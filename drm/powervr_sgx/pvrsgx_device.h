@@ -118,15 +118,15 @@ struct pvrsgx_fw {
 	u32 n_patches;
 };
 
-/**
- * struct pvrsgx_device - The SGX545
- */
 /* Display engine interrupt registers (gma500 psb_drv.h) and the SGX's bit. */
 #define PVRSGX_VDC_INT_ENABLE		0x20A0
 #define PVRSGX_VDC_INT_IDENTITY		0x20A4
 #define PVRSGX_VDC_INT_MASK		0x20A8
 #define PVRSGX_VDC_IRQ_SGX		BIT(18)
 
+/**
+ * struct pvrsgx_device - The SGX545
+ */
 struct pvrsgx_device {
 	/** @base: The DRM device. */
 	struct drm_device base;
@@ -300,6 +300,11 @@ struct pvrsgx_device {
 
 	/** @irq_count: SW_EVENT interrupts taken (debugfs). */
 	atomic_t irq_count;
+	/**
+	 * @irq_late: SW_EVENTs found by looking again after clearing the
+	 * display's latch, which no MSI of their own announced (debugfs).
+	 */
+	atomic_t irq_late;
 	/** @pm_pinned: Runtime PM is held active (single-context bring-up). */
 	bool pm_pinned;
 	/** @cpu_latency: The core's CPU latency limit while jobs are in flight. */
@@ -416,5 +421,13 @@ void pvrsgx_irq_sync(struct pvrsgx_device *sdev);
 void pvrsgx_reset(struct pvrsgx_device *sdev, bool recovery);
 int pvrsgx_poll(struct pvrsgx_device *sdev, const u32 *addr, u32 mask, u32 val,
 		unsigned int timeout_us);
+
+/* The SGX's clock: the part's when it names one, else the core entry's. */
+static inline u32 pvrsgx_clock_hz(const struct pvrsgx_device *sdev)
+{
+	if (sdev->part && sdev->part->clock_hz)
+		return sdev->part->clock_hz;
+	return sdev->core->clock_hz;
+}
 
 #endif /* PVRSGX_DEVICE_H */

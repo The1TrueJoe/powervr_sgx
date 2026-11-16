@@ -63,13 +63,6 @@ struct pvrsgx_heap_layout {
 	u32 pb_max_pages;
 };
 
-/*
- * SGX_CR_CORE_ID's core number: bits 15:0 are CONFIG, which the integrator
- * chose and which therefore differs from board to board. Only the number
- * above them is the core's.
- */
-#define PVRSGX_CORE_ID_CORE_MASK	GENMASK(31, 16)
-
 /* Part flags (&struct pvrsgx_part). */
 /*
  * Nothing on this part can power the graphics island back once it is gated:
@@ -100,6 +93,12 @@ struct pvrsgx_part {
 	unsigned int core;
 	/** @regs_off: Offset of the SGX's window inside BAR 0. */
 	u32 regs_off;
+	/**
+	 * @clock_hz: The SGX's clock on this part, for the microkernel's timer;
+	 * 0 takes the core entry's. Parts with the same core revision differ
+	 * here, so it can't live in the core table.
+	 */
+	u32 clock_hz;
 	/** @flags: PVRSGX_PART_*. */
 	u32 flags;
 };
@@ -161,7 +160,7 @@ struct pvrsgx_core_family {
 	const char *name;
 	/** @core: Its number, as the bus glue names it: 545 for SGX545. */
 	unsigned int core;
-	/** @core_id: Expected SGX_CR_CORE_ID; only its core number is compared. */
+	/** @core_id: Expected SGX_CR_CORE_ID. */
 	u32 core_id;
 	/** @regs: Where its registers and fields are. */
 	const struct pvrsgx_core_regs *regs;

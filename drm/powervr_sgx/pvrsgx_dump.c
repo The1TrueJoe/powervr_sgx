@@ -78,6 +78,9 @@ void pvrsgx_dump_status(struct seq_buf *sb, struct pvrsgx_device *sdev, bool reg
 
 	seq_buf_printf(sb, "firmware running: %d lost: %d resets: %u irqs: %d\n", sdev->fw_running,
 		       sdev->lost, sdev->reset_count, atomic_read(&sdev->irq_count));
+	if (sdev->vdc)
+		seq_buf_printf(sb, "irqs found behind the display's latch: %d\n",
+			       atomic_read(&sdev->irq_late));
 	seq_buf_printf(sb, "kernel PD 0x%08x idle PD 0x%08x\n",
 		       pvrsgx_mmu_pd_addr(sdev->kernel_mmu),
 		       pvrsgx_mmu_pd_addr(pvrsgx_idle_mmu(sdev)));

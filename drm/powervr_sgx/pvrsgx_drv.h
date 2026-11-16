@@ -22,9 +22,11 @@
 /*
  * Clover Trail (Atom Z2760): the SGX sits behind the display engine's BAR 0,
  * at the offset Medfield and Cedarview use (MRST_SGX_OFFSET in gma500's
- * psb_drv.h, 0x80000). The BAR is 1 MiB, so the low half is the display
- * engine's and must never be read: nothing in this driver refers to it.
- * Unverified on the tablet: sgx-ident checks it (docs/porting/cores/clovertrail.md).
+ * psb_drv.h, 0x80000), read on an HP ElitePad 900: CORE_ID 0x01150000 and
+ * CORE_REVISION 0x0001000e there. The BAR is 1 MiB and its low half is the
+ * display engine's. The driver touches three of its registers, and in them
+ * only the SGX's bit 18: the interrupt's enable, identity and mask at
+ * 0x20A0-0x20A8 (PVRSGX_VDC_*). The rest of that half is never read.
  */
 #define PVRSGX_CLV_SGX_OFFSET		0x80000
 

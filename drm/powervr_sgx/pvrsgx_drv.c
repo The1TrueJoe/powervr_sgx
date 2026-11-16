@@ -336,6 +336,12 @@ static const struct pvrsgx_part pvrsgx_parts[] = {
 	[PVRSGX_PART_CLOVER_TRAIL] = {
 		.name = "Intel Clover Trail",
 		.core = 545,
+		/*
+		 * The Z2760's published GPU clock (notebookcheck, "Intel Atom
+		 * Z2760"); the CE5300's 400 MHz would run the microkernel's
+		 * timer a quarter slow.
+		 */
+		.clock_hz = 533000000,
 		/* Display engine's window first, the SGX's behind it. */
 		.regs_off = PVRSGX_CLV_SGX_OFFSET,
 		/*
@@ -398,15 +404,12 @@ static int pvrsgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (IS_ERR(bar))
 		return PTR_ERR(bar);
 	sdev->regs = (u8 __iomem *)bar + part->regs_off;
-	if (part->flags & PVRSGX_PART_VDC_IRQ) {
-		/* Only the SGX's bit; the display's own interrupts stay as they are. */
+	/*
+	 * Only the SGX's bit there is ever touched (pvrsgx_device.c, irq_setup());
+	 * the display's own interrupts stay as they are.
+	 */
+	if (part->flags & PVRSGX_PART_VDC_IRQ)
 		sdev->vdc = bar;
-		writel(PVRSGX_VDC_IRQ_SGX, bar + PVRSGX_VDC_INT_IDENTITY);
-		writel(readl(bar + PVRSGX_VDC_INT_MASK) & ~PVRSGX_VDC_IRQ_SGX,
-		       bar + PVRSGX_VDC_INT_MASK);
-		writel(readl(bar + PVRSGX_VDC_INT_ENABLE) | PVRSGX_VDC_IRQ_SGX,
-		       bar + PVRSGX_VDC_INT_ENABLE);
-	}
 
 	return pvrsgx_probe_common(sdev);
 }
@@ -416,12 +419,6 @@ static void pvrsgx_remove(struct pci_dev *pdev)
 	struct pvrsgx_device *sdev = pci_get_drvdata(pdev);
 
 	pvrsgx_remove_common(sdev);
-	if (sdev->vdc) {
-		writel(readl(sdev->vdc + PVRSGX_VDC_INT_ENABLE) & ~PVRSGX_VDC_IRQ_SGX,
-		       sdev->vdc + PVRSGX_VDC_INT_ENABLE);
-		writel(readl(sdev->vdc + PVRSGX_VDC_INT_MASK) | PVRSGX_VDC_IRQ_SGX,
-		       sdev->vdc + PVRSGX_VDC_INT_MASK);
-	}
 }
 
 static void pvrsgx_shutdown(struct pci_dev *pdev)
