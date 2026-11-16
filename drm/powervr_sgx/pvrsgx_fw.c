@@ -414,6 +414,85 @@ void pvrsgx_fw_pd_slot_put(struct pvrsgx_device *sdev, int slot)
 	ida_free(&sdev->fw.pd_slots, slot);
 }
 
+/*
+ * Bring-up only (gap 19, test T1): map the kernel data arena READONLY on a
+ * guessed core, so a task's store to it should fault.
+ */
+static bool stage1_data_ro;
+module_param(stage1_data_ro, bool, 0444);
+MODULE_PARM_DESC(stage1_data_ro, "Map a guessed core's kernel data arena GPU read-only (gap 19 test)");
+
+/*
+ * Bring-up probe (vendor-setup §9, docs/porting/cores/sgx530-vendor-setup.md):
+ * the event program and launch words the vendor stack uses, built from that
+ * doc only. Off by default; the results are to be recorded as hardware (C)
+ * facts before any shipping default depends on them.
+ *   - the event DOUTU in an 8-word data interleave, words at memory 0, 1, 8;
+ *   - DOUTU word 0 = 0x0020000f (code base 15, bit 21, no bit 27, no temps),
+ *     word 1 = 0x04000000, word 2 = 1;
+ *   - event control words 0xa6c = 3, 0xa70 = 0x00013d01;
+ *   - the kernel data arena mapped with EDMPROTECT, to test the store path
+ *     under the vendor's requestor assumption.
+ */
+bool pvrsgx_stage1_vlaunch;
+module_param_named(stage1_vlaunch, pvrsgx_stage1_vlaunch, bool, 0444);
+MODULE_PARM_DESC(stage1_vlaunch, "The vendor-stack event program and launch words (sgx530 vendor-setup §9 probe)");
+
+/* §9 bisect: override a launch word or 0xa70; -1 keeps the vendor value. */
+int pvrsgx_vl_w0 = -1, pvrsgx_vl_w1 = -1, pvrsgx_vl_w2 = -1, pvrsgx_vl_a70 = -1;
+module_param_named(vl_w0, pvrsgx_vl_w0, int, 0444);
+module_param_named(vl_w1, pvrsgx_vl_w1, int, 0444);
+module_param_named(vl_w2, pvrsgx_vl_w2, int, 0444);
+module_param_named(vl_a70, pvrsgx_vl_a70, int, 0444);
+MODULE_PARM_DESC(vl_w2, "stage1_vlaunch DOUTU word 2 override (-1 = vendor's 1; bisect toward the open value)");
+
+/*
+ * §9 load-retire check (sgx530_ldret): a distinctive UNMAPPED sentinel written
+ * at ctlblk + 0x200 (the mapped scratch word stor5 used) before the kick. The
+ * task loads that word into r5, then fault-reads r5; BIF_FAULT reads back the
+ * sentinel if loads retire into the temp, or r5's leftover if they don't. -1 =
+ * no seed (every other probe). The value is chosen unmapped so the fault-read
+ * faults at it; the driver only writes it, the task only reads it.
+ */
+static int stage1_ld_sentinel = -1;
+module_param(stage1_ld_sentinel, int, 0444);
+MODULE_PARM_DESC(stage1_ld_sentinel, "sgx530_ldret: unmapped sentinel written at ctlblk+0x200 before the kick (-1 = off)");
+
+/*
+ * Real EDM init (docs/porting/cores/sgx530-edm-path.md §2/§6): start the open
+ * microkernel on a single-context core through the §9 bare-DOUTU launch folded
+ * into the real init, not the stage-1 probe. The §9 event program and the
+ * EDMPROTECT data mapping are the same as the probe (confirmed on hardware:
+ * str/limm, loads and temps all retire); the difference is that the launched
+ * task is the real init entry and the host does not wait on ui32InitStatus
+ * (that store drops on the 530; the host owns the firmware structures). Off by
+ * default, so the SGX545 and the existing SGX530 DDK path stay byte-identical.
+ */
+bool pvrsgx_edm_init;
+module_param_named(edm_init, pvrsgx_edm_init, bool, 0444);
+MODULE_PARM_DESC(edm_init, "Start the open microkernel via the §9 launch folded into real init (single-context cores; no init-status wait)");
+
+/* The §9 bare-DOUTU launch is shared by the stage-1 probe and real EDM init. */
+bool pvrsgx_use_vlaunch9(struct pvrsgx_device *sdev)
+{
+	return pvrsgx_stage1_vlaunch ||
+	       (pvrsgx_edm_init && sdev->family->event_pds_guessed);
+}
+
+static u32 data_pte_flags(struct pvrsgx_device *sdev)
+{
+	if (!sdev->family->event_pds_guessed)
+		return SGX_MMU_PTE_CACHECONSISTENT |
+		       (sdev->family->data_no_edmprotect ? 0 : SGX_MMU_PTE_EDMPROTECT);
+	if (stage1_data_ro)
+		return SGX_MMU_PTE_CACHECONSISTENT | SGX_MMU_PTE_READONLY;
+	/* §9 maps it with EDMPROTECT, undoing data_no_edmprotect (probe or real init). */
+	if (pvrsgx_use_vlaunch9(sdev))
+		return SGX_MMU_PTE_CACHECONSISTENT | SGX_MMU_PTE_EDMPROTECT;
+	return SGX_MMU_PTE_CACHECONSISTENT |
+	       (sdev->family->data_no_edmprotect ? 0 : SGX_MMU_PTE_EDMPROTECT);
+}
+
 int pvrsgx_fw_init(struct pvrsgx_device *sdev)
 {
 	struct pvrsgx_fw *f = &sdev->fw;
@@ -441,8 +520,7 @@ int pvrsgx_fw_init(struct pvrsgx_device *sdev)
 	 * read-only. Without EDMPROTECT where the core needs it (data_no_edmprotect).
 	 */
 	err = pvrsgx_kmem_alloc(sdev, &f->data, pvrsgx_heaps(sdev)->kernel_data.base,
-				DATA_ARENA_SIZE, SGX_MMU_PTE_CACHECONSISTENT |
-				(sdev->family->data_no_edmprotect ? 0 : SGX_MMU_PTE_EDMPROTECT));
+				DATA_ARENA_SIZE, data_pte_flags(sdev));
 	if (err)
 		return err;
 	err = pvrsgx_kmem_alloc(sdev, &f->code, pvrsgx_heaps(sdev)->kernel_code.base,
@@ -479,6 +557,10 @@ void pvrsgx_fw_fini(struct pvrsgx_device *sdev)
 	pvrsgx_kmem_free(sdev, &sdev->fw.pdtable);
 	pvrsgx_kmem_free(sdev, &sdev->fw.exec0);
 	ida_destroy(&sdev->fw.pd_slots);
+	for (int i = 0; i < ARRAY_SIZE(sdev->dirswap_mmu); i++) {
+		pvrsgx_mmu_destroy(sdev->dirswap_mmu[i]);
+		sdev->dirswap_mmu[i] = NULL;
+	}
 }
 
 /*
@@ -662,6 +744,12 @@ static int init_script_part2(struct pvrsgx_device *sdev)
 	 */
 	u32 data0 = 1, data1 = 6, uk_dm = USE_CODE_BASE_DM_UKERNEL;
 	int err;
+
+	/* §9: the vendor's event control words (probe or real EDM init). */
+	if (pvrsgx_use_vlaunch9(sdev)) {
+		data0 = 3;
+		data1 = pvrsgx_vl_a70 >= 0 ? (u32)pvrsgx_vl_a70 : 0x00013d01;
+	}
 
 	/* The bring-up sweep's changes (sweep[] below); none in a normal start. */
 	if (sdev->sweep_flags & PVRSGX_SWEEP_DATA0_2)
@@ -913,10 +1001,97 @@ static void scan_arena(struct pvrsgx_device *sdev, const struct pvrsgx_kmem *km,
 		 stage1_scan, hits, name, km->size);
 }
 
+/*
+ * Bring-up only (gap 19, test T2, the fact sheet's gap 7): with a task still
+ * running after a failed start, move list 0 between directories and log the
+ * BIF's fault state after each step. A' maps the kernel code and data heaps
+ * as the firmware's directory does; B maps only the code. A task loading
+ * from the data arena must fault once list 0 is on B and the directory cache
+ * is invalidated: no translation of the old directory may survive.
+ */
+static bool stage1_dirswap;
+module_param(stage1_dirswap, bool, 0444);
+MODULE_PARM_DESC(stage1_dirswap, "On a guessed core's failed start, switch list 0 between two directories (gap 7 test)");
+
+static void dirswap_report(struct pvrsgx_device *sdev, const char *step)
+{
+	msleep(50);
+	drm_info(&sdev->base, "dirswap %s: list 0 0x%08x BIF int 0x%x fault 0x%08x\n", step,
+		 sgx_rd(sdev, SGX_CR_BIF_DIR_LIST_BASE0), sgx_rd(sdev, SGX_CR_BIF_INT_STAT),
+		 sgx_rd(sdev, SGX_CR_BIF_FAULT));
+}
+
+static void fw_dirswap(struct pvrsgx_device *sdev)
+{
+	const struct pvrsgx_heap_layout *h = pvrsgx_heaps(sdev);
+	struct pvrsgx_mmu *a, *b;
+
+	if (!stage1_dirswap || !pvrsgx_core_single_context(sdev->family))
+		return;
+	a = pvrsgx_mmu_create(sdev);
+	b = pvrsgx_mmu_create(sdev);
+	if (IS_ERR(a) || IS_ERR(b)) {
+		if (!IS_ERR(a))
+			pvrsgx_mmu_destroy(a);
+		if (!IS_ERR(b))
+			pvrsgx_mmu_destroy(b);
+		return;
+	}
+	sdev->dirswap_mmu[0] = a;
+	sdev->dirswap_mmu[1] = b;
+	pvrsgx_mmu_share(a, sdev->kernel_mmu, h->kernel_code.base, h->kernel_code.end);
+	pvrsgx_mmu_share(a, sdev->kernel_mmu, h->kernel_data.base, h->kernel_data.end);
+	pvrsgx_mmu_share(b, sdev->kernel_mmu, h->kernel_code.base, h->kernel_code.end);
+	/* The directories are in memory before list 0 names them. */
+	wmb();
+	drm_info(&sdev->base, "dirswap: firmware PD 0x%08x, A' 0x%08x, B 0x%08x\n",
+		 pvrsgx_mmu_pd_addr(sdev->kernel_mmu), pvrsgx_mmu_pd_addr(a),
+		 pvrsgx_mmu_pd_addr(b));
+	dirswap_report(sdev, "before");
+	sgx_wr(sdev, SGX_CR_BIF_DIR_LIST_BASE0, pvrsgx_mmu_pd_addr(a));
+	pvrsgx_bif_inval_dc(sdev);
+	dirswap_report(sdev, "A' with INVALDC");
+	sgx_wr(sdev, SGX_CR_BIF_DIR_LIST_BASE0, pvrsgx_mmu_pd_addr(b));
+	dirswap_report(sdev, "B without INVALDC");
+	pvrsgx_bif_inval_dc(sdev);
+	dirswap_report(sdev, "B with INVALDC");
+	/* Back on the firmware's directory before the stop's reset. */
+	sgx_wr(sdev, SGX_CR_BIF_DIR_LIST_BASE0, pvrsgx_mmu_pd_addr(sdev->kernel_mmu));
+	pvrsgx_bif_inval_dc(sdev);
+	dirswap_report(sdev, "back on the firmware's");
+}
+
+/*
+ * Bring-up only (H-B): before the scan, have the host flush the BIF and
+ * invalidate its directory cache, so a store held there reaches memory.
+ * BIF_CTRL FLUSH is bit 2 in the GPL sgx530defs.h (EUR_CR_BIF_CTRL_FLUSH).
+ */
+static bool stage1_flush;
+module_param(stage1_flush, bool, 0444);
+MODULE_PARM_DESC(stage1_flush, "Before stage1_scan, flush the BIF from the host (stage-1 test)");
+
+#define SGX530_CR_BIF_CTRL_FLUSH	BIT(2)
+
+static void fw_host_flush(struct pvrsgx_device *sdev)
+{
+	u32 ev = sgx_rd(sdev, SGX_CR_EVENT_STATUS), req = sgx_rd(sdev, SGX_CR_BIF_MEM_REQ_STAT);
+
+	sgx_wr(sdev, SGX_CR_BIF_CTRL, SGX530_CR_BIF_CTRL_FLUSH);
+	sgx_wr(sdev, SGX_CR_BIF_CTRL, 0);
+	pvrsgx_bif_inval_dc(sdev);
+	msleep(10);
+	drm_info(&sdev->base,
+		 "host flush: event status 0x%08x -> 0x%08x, BIF mem req 0x%x -> 0x%x, int 0x%x\n",
+		 ev, sgx_rd(sdev, SGX_CR_EVENT_STATUS), req, sgx_rd(sdev, SGX_CR_BIF_MEM_REQ_STAT),
+		 sgx_rd(sdev, SGX_CR_BIF_INT_STAT));
+}
+
 static void fw_scan(struct pvrsgx_device *sdev)
 {
 	if (!stage1_scan)
 		return;
+	if (stage1_flush)
+		fw_host_flush(sdev);
 	/* The GPU's writes before the CPU's reads. */
 	rmb();
 	scan_arena(sdev, &sdev->fw.data, "data");
@@ -1504,6 +1679,15 @@ int pvrsgx_fw_start(struct pvrsgx_device *sdev)
 		clk_idle = sgx_rd(sdev, cr->clkgatestatus);
 		bringup_diag(sdev, "before the kick");
 	}
+	/*
+	 * §9 load-retire check: seed the unmapped sentinel at ctlblk + 0x200
+	 * (= data arena + 0x3200), the word the ldret task loads into r5. Nothing
+	 * else writes there (the control block fills 0x3000-0x30ff, MISC ends at
+	 * 0x31b3); the barrier below makes it visible before the kick.
+	 */
+	if (pvrsgx_stage1_vlaunch && stage1_ld_sentinel >= 0)
+		WRITE_ONCE(*(u32 *)((u8 *)sdev->fw.data.cpu + 0x3200),
+			   (u32)stage1_ld_sentinel);
 	/* The image and the host control block are in memory before the kick. */
 	wmb();
 	init_kick(sdev);
@@ -1511,8 +1695,26 @@ int pvrsgx_fw_start(struct pvrsgx_device *sdev)
 	err = 0;
 	if (first && stage1_sweep && sdev->family->event_pds_guessed)
 		err = start_sweep(sdev, hc, clk_idle);
-	if (!err)
+	if (!err && pvrsgx_edm_init && sdev->family->event_pds_guessed) {
+		/*
+		 * EDM real init (edm-path.md §2/§6): the init task runs under the §9
+		 * bare-DOUTU launch, does its init work, and ends. The one event entry
+		 * dispatches on ui32InitStatus (HOSTCTL_INIT_STATUS) — 0 means "run
+		 * init", non-zero means "dispatch to the handlers". The microkernel
+		 * normally sets it, but that st.a.d drops on the 530, so without the
+		 * host writing it every event would re-enter init forever. So give the
+		 * init task time to run, log the state, then the host sets the flag
+		 * itself (host-owned, like the rest of the firmware structures); the
+		 * next event dispatches to the handlers.
+		 */
+		msleep(20);
+		bringup_diag(sdev, "after EDM init");
+		WRITE_ONCE(hc[HOSTCTL_INIT_STATUS], HOSTCTL_INIT_COMPLETE);
+		/* Visible to the GPU before the next event reads it. */
+		wmb();
+	} else if (!err) {
 		err = wait_for_init(sdev, &hc[HOSTCTL_INIT_STATUS]);
+	}
 	if (first && probes_wanted(sdev))
 		probes_unmap(sdev, ARRAY_SIZE(code_base_probe));
 	if (err && sdev->lost)
@@ -1527,6 +1729,7 @@ int pvrsgx_fw_start(struct pvrsgx_device *sdev)
 		if (sdev->family->event_pds_guessed) {
 			pvrsgx_fw_dump_status_words(sdev);
 			fw_scan(sdev);
+			fw_dirswap(sdev);
 		}
 		return err;
 	}
@@ -1549,6 +1752,25 @@ void pvrsgx_fw_stop(struct pvrsgx_device *sdev)
 	u32 data[6] = { 0, POWER_OFF };
 
 	if (sdev->fw_running) {
+		if (pvrsgx_edm_init && sdev->family->event_pds_guessed) {
+			/*
+			 * EDM bring-up stop: skip the DDK power-off handshake (CMD_POWER +
+			 * the POWER_STATUS poll and the clock-gate wait it leads to). The
+			 * microkernel's power handler is not yet validated on the §9 path,
+			 * and the handshake wedges the unload (log 2026-11-12-2347): rmmod
+			 * faulted with the cores left half-torn-down. Stop the GPU
+			 * host-side instead — drop power, drain the IRQ, undo the init
+			 * script with the clocks still on, then soft-reset the cores (the
+			 * real stop). A validated microkernel power-off can come later.
+			 */
+			WRITE_ONCE(sdev->powered, false);
+			synchronize_irq(sdev->irq);
+			deinit_script(sdev);
+			sdev->fw_running = false;
+			sgx_wr(sdev, SGX_CR_SOFT_RESET, cr->soft_reset_bif | cr->soft_reset_cores);
+			sgx_rd(sdev, SGX_CR_SOFT_RESET);
+			return;
+		}
 		if (pvrsgx_ccb_send(sdev, PVRSGX_CMD_POWER, data, NULL) ||
 		    pvrsgx_poll(sdev, &hc[HOSTCTL_POWER_STATUS], HOSTCTL_POWMAN_POWEROFF_COMPLETE,
 				HOSTCTL_POWMAN_POWEROFF_COMPLETE, 500000))

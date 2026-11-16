@@ -68,4 +68,13 @@ void pvrsgx_fw_dump_status_words(struct pvrsgx_device *sdev);
 int pvrsgx_fw_pd_slot_get(struct pvrsgx_device *sdev, u32 pd);
 void pvrsgx_fw_pd_slot_put(struct pvrsgx_device *sdev, int slot);
 
+/* Bring-up probe (vendor-setup §9), event program and launch words. */
+extern bool pvrsgx_stage1_vlaunch;
+extern int pvrsgx_vl_w0, pvrsgx_vl_w1, pvrsgx_vl_w2, pvrsgx_vl_a70;
+
+/* Real EDM init via the §9 bring-up launch (edm-path.md §2/§6), off by default. */
+extern bool pvrsgx_edm_init;
+/* True when the §9 bare-DOUTU launch is used: the stage-1 probe or real EDM init. */
+bool pvrsgx_use_vlaunch9(struct pvrsgx_device *sdev);
+
 #endif /* PVRSGX_FW_H */
