@@ -1,0 +1,29 @@
+glsl: a default precision for sampler2DShadow under GL_EXT_shadow_samplers in GLSL ES 1.00
+
+GL_EXT_shadow_samplers adds the sampler type sampler2DShadow to GLSL ES 1.00,
+whose section 4.5.3 allows a default precision for int, float and any sampler
+type. Mesa lexes the keyword whenever it is used, but adds the type to the symbol
+table only for GLSL 1.10 and GLSL ES 3.00, so the default precision statement,
+which looks the type up by name, fails with "default precision statements
+apply only to float, int, and opaque types" even with the extension enabled.
+Add the type when the extension is enabled.
+
+ioquake3's OpenGL 2 renderer with r_PreferOpenglES 1 hits it on every driver
+that exposes the extension (llvmpipe too).
+
+--- a/src/compiler/glsl/builtin_types.cpp
++++ b/src/compiler/glsl/builtin_types.cpp
+@@ -311,6 +311,13 @@
+       add_type(symbols, &glsl_type_builtin_sampler2DRectShadow);
+    }
+ 
++   /* GL_EXT_shadow_samplers brings sampler2DShadow to GLSL ES 1.00.  The
++    * lexer takes the keyword anyway, but a default precision statement looks
++    * the type up by name ("precision lowp sampler2DShadow;", which the
++    * extension's own example uses). */
++   if (state->EXT_shadow_samplers_enable)
++      add_type(symbols, &glsl_type_builtin_sampler2DShadow);
++
+    if (state->EXT_gpu_shader4_enable) {
+       add_type(symbols, &glsl_type_builtin_uint);
+       add_type(symbols, &glsl_type_builtin_uvec2);
