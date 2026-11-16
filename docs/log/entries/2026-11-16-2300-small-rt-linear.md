@@ -29,5 +29,7 @@ draws into them, so xfwm4's 16x2 border piece was rendered scrambled, then tiled
 **Fix:** a 2D texture that may be rendered into (`PIPE_BIND_RENDER_TARGET`), with a side under 16 and
 more than one row, is laid out linear, as an NPOT texture is (`sgx_tex_twiddled`). Linear sampling
 wraps correctly with `GL_REPEAT` at these sizes. Every other `sgx_gamefix` part still passes, with no
-timeouts or faults. Not covered: a large render target's small mip levels, which stay twiddled (a
+timeouts or faults. Under the root's Xorg with dev's kernel and this Mesa ("glamor X acceleration
+enabled on PowerVR SGX545"), xfwm4's Mint-Y borders are clean: 0 black pixels on the bottom rows,
+against the pattern above on 0.2.1. Not covered: a large render target's small mip levels, which stay twiddled (a
 render into one would have the same problem; nothing seen renders into them).
