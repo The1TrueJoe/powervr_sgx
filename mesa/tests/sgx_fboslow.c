@@ -34,7 +34,9 @@
  * It prints the milliseconds a frame per size per round, the renders so far, the
  * system's Shmem and this process's powervr_sgx memory (DRM fdinfo), and FAILs
  * when the last round's frames at a size take more than twice as long as the
- * fastest of rounds 2 to 5 (and over 1 ms more).
+ * fastest of rounds 2 to 5 (and over 1 ms more), or when a pixel of the last size
+ * drawn that the quad covers differs from its bottom-left one (with -T: still holds
+ * the clear colour), printed by quarter.
  *
  * zig cc -target x86_64-linux-gnu.2.36 -I<mesa include> -o sgx_fboslow sgx_fboslow.c -ldl
  */
@@ -499,6 +501,40 @@ main(int argc, char **argv)
       glReadPixels_(sizes[big][0] / 2, sizes[big][1] / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
       printf("centre pixel of %dx%d: %d %d %d %d (expected about 153 102 51 191); GL error 0x%x\n",
              sizes[big][0], sizes[big][1], px[0], px[1], px[2], px[3], glGetError_());
+   }
+   if (quad_box[0] < quad_box[2]) {
+      /* coverage: the pixels the quad covers that differ from its bottom-left
+       * one (a tile drawn without some of the quads, or none: the clear colour
+       * 51 77 102), in a 4x4 grid of the target, bottom row first.  -T's
+       * texture varies by pixel: count the clear colour only. */
+      int w = sizes[big][0], h = sizes[big][1];
+      GLubyte *all = malloc((size_t)w * h * 4);
+      int x0 = (quad_box[0] + 1) * w / 2, x1 = (quad_box[2] + 1) * w / 2;
+      int y0 = (quad_box[1] + 1) * h / 2, y1 = (quad_box[3] + 1) * h / 2;
+      long cell[4][4] = {{0}}, total = 0;
+
+      glReadPixels_(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, all);
+      const GLubyte ref[4] = {51, 77, 102, 255};
+      const GLubyte *r = textured ? ref : all + ((size_t)y0 * w + x0) * 4;
+
+      printf("bottom-left pixel under the quad: %d %d %d %d\n", r[0], r[1], r[2], r[3]);
+      for (int y = y0; y < y1; y++)
+         for (int x = x0; x < x1; x++) {
+            const GLubyte *p = all + ((size_t)y * w + x) * 4;
+            bool same = abs(p[0] - r[0]) <= 1 && abs(p[1] - r[1]) <= 1 && abs(p[2] - r[2]) <= 1;
+
+            if (textured ? same : !same) {
+               cell[y * 4 / h][x * 4 / w]++;
+               total++;
+            }
+         }
+      printf("%s pixels under the quad in %dx%d: %ld; by quarter (x across, y up):\n",
+             textured ? "clear-colour" : "differing", w, h, total);
+      for (int gy = 0; gy < 4; gy++)
+         printf("  %8ld %8ld %8ld %8ld\n", cell[gy][0], cell[gy][1], cell[gy][2], cell[gy][3]);
+      if (total)
+         fail = true;
+      free(all);
    }
    for (int s = 0; s < NSIZES; s++) {
       if (!(mask & (1u << s)) || rounds < 2)
