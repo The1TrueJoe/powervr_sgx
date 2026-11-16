@@ -919,6 +919,36 @@ ctx_free(struct sgxws_ctx *c)
    free(c);
 }
 
+/* TA terminate (VDM type 6, PDS.md "DOUTA"): DOUTA (0x2000, 0), 3 x
+ * (pa1, 0x100), then a state-emit task for the two attributes.  pa1 bounds
+ * the region the terminate closes; (tile columns - 1) << 16 | (32-pixel rows
+ * - 1) gives the DDK's 0x0016000e at 720x480 and covers every target tried.
+ * A terminate smaller than the target (0x0016000e closes 1440x960) leaves the
+ * tiles outside it unclosed: they are not drawn right, and the DPM counts
+ * their pages in use after the render, 82 of a 2048x1200 scene's 153 every
+ * render, until the TA's thresholds fire and the jobs time out
+ * (docs/STATE.md) */
+static uint32_t
+terminate_prog(struct sgxws_ctx *c, uint32_t pa1)
+{
+   struct pds t = {0};
+   uint32_t rows;
+
+   pds_d0(&t, 0, 0x2000);
+   pds_d0(&t, 1, sgx_pds_douta_ctrl(&(struct sgx_pds_douta){.reg = 0}));
+   pds_d0(&t, 2, pa1);
+   pds_d0(&t, 3, sgx_pds_douta_ctrl(&(struct sgx_pds_douta){.reg = 1}));
+   pds_d0(&t, 4, doutu_w0(c, c->state_emit[2], true, 0));
+   pds_d0(&t, 5, 0);
+   CODE(&t, pds_movs(MV, 0, 0x18, 0, 1, 2, 2, DOUTA));
+   for (int i = 0; i < 3; i++)
+      CODE(&t, pds_movs(MV, 1, 0x18, 0, 1, 2, 2, DOUTA));
+   CODE(&t, pds_movs(MV, 2, 0, 0, 1, 2, 2, DOUTU));
+   CODE(&t, pds_halt());
+   return pds_emit(&c->pds_vtx, &t, &rows);
+}
+
+
 struct sgxws_ctx *
 sgxws_ctx_create(struct sgxws_dev *d, int priority)
 {
@@ -1000,21 +1030,7 @@ sgxws_ctx_create(struct sgxws_dev *d, int priority)
    /* VDM state programs that every frame ends with */
    c->empty_state = pds_secondary(&c->pds_vtx, 0, 0,
                                   doutu_w0(c, c->empty_v, true, 0), 0, NULL);
-   /* TA terminate (VDM type 6, PDS.md "DOUTA"): DOUTA (0x2000, 0), 3 x
-    * (0x16000e, 0x100), then a state-emit task for the two attributes [D; the
-    * values' meaning G] */
-   pds_d0(&t, 0, 0x2000);
-   pds_d0(&t, 1, sgx_pds_douta_ctrl(&(struct sgx_pds_douta){.reg = 0}));
-   pds_d0(&t, 2, 0x0016000e);
-   pds_d0(&t, 3, sgx_pds_douta_ctrl(&(struct sgx_pds_douta){.reg = 1}));
-   pds_d0(&t, 4, doutu_w0(c, c->state_emit[2], true, 0));
-   pds_d0(&t, 5, 0);
-   CODE(&t, pds_movs(MV, 0, 0x18, 0, 1, 2, 2, DOUTA));
-   for (int i = 0; i < 3; i++)
-      CODE(&t, pds_movs(MV, 1, 0x18, 0, 1, 2, 2, DOUTA));
-   CODE(&t, pds_movs(MV, 2, 0, 0, 1, 2, 2, DOUTU));
-   CODE(&t, pds_halt());
-   c->terminate = pds_emit(&c->pds_vtx, &t, &rows);
+   c->terminate = terminate_prog(c, 0x0016000e);
 
    /* pixel programs shared by every object without inputs, and the clear's */
    c->pds_empty_p = pds_secondary(&c->pds_pix, 0, 0,
@@ -2271,7 +2287,13 @@ sgxws_vdm_end(struct sgxws_ctx *c)
    vdm_state(c, SGX_VDMCTRL_BLOCK_TYPE_PDS_STATE, c->empty_state, 1,
              SGX_VDMCTRL_STATE_KIND_DMA, 0, 0);
    /* the TA terminate's 2 attributes */
-   vdm_state(c, SGX_VDMCTRL_BLOCK_TYPE_PDS_STATE_TERMINATE, c->terminate, 3,
+   /* the target's own terminate region (terminate_prog); the same program
+    * frame after frame comes back from pds_emit's memo */
+   uint32_t term =
+      c->rt ? terminate_prog(c, (c->rt->n.xt - 1) << 16 |
+                                   (DIV_ROUND_UP(c->rt->h, 32) - 1))
+            : c->terminate;
+   vdm_state(c, SGX_VDMCTRL_BLOCK_TYPE_PDS_STATE_TERMINATE, term, 3,
              SGX_VDMCTRL_STATE_KIND_TA_BLOCK, 2, 0);
    sgx_pack(vdm_slot(c), VDMCTRL_STREAM_TERMINATE0, t)
    {
