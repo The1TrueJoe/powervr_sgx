@@ -22,6 +22,7 @@ bool sgx_tex_depth(enum pipe_format format);
 unsigned sgx_tex_raw32(enum pipe_format format);
 bool sgx_tex_word32(enum pipe_format format);
 unsigned sgx_tex_dev_last(const struct pipe_resource *prsc);
+bool sgx_tex_twiddled(const struct pipe_resource *prsc, unsigned w, unsigned h);
 void sgx_tex_set_tail(struct sgx_resource *res, unsigned l);
 
 /* the device layout of a texture: size in bytes, and each level and face's
