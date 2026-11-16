@@ -920,12 +920,14 @@ ctx_free(struct sgxws_ctx *c)
 }
 
 /* TA terminate (VDM type 6, PDS.md "DOUTA"): DOUTA (0x2000, 0), 3 x
- * (pa1, 0x100), then a state-emit task for the two attributes.  pa1 is the
- * region the terminate closes: (tile columns - 1) << 16 | (32-pixel rows - 1),
- * 0x0016000e at 720x480 (the DDK's).  A terminate smaller than the target
- * leaves the tiles outside it unclosed, and the DPM counts their pages in use
- * after the render: 82 of a 2048x1200 scene's 153, every render, until the
- * TA's thresholds fire and the jobs time out (docs/STATE.md) */
+ * (pa1, 0x100), then a state-emit task for the two attributes.  pa1 bounds
+ * the region the terminate closes; (tile columns - 1) << 16 | (32-pixel rows
+ * - 1) gives the DDK's 0x0016000e at 720x480 and covers every target tried.
+ * A terminate smaller than the target (0x0016000e closes 1440x960) leaves the
+ * tiles outside it unclosed: they are not drawn right, and the DPM counts
+ * their pages in use after the render, 82 of a 2048x1200 scene's 153 every
+ * render, until the TA's thresholds fire and the jobs time out
+ * (docs/STATE.md) */
 static uint32_t
 terminate_prog(struct sgxws_ctx *c, uint32_t pa1)
 {
