@@ -9,6 +9,36 @@ the OMAP3630 board: a vendor-stack capture (a separate analysis-side session, in
 `sgx530-vendor-setup.md`), plus cheap black-box checks from this side (runbook §"fresh black-box
 hypotheses").
 
+## UPDATE 2026-11-15: the TA stalls at the PDS; the vertex data master's first PDS program never fetches
+
+Detail and tables: `docs/log/entries/2026-11-15-0120-sgx530-unmap-probe-pds-pc.md` on
+`wip/sgx530-dma530`. All C, on the OMAP3630 board, with every client form on.
+
+- **`EVENT_STATUS2` b4 is TRIG_TA** on this core (GPL 530 header; b7 on the SGX545). The 0x10
+  seen mid-hang is the TA trigger, still pending.
+- **The 530's DOUTD control form** is `(dwords-1) | kind << 21 | secondary << 24` (vendor
+  stream), against the SGX545's `<< 22`/`<< 25`. `SGXGEN_DMA530` selects it. It doesn't
+  change the hang.
+- **A fault tracer** (`probe_unmap_va/size`, off by default) unmaps a range of the job's VM.
+  With the VDM stream or the gen buffer unmapped, the job faults at once at that address
+  (BIF_INT_STAT 0x4010). With the PDS vertex heap, USSE vertex code or TA data unmapped, there
+  is no fault and the same hang. Faults are reported on this core, and the TA reads its command
+  and the VDM stream.
+- **`PDS_PC_BASE` (0xb2c) sits on the first VDM state program.** It reads 0x002004c0, in
+  dwords from `PDS_EXEC_BASE`: 0x0e001300, the code of the clear state block's program.
+  Point the VDM word 1 MiB further (`SGXGEN_VDM_PDS_ADD`), at a page never mapped or written,
+  and the PC follows to 0x002404c0. There is still no fault. **The PDS takes the address but
+  never issues its fetch to the BIF** (or does so with faults suppressed). The EDM's PDS
+  programs, in the kernel code heap, run.
+- **`BIF_MEM_REQ_STAT` moves between 0 and 2** from sample to sample. Something is polling
+  memory; reads aren't stuck.
+- **0xa74 isn't it.** 0x3f8200 (vendor) and 0x108200 behave as our 0x208200. With 0x8200
+  the EDM doesn't run at all.
+
+**Next:** what lets the PDS issue vertex-data-master fetches. Try first the init values the
+vendor writes and we don't: 0xa58 b14, 0xa6c/0xa70, cache control 2. Also look at the
+`PDS_INV3` done bits (0x138 b4/b8) that stay set, unacknowledged, mid-hang.
+
 ## UPDATE 2026-11-14: the vendor stack renders the 64x64 scene; what its render stream looks like
 
 **How it was observed.** On the OMAP3630 board, cold-booted into a capture kernel with the GPL
