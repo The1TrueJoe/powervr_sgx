@@ -10,6 +10,7 @@
  */
 
 #include <linux/auxiliary_bus.h>
+#include <linux/dma-mapping.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/pm_runtime.h>
@@ -38,6 +39,14 @@ static int pvrsgx_aux_probe(struct auxiliary_device *adev, const struct auxiliar
 		return PTR_ERR(sdev);
 	/* The SGX does DMA as the GPU's PCI function: no device of its own. */
 	drm_dev_set_dma_dev(&sdev->base, dev->parent);
+	/*
+	 * Kernels without drm/shmem/0001 map shmem objects for the auxiliary
+	 * device; without a mask it maps them to nothing (issue #5).
+	 */
+	dev->dma_mask = &dev->coherent_dma_mask;
+	err = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (err)
+		return err;
 	sdev->gma_sgx = gma;
 	sdev->family = pvrsgx_core_family_get(gma->core);
 	sdev->regs = gma->regs;
@@ -58,6 +67,12 @@ static void pvrsgx_aux_remove(struct auxiliary_device *adev)
 	pvrsgx_remove_common(auxiliary_get_drvdata(adev));
 }
 
+static void pvrsgx_aux_shutdown(struct auxiliary_device *adev)
+{
+	/* Before gma500's: it may turn DMA back on for the next kernel. */
+	pvrsgx_shutdown_common(auxiliary_get_drvdata(adev));
+}
+
 static const struct auxiliary_device_id pvrsgx_aux_ids[] = {
 	{ .name = "gma500_gfx.sgx" },
 	{ }
@@ -68,6 +83,7 @@ static struct auxiliary_driver pvrsgx_aux_driver = {
 	.name = "sgx",
 	.probe = pvrsgx_aux_probe,
 	.remove = pvrsgx_aux_remove,
+	.shutdown = pvrsgx_aux_shutdown,
 	.id_table = pvrsgx_aux_ids,
 	.driver.pm = pm_ptr(&pvrsgx_pm_ops),
 };

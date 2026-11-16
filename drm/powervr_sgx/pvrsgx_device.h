@@ -10,18 +10,17 @@
 #include <drm/gpu_scheduler.h>
 
 #include <linux/device.h>
+#include <linux/idr.h>
 #include <linux/io.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/pm_qos.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
 #include <linux/xarray.h>
 
-#ifdef CONFIG_X86
-#include <asm/set_memory.h>
-#endif
-
+#include "pvrsgx_cache.h"
 #include "pvrsgx_core.h"
 #include "pvrsgx_hw.h"
 
@@ -64,7 +63,7 @@ struct pvrsgx_kmem {
 	void *cpu;
 };
 
-/* Firmware-visible buffers, in the vendor init's allocation order. */
+/* Firmware-visible buffers, in allocation order. */
 enum pvrsgx_fw_buf {
 	PVRSGX_FW_CCB,		/* kernel CCB: 256 commands */
 	PVRSGX_FW_CCBCTL,	/* its write and read offsets */
@@ -89,6 +88,10 @@ struct pvrsgx_fw {
 	struct pvrsgx_kmem data;
 	/** @code: Kernel code heap: microkernel and its PDS programs. */
 	struct pvrsgx_kmem code;
+	/** @pdtable: Single-context cores: the directory of each VM by slot, GPU read-only. */
+	struct pvrsgx_kmem pdtable;
+	/** @pd_slots: The @pdtable slots VMs hold. */
+	struct ida pd_slots;
 	/** @addr: Device address of each buffer. */
 	u32 addr[PVRSGX_FW_NBUF];
 	/** @cpu: CPU address of each buffer. */
@@ -103,13 +106,13 @@ struct pvrsgx_fw {
 	u8 *image;
 	/** @image_size: Bytes of USSE code in @image. */
 	u32 image_size;
-	/** @features: PVRSGX_UKFW_* of an open microkernel; 0 for the DDK's. */
+	/** @features: PVRSGX_UKFW_* the microkernel's file header declares. */
 	u32 features;
-	/** @entries: An open microkernel's entry table (PDS program, offset), or NULL. */
+	/** @entries: The microkernel's entry table (PDS program, offset), or NULL. */
 	u32 (*entries)[2];
 	/** @n_entries: Entries in @entries. */
 	u32 n_entries;
-	/** @patches: An open microkernel's patch table (offset, value), or NULL. */
+	/** @patches: The microkernel's patch table (offset, value), or NULL. */
 	u32 (*patches)[2];
 	/** @n_patches: Entries in @patches. */
 	u32 n_patches;
@@ -146,7 +149,7 @@ struct pvrsgx_device {
 
 	/** @kernel_mmu: Page directory the microkernel translates through. */
 	struct pvrsgx_mmu *kernel_mmu;
-	/** @idle_mmu: Empty directory for list 0 while no job runs. */
+	/** @idle_mmu: Empty directory for list 0 while no job runs (multi-context cores). */
 	struct pvrsgx_mmu *idle_mmu;
 	/** @reset_mmu: Scratch directory that absorbs faults during reset. */
 	struct pvrsgx_mmu *reset_mmu;
@@ -157,6 +160,8 @@ struct pvrsgx_device {
 	struct pvrsgx_fw fw;
 	/** @fw_running: The microkernel has started and takes commands. */
 	bool fw_running;
+	/** @uk_lockups: The microkernel's lockup count, as last reported. */
+	u32 uk_lockups;
 	/**
 	 * @powered: The SGX is clocked and its registers may be read. Off between
 	 * a stop and the next start: a read of an unclocked CE5300 block can hang
@@ -169,8 +174,13 @@ struct pvrsgx_device {
 	u32 fw_gen;
 	/** @lost: Firmware failed to restart; every job fails with -EIO. */
 	bool lost;
-	/** @reset_lock: Serializes a GPU reset with unbind. */
+	/**
+	 * @reset_lock: Serializes a GPU reset, from stopping the scheduler to
+	 * starting it, with unbind, system sleep and the fault check.
+	 */
 	struct mutex reset_lock;
+	/** @quiesced: System sleep holds the GPU; a timeout then finds no hang. */
+	bool quiesced;
 	/** @faulted: The BIF reported a page fault; the running job ends with -EFAULT. */
 	bool faulted;
 
@@ -180,6 +190,8 @@ struct pvrsgx_device {
 	spinlock_t ccb_spin;
 	/** @ccb_issued: Commands written to the kernel CCB since load, across restarts. */
 	u64 ccb_issued;
+	/** @ccb_reset_seq: @ccb_issued at the ring's last reset (under @ccb_spin). */
+	u64 ccb_reset_seq;
 	/** @inval_lock: Protects @inval_waits. */
 	spinlock_t inval_lock;
 	/** @inval_waits: &struct pvrsgx_inval_wait for invalidates not yet taken. */
@@ -199,6 +211,31 @@ struct pvrsgx_device {
 	struct list_head active;
 	/** @last_fence: Hardware fence of the job last sent to the firmware. */
 	struct dma_fence *last_fence;
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+	/** @dbg_render: The last render submitted, for debugfs "render". */
+	struct pvrsgx_render_dbg {
+		/** @dbg_render.lock: Protects the fields below. */
+		spinlock_t lock;
+		/** @dbg_render.rtds: Its dataset, a reference. */
+		struct pvrsgx_rt_dataset *rtds;
+		/** @dbg_render.kicked: The dataset of the last kick written; never dereferenced. */
+		const void *kicked;
+		/** @dbg_render.cmd_off: That kick's TA command in its context's ring. */
+		u32 cmd_off;
+		/** @dbg_render.entry: That kick's RT-data entry. */
+		u32 entry;
+	} dbg_render;
+#endif
+	/**
+	 * @wq: Runs @poll_work, which signals fences: the queue has a rescuer
+	 * and never waits on memory reclaim.
+	 */
+	struct workqueue_struct *wq;
+	/**
+	 * @free_wq: Runs @reap_work and the jobs' final puts, which take
+	 * reservations and free memory: never the queue that signals fences.
+	 */
+	struct workqueue_struct *free_wq;
 	/** @poll_work: Checks completions while jobs are out. */
 	struct delayed_work poll_work;
 
@@ -222,11 +259,20 @@ struct pvrsgx_device {
 	struct list_head kobj_unmapped;
 	/** @renders_submitted: Render jobs handed to the firmware, for reaping @graveyard. */
 	u64 renders_submitted;
+	/** @transfers_submitted: Likewise for transfer jobs (under @kobj_lock). */
+	u64 transfers_submitted;
 	/**
-	 * @done_seq: Jobs signalled since the microkernel started, against its
-	 * count (pvrsgx_fw_ta3d_ctl.done_seq; under @fence_lock).
+	 * @done_seq: Completions accounted since the microkernel started, against
+	 * its count (pvrsgx_fw_ta3d_ctl.done_seq; under @fence_lock).
 	 */
 	u32 done_seq;
+	/**
+	 * @noops_sent: No-ops the kernel sent that are not jobs (the BIF part of a
+	 * split invalidate). A counting microkernel counts them too.
+	 */
+	u32 noops_sent;
+	/** @noops_seen: @noops_sent as of the last job signalled (under @fence_lock). */
+	u32 noops_seen;
 	/** @restarts: Microkernel restarts; graveyard entries from before one can go. */
 	u32 restarts;
 	/** @coredump_work: Hands a hang's dump to devcoredump, outside the reset. */
@@ -237,14 +283,42 @@ struct pvrsgx_device {
 	size_t coredump_len;
 	/** @renders_done: Render jobs the firmware has finished. */
 	u64 renders_done;
+	/** @transfers_done: Transfer jobs the firmware has finished (under @fence_lock). */
+	u64 transfers_done;
 	/** @reap_work: Frees @graveyard entries a later render made safe. */
 	struct work_struct reap_work;
 
 	/** @irq_count: SW_EVENT interrupts taken (debugfs). */
 	atomic_t irq_count;
+	/** @pm_pinned: Runtime PM is held active (single-context bring-up). */
+	bool pm_pinned;
+	/** @cpu_latency: The core's CPU latency limit while jobs are in flight. */
+	struct pvrsgx_cpu_latency {
+		/** @cpu_latency.req: The request, active while held. */
+		struct pm_qos_request req;
+		/** @cpu_latency.release: Drops it a while after the last job. */
+		struct delayed_work release;
+		/** @cpu_latency.lock: Orders adding and removing the request. */
+		struct mutex lock;
+		/** @cpu_latency.jobs: Jobs submitted and not yet freed. */
+		atomic_t jobs;
+		/** @cpu_latency.us: The limit, or 0 for none. */
+		u32 us;
+	} cpu_latency;
+#if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_KUNIT_TEST)
+	/** @test_wr: KUnit only: sees every register write before it lands. */
+	void (*test_wr)(struct pvrsgx_device *sdev, u32 reg, u32 val);
+#endif
 };
 
 #define to_pvrsgx_device(drm) container_of_const(drm, struct pvrsgx_device, base)
+
+/*
+ * A file's limits: every context and RT dataset takes kernel memory from
+ * device-wide ranges, so one client may not take them all.
+ */
+#define PVRSGX_MAX_FILE_CONTEXTS	64
+#define PVRSGX_MAX_FILE_RTDS		64
 
 /**
  * struct pvrsgx_file - Per-open state
@@ -258,6 +332,14 @@ struct pvrsgx_file {
 	struct xarray contexts;
 	/** @rtds: RT datasets by handle. */
 	struct xarray rtds;
+	/** @usage: GPU time, for fdinfo. */
+	struct pvrsgx_usage *usage;
+	/**
+	 * @submit_lock: Read across SUBMIT_JOBS, from its context lookups to its
+	 * pushes; written to take a context out of @contexts, so none is
+	 * destroyed under a submit that found it.
+	 */
+	struct rw_semaphore submit_lock;
 };
 
 static inline struct pvrsgx_file *to_pvrsgx_file(struct drm_file *file)
@@ -272,7 +354,34 @@ static inline u32 sgx_rd(struct pvrsgx_device *sdev, u32 reg)
 
 static inline void sgx_wr(struct pvrsgx_device *sdev, u32 reg, u32 val)
 {
+#if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_KUNIT_TEST)
+	if (sdev->test_wr)
+		sdev->test_wr(sdev, reg, val);
+#endif
 	iowrite32(val, sdev->regs + reg);
+}
+
+/*
+ * What list 0 holds while no job runs: an empty directory, or on a
+ * single-context core the firmware's, since the microkernel translates
+ * through list 0 too.
+ */
+static inline struct pvrsgx_mmu *pvrsgx_idle_mmu(const struct pvrsgx_device *sdev)
+{
+	return pvrsgx_core_single_context(sdev->family) ? sdev->kernel_mmu : sdev->idle_mmu;
+}
+
+/* The core's device-virtual layout. */
+static inline const struct pvrsgx_heap_layout *pvrsgx_heaps(const struct pvrsgx_device *sdev)
+{
+	return sdev->family->heaps;
+}
+
+/* A register from the core table: 0 is one the core lacks, never written. */
+static inline void sgx_wr_opt(struct pvrsgx_device *sdev, u32 reg, u32 val)
+{
+	if (reg)
+		sgx_wr(sdev, reg, val);
 }
 
 /*
@@ -285,33 +394,15 @@ static inline u32 pvrsgx_dirlist_edm(const struct pvrsgx_device *sdev)
 	return sdev->family->num_dir_lists - 1;
 }
 
-/*
- * The GPU doesn't snoop, so the CPU maps what it shares write-combined. Only
- * x86 has the call; elsewhere (COMPILE_TEST) it is a no-op.
- */
-static inline int pvrsgx_pages_wc(struct page **pages, int n)
-{
-#ifdef CONFIG_X86
-	return set_pages_array_wc(pages, n);
-#else
-	return 0;
-#endif
-}
-
-static inline void pvrsgx_pages_wb(struct page **pages, int n)
-{
-#ifdef CONFIG_X86
-	set_pages_array_wb(pages, n);
-#endif
-}
-
 int pvrsgx_kmem_alloc(struct pvrsgx_device *sdev, struct pvrsgx_kmem *km,
 		      u32 dev_addr, u32 size, u32 pte_flags, gfp_t gfp);
 void pvrsgx_kmem_free(struct pvrsgx_device *sdev, struct pvrsgx_kmem *km);
 void pvrsgx_kmem_release(struct pvrsgx_kmem *km);
+void pvrsgx_share_fw_heaps(struct pvrsgx_device *sdev, struct pvrsgx_mmu *mmu);
 
 int pvrsgx_device_init(struct pvrsgx_device *sdev);
 void pvrsgx_device_unplug(struct pvrsgx_device *sdev);
+void pvrsgx_irq_sync(struct pvrsgx_device *sdev);
 void pvrsgx_reset(struct pvrsgx_device *sdev, bool recovery);
 int pvrsgx_poll(struct pvrsgx_device *sdev, const u32 *addr, u32 mask, u32 val,
 		unsigned int timeout_us);
