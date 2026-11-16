@@ -119,7 +119,7 @@ Until an APM hand-over exists, the driver holds the device awake while it is bou
 
 | Behaviour | Where |
 |---|---|
-| A permanent runtime PM reference: no idle stop, no microkernel stop, no D3 | `pvrsgx_power_init()` / `pvrsgx_power_fini()` |
+| Runtime PM stays forbidden, as the PCI core leaves it (`power/control` reads `on`): no idle stop, no microkernel stop, no D3 | `pvrsgx_power_init()` |
 | Runtime suspend returns `-EBUSY` if it is ever reached | `pvrsgx_runtime_suspend()` |
 | System sleep is refused with a warning | `pvrsgx_suspend()` |
 
@@ -157,8 +157,8 @@ so it is off by default.
 
 ## Traps
 
-- **D3 is fatal here**: nothing powers the island again. Hence the permanent reference,
-  and no `pci_set_power_state()`.
+- **D3 is fatal here**: nothing powers the island again. Hence runtime PM stays
+  forbidden, and no `pci_set_power_state()`.
 - **Do not sweep MMIO on this SoC.** A read of a register that waits for a handshake
   hangs the CPU with no recovery but a cold boot; seen in the audio block's window
   (`0xFFAE0000`). The driver touches only the registers named on this page.

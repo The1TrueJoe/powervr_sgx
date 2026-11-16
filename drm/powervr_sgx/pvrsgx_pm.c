@@ -57,7 +57,15 @@ void pvrsgx_power_init(struct pvrsgx_device *sdev)
 	pm_runtime_mark_last_busy(dev);
 	if (sdev->pdev) {
 		pm_runtime_put_autosuspend(dev);
-		pm_runtime_allow(dev);
+		/*
+		 * Without an APM hand-over nothing would bring the island back,
+		 * so on these parts runtime PM stays forbidden, as the PCI core
+		 * left it: no idle stop, no microkernel stop, and power/control
+		 * reads "on" for userspace to see. pvrsgx_runtime_suspend()
+		 * still refuses if it is allowed by hand.
+		 */
+		if (!island_always_on(sdev))
+			pm_runtime_allow(dev);
 	} else {
 		pm_runtime_set_active(dev);
 		pm_runtime_enable(dev);
@@ -70,15 +78,6 @@ void pvrsgx_power_init(struct pvrsgx_device *sdev)
 			sdev->pm_pinned = true;
 		}
 	}
-
-	/*
-	 * Without an APM hand-over nothing would bring the island back, so on
-	 * these parts the device is held awake: no runtime suspend, no
-	 * microkernel stop, for as long as the driver is bound. The reference
-	 * is dropped in pvrsgx_power_fini().
-	 */
-	if (island_always_on(sdev))
-		pm_runtime_get_noresume(dev);
 }
 
 /* Before remove: undo pvrsgx_power_init, with the device awake. */
@@ -86,8 +85,6 @@ void pvrsgx_power_fini(struct pvrsgx_device *sdev)
 {
 	struct device *dev = sdev->base.dev;
 
-	if (island_always_on(sdev))
-		pm_runtime_put_noidle(dev);
 	if (sdev->pdev) {
 		pm_runtime_forbid(dev);
 		pm_runtime_dont_use_autosuspend(dev);
@@ -110,7 +107,7 @@ static int pvrsgx_runtime_suspend(struct device *dev)
 {
 	struct pvrsgx_device *sdev = dev_get_drvdata(dev);
 
-	/* Held awake by pvrsgx_power_init(): a stop here would gate the island. */
+	/* Forbidden in pvrsgx_power_init(); allowed by hand, a stop would gate the island. */
 	if (island_always_on(sdev))
 		return -EBUSY;
 	/* Lost too: after a failed start the clocks are still on (fw_stop's second branch). */
