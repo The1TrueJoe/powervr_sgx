@@ -1,61 +1,67 @@
 # Clover Trail (Atom Z2760): the SGX545 behind the display engine
 
-The platform facts for `powervr_sgx` on Intel Clover Trail, as used by the local
-`clovertrail` branch. The core is the SGX545 that [kernel.md](../kernel.md) and
-[docs/UKERNEL.md](../../UKERNEL.md) already describe; what is new is where its window
-lives, who powers its island, and that nothing in mainline drives the display it shares
-a PCI function with.
+The platform facts for `powervr_sgx` on Intel Clover Trail. The core is the SGX545 that
+[kernel.md](../kernel.md) and [docs/UKERNEL.md](../../UKERNEL.md) already describe; what
+is new is where its window lives, how its interrupt reaches the CPU, who powers its
+island, and that nothing in mainline drives the display it shares a PCI function with.
 
-Tags follow [state.md](../state.md)'s method, with this page's own scale:
+Everything marked V was measured on one HP ElitePad 900 G1 (Atom Z2760, 2 GiB, Debian
+13 i386, Linux 7.3.4). How to boot Linux on that tablet, and the logs behind these
+numbers: <https://github.com/servidorjarvis1-svg/elitepad-900-linux>.
+
+Tags follow [state.md](../state.md)'s method, with this page's own scale, and every fact
+names its source:
 
 | Tag | Meaning |
 |---|---|
-| **V** | Verified on the HP ElitePad 900 G1 (Atom Z2760): `dmesg`, `journal`, or the machine's own ACPI tables |
-| **D** | Derived from a V fact, or from code and documentation in this tree |
-| **G** | A guess or a single public source, to be confirmed by the first register reads |
-| **U** | Unknown: not measured yet |
-
-Nothing on this page was measured with a register read. The branch is prepared so that
-the first boot can measure it, not because it was measured.
+| **V** | Verified on the tablet: a register read, `dmesg`, `/proc`, config space, a test run, or the machine's own ACPI tables |
+| **D** | Derived from a V fact, or from code and documentation in this tree or in mainline Linux |
+| **A** | From the public Clover Trail+ Android kernel (Lenovo K900, `android_kernel_lenovo_redhookbay`); not confirmed on the tablet |
+| **G** | A single public source, not measured |
 
 ## Identity
 
-| Fact | Value | Tag |
-|---|---|---|
-| PCI function | `0000:00:02.0`, `8086:08cf`, class `0x030000` (VGA) | V |
-| BAR 0 | `0xff200000`-`0xff2fffff`, 1 MiB | V |
-| BAR 1 | `0x1000`-`0x1007`, 8 bytes (I/O) | V |
-| BAR 2 | 256 MiB aperture (reassigned by Linux); BAR 3 256 KiB GTT | V |
-| Interrupt | GSI 16 (`0x10`), INTx A: `_PRT` of `PCI0`, source `Zero`, `_ADR 0x00020000` | V |
-| ACPI device | `\_SB.PCI0.GFX0`; `_PS0` writes `SSID = 0x18DC103C` and `\_SB.GDDS = 0`, `_PS3` writes `GDDS = 3`. No `_PR0`/`_PR3`, no power resource, no GPU register | V |
-| CPU | family 6 model `0x35` (`INTEL_ATOM_CLV`, Cloverview) | V |
-| `CORE_ID` | expected `0x0115xxxx` (SGX545); `xxxx` is CONFIG | **U** |
-| `CORE_REVISION` | **U** — this is what the first boot reads | **U** |
-| Core clock | 533 MHz (notebookcheck, "Imagination PowerVR SGX545") | G |
+| Fact | Value | Tag | Source |
+|---|---|---|---|
+| PCI function | `0000:00:02.0`, `8086:08cf`, class `0x030000`, revision `0x05` | V | `lspci -nn`, config space |
+| PCI command | `0x0007` (I/O, memory, bus master) | V | config space |
+| BAR 0 | `0xff200000`-`0xff2fffff`, 1 MiB | V | `lspci -v`; the DSDT's `_CRS` for `PCI0` reserves the same range |
+| BAR 1 | `0x1000`-`0x1007`, 8 bytes (I/O) | V | `lspci -v` |
+| BAR 2, 3 | 256 MiB aperture (reassigned by Linux), 256 KiB GTT | V | `lspci -v` |
+| Interrupt Pin | `0`: no INTx line | V | config space offset `0x3D` |
+| MSI | capability present | V | `lspci -vv` |
+| `_PRT` entry | INTA → GSI 16, never raised (see [the interrupt](#the-interrupt-the-display-engines-msi)) | V | DSDT, test run |
+| ACPI device | `\_SB.PCI0.GFX0`; `_PS0` writes `SSID = 0x18DC103C` and `\_SB.GDDS = 0`, `_PS3` writes `GDDS = 3`; no `_PR0`/`_PR3`, no power resource, no GPU register | V | DSDT |
+| CPU | family 6 model `0x35` (`INTEL_ATOM_CLV`) | V | `/proc/cpuinfo` |
+| `CORE_ID` | `0x01150000` | V | register read (`sgx-ident`), the driver's log |
+| `CORE_REVISION` | `0x0001000e` (1.0.14, the CE5300's) | V | register read, the driver's log |
+| `CLKGATESTATUS` before the driver | `0` | V | register read |
+| `BIF_CTRL` before the driver | `0x0000ff00` | V | register read |
+| Core clock | 533 MHz | G | notebookcheck, "Intel Atom Z2760" |
 
-The DSDT is in the work tree at `elitepad-dev/ref/acpi/`. The register facts agree with
-the machine's `_CRS` for `PCI0`, which reserves `Memory32Fixed(RW, 0xFF200000, 0x00100000)`
-for this function.
+The revision being the CE5300's is why the clock lives in `struct pvrsgx_part` and not in
+the core table: both parts find the same core entry, 1.0.14, and differ in their clock.
+The driver logs
+
+    SGX core id 0x01150000 revision 0x0001000e: Intel Clover Trail (SGX545 1.0.14, 533 MHz)
 
 ## The window
 
 `BAR 0` is one MiB and holds two engines:
 
-| Range | Owner | Tag |
-|---|---|---|
-| `0xff200000`-`0xff27ffff` | display engine | D |
-| `0xff280000`-`0xff2fffff` | SGX545 (`PVRSGX_CLV_SGX_OFFSET`, 0x80000) | G |
+| Range | Owner | Tag | Source |
+|---|---|---|---|
+| `0xff200000`-`0xff27ffff` | display engine | D | gma500's layout on Medfield and Cedarview |
+| `0xff280000`-`0xff2fffff` | SGX545 (`PVRSGX_CLV_SGX_OFFSET`, 0x80000) | V | `CORE_ID` and `CORE_REVISION` read at `+0x1c`/`+0x20` |
 
-The offset is the one Medfield and Cedarview use: `MRST_SGX_OFFSET` in gma500's
-`psb_drv.h`, passed by `mdfld_device.c` and `cdv_device.c`. Clover Trail uses the same
-display engine design, so the guess is strong, but it is a guess: nothing has read
-`0xFF28001C` on this tablet. `sgx-ident` is what turns it into a fact (below).
+The offset is the one Medfield and Cedarview use (`MRST_SGX_OFFSET` in gma500's
+`psb_drv.h`). Offsets in the driver tables are from the start of the window, as on the
+CE5300.
 
-Offsets in the driver tables are from the start of the window, as on the CE5300. The
-registers the driver reads before the reset sequence are the ones
-`drm/powervr_sgx/pvrsgx_regs.h` names: `CLKGATECTL` 0x0000, `CLKGATESTATUS` 0x0008,
-`CORE_ID` 0x001c, `CORE_REVISION` 0x0020, `SOFT_RESET` 0x0080, `EVENT_STATUS` 0x012c,
-`EVENT_HOST_ENABLE` 0x0130, `BIF_CTRL` 0x0c00. All of them fall inside the mapped page.
+In the display half the driver touches three registers, and in them only bit 18:
+`INT_ENABLE` `0x20A0`, `INT_IDENTITY` `0x20A4` and `INT_MASK` `0x20A8` (the
+`PVRSGX_VDC_*` defines; gma500's `PSB_INT_*_R` and `_PSB_IRQ_SGX_FLAG`). Nothing else
+below `0x80000` is read or written.
 
 ## Why the driver is a PCI driver here, not gma500's auxiliary device
 
@@ -63,153 +69,106 @@ On Cedarview, mainline gma500 owns the PCI function and publishes the SGX as the
 auxiliary device `gma500_gfx.sgx`; `pvrsgx_aux.c` binds to that. On Clover Trail the
 display engine has no mainline driver (gma500 never supported Cloverview), so there is
 nothing to publish the SGX: the driver claims `8086:08cf` itself, maps `BAR 0` with
-`pcim_iomap_region()` and adds the window offset. Nothing else in the probe changes.
+`pcim_iomap_region()` and adds the window offset.
 
 Two consequences, both deliberate:
 
-- the driver must stay **render-only**. It doesn't call
+- the driver stays **render-only**. It doesn't call
   `drm_aperture_remove_conflicting_pci_framebuffers()`, so the firmware's framebuffer
-  survives and a KMS driver can be built on it (`simpledrm`, see
-  [the screen](#the-screen)). Removing it would take the console away with nothing to
-  replace it;
-- claiming the function means the display half of `BAR 0` is mapped but never touched.
-  No code path in the driver refers to an offset below 0x80000, and `sgx-ident` reads
-  only the eight named registers.
+  survives and `simpledrm` drives the screen ([the screen](#the-screen));
+- the display half of `BAR 0` is mapped, and only the three interrupt registers above
+  are used.
 
-A part is data, not a separate driver: `pvrsgx_parts[]` in `pvrsgx_drv.c` carries the
-core number, the window offset and the power flags, and the PCI id table's
-`driver_data` is an index into it.
+A part is data: `pvrsgx_parts[]` in `pvrsgx_drv.c` carries the core number, the window
+offset, the clock and the flags (`PVRSGX_PART_ISLAND_ALWAYS_ON`,
+`PVRSGX_PART_VDC_IRQ`), and the PCI id table's `driver_data` indexes it.
+
+## The interrupt: the display engine's MSI
+
+| Fact | Tag | Source |
+|---|---|---|
+| The function has no INTx line (Interrupt Pin 0) and an MSI capability | V | config space |
+| With a handler on the `_PRT`'s GSI 16 the microkernel ran, jobs completed by polling only, and `EVENT_STATUS` held `0x80004000` with no interrupt taken | V | test run, `/proc/interrupts` |
+| The SGX's request is bit 18 of the display's interrupt registers, and the display signals it by MSI | V | uAPI suite 40/40, 794 MSIs on the first run that took it this way |
+| The bit is latched in `INT_IDENTITY` (write 1 to clear), and a latch left set blocks every later MSI | D | gma500 (`psb_irq.c`); the stall seen without the clear |
+
+How the driver handles it (`pvrsgx_device.c`):
+
+- the bit is unmasked and enabled only once `request_threaded_irq()` has succeeded, and
+  disabled and masked before `free_irq()`;
+- the handler clears the source (`EVENT_HOST_CLEAR`), then the latch, and clears the
+  latch also on the path where the core is powered off;
+- the MSI is edge-signalled, so an event that lands between the two clears sends no MSI
+  of its own. The handler reads `EVENT_STATUS` again after clearing the latch, up to four
+  times. **It happens:** in one benchmark run, 2 of 39 053 interrupts were found that
+  way (debugfs `status`, "irqs found behind the display's latch"). Without the re-read
+  those two events would have waited for the next one.
 
 ## Power: the island is the P-Unit's
 
-`GFX0._PS0` writes a subsystem id and a firmware variable; it powers nothing. The
-graphics island is one LSS of the P-Unit's APM block, reached over the message bus in
-`00:00.0`'s config space (`0xD0`/`0xD4`/`0xD8`), and nothing in mainline drives it for
-Clover Trail. With the GOP having scanned out, the island is almost certainly up (the
-display is alive on the same island), and the first `CORE_ID` read confirms it.
+| Fact | Tag | Source |
+|---|---|---|
+| `GFX0._PS0` writes a subsystem id and a firmware variable, and powers nothing | V | DSDT |
+| The island is up at boot: the core answers its id registers before the driver loads | V | register read |
+| The P-Unit is reached over the message bus in `00:00.0`'s config space (`0xD0`/`0xD4`/`0xD8`) | D | mainline `iosf_mbi` |
+| The graphics island is one LSS of the P-Unit's APM block: APM base `OSPM_APMBA` (0x7a), OSPM base `OSPM_OSPMBA` (0x78), graphics island bit 0, two bits per LSS, 0 = D0i0 and 3 = D0i3 | A | `arch/x86/platform/intel-mid/intel_soc_pmu.[ch]` |
+| Nothing in mainline drives that block on Clover Trail | D | mainline tree |
 
-Until an APM hand-over exists, the branch takes the conservative route:
+Until an APM hand-over exists, the driver holds the device awake while it is bound
+(`PVRSGX_PART_ISLAND_ALWAYS_ON`):
 
 | Behaviour | Where |
 |---|---|
-| Runtime PM is held off with a permanent reference: no idle stop, no microkernel stop, no D3 | `pvrsgx_power_init()` / `pvrsgx_power_fini()` in `pvrsgx_pm.c` |
+| A permanent runtime PM reference: no idle stop, no microkernel stop, no D3 | `pvrsgx_power_init()` / `pvrsgx_power_fini()` |
 | Runtime suspend returns `-EBUSY` if it is ever reached | `pvrsgx_runtime_suspend()` |
-| System sleep is refused with a warning: resume could not power the island again | `pvrsgx_suspend()` |
+| System sleep is refused with a warning | `pvrsgx_suspend()` |
 
-That is a bring-up state, not the destination: it costs the tablet its sleep while the
-module is loaded, and it is the one thing to remove first when APM support lands. The
-APM block is `base + 0x00` (CMD) and `base + 0x04` (STS), two bits per LSS, both bases
-read from the P-Unit (`OSPM_APMBA` 0x7a, `OSPM_OSPMBA` 0x78); `APM_GRAPHICS_ISLAND` is
-bit 0. `0` is D0I0 (on), `3` is D0I3 (off).
-
-## Register reads: the whitelist
-
-Only these, one at a time, and only reads:
-
-| Offset | Register | What it says |
-|---|---|---|
-| 0x0c00 | `BIF_CTRL` | 0 when idle; a stuck bit means a previous owner left it mid-operation |
-| 0x0130 | `EVENT_HOST_ENABLE` | which events the host listens for; reset state is 0 |
-| 0x012c | `EVENT_STATUS` | `SW_EVENT` (bit 14) set means a microkernel is already running |
-| 0x0080 | `SOFT_RESET` | 0 when the cores are out of reset |
-| 0x0020 | `CORE_REVISION` | `0x0001000d`/`0e` would be Cedarview/CE5300's revision |
-| 0x001c | `CORE_ID` | `0x0115xxxx` confirms the SGX545 |
-| 0x0008 | `CLKGATESTATUS` | bit 5 (`DPM_CLKS`) up means the DPM's clocks are running |
-| 0x0000 | `CLKGATECTL` | gating mode of every unit; the reset value is stable |
-
-Never, on this part: anything below 0xff280000 (the display engine), any **write** to
-the SGX window, `0xFF119000` (`RBPS`) and `0xFF13F000` (`GSTS`, panel and backlight
-sequencing in the DSDT), `0xFF11C000`-`0xFF11DFFF` (SCU IPC mailbox: a write there can
-reset or power off the tablet), and no sweeps of any range. A sweep of a display
-register range hung a CE5300 board; an SGX that hangs can hang the bus, and only a cold
-boot clears it.
+Whether the island survives s2idle (the driver never puts the function in D3) is being
+measured. If it does, system sleep can be allowed; if not, the driver can let the
+machine sleep and report the GPU lost on resume, rather than block suspend.
 
 ## The screen
 
 There is no mainline KMS driver for Cloverview's display engine, and EGL's fbdev
-platform cannot present through `powervr_sgx` (the winsys has no `bo_wrap`, so it can't
-wrap `/dev/fb0`; `sgx_frame.c` answers `-ENOTSUP`). The route is the one the project
-already uses on its CE5300 board: `simpledrm` on the firmware's framebuffer, and kmsro
-pairing it with the SGX's render node (`mesa/patches/0004` lists `simpledrm` and takes
-render nodes whose driver is `powervr_sgx`; a platform display finds its render node
-that way). Kernel side: `CONFIG_SYSFB_SIMPLEFB`, `CONFIG_DRM_SIMPLEDRM`,
-`CONFIG_DRM_FBDEV_EMULATION`; `FB_EFI` may stay, and only has to go if `simpledrm` does
-not appear.
+platform cannot present through `powervr_sgx` (no `bo_wrap`). The route is the one the
+CE5300 board uses: `simpledrm` on the firmware's framebuffer, and kmsro pairing it with
+the SGX's render node (`CONFIG_SYSFB_SIMPLEFB`, `CONFIG_DRM_SIMPLEDRM`,
+`CONFIG_DRM_FBDEV_EMULATION`; `drm/ci/clovertrail.fragment`).
 
-The framebuffer is 1280x800, 32 bpp, stride 5120 at `0x7f000000` (4032 KiB), inside the
-firmware's reserved `0x7edff000`-`0x7fffffff`. 1280 x 4 = 5120 is a multiple of the
-winsys' 128-byte stride requirement.
+| Fact | Tag | Source |
+|---|---|---|
+| Framebuffer 1280x800, 32 bpp, stride 5120 at `0x7f000000`, inside the firmware's reserved `0x7edff000`-`0x7fffffff` | V | `simpledrm` probe, `/proc/iomem` |
+| `simpledrm` scans out XRGB8888 only: an ARGB8888 `AddFB` fails with `-EINVAL` (`glmark2-es2-drm` needs `--visual-config a=0`) | V | `glmark2-es2-drm` |
+| `simpledrm` advertises only `DRM_FORMAT_MOD_LINEAR`, so GBM's `create_with_modifiers` path (mpv's DRM context) needs the screen's modifier hooks | V | `mpv -v` |
+| Xorg's `modesetting` on `simpledrm` runs glamor on the SGX545 | V | `Xorg.0.log`, `glxinfo` |
 
-## What the branch changes
+Measured with this driver and release 0.2.1's Mesa: `glxgears` 62 FPS in X11, mpv
+720p30 for 30 s with 3 dropped frames in X11 and 3 on DRM, `glmark2-es2-drm` 69, uAPI
+suite 50/50, `powervr_sgx_frame` 100/100.
 
-| File | Change |
-|---|---|
-| `pvrsgx_drv.c` | `pvrsgx_parts[]` (CE5300, Clover Trail), PCI id `8086:08cf`, window offset applied to the mapping, BAR length check against offset + `PVRSGX_REGS_MIN` |
-| `pvrsgx_drv.h` | `PVRSGX_CLV_SGX_OFFSET` |
-| `pvrsgx_core.h` | `struct pvrsgx_part`, `PVRSGX_PART_ISLAND_ALWAYS_ON`, `PVRSGX_CORE_ID_CORE_MASK` |
-| `pvrsgx_core.c` | Clover Trail entry with a `TODO` revision placeholder, `CORE_ID` compared on its core number only, `0`/`~0` revision refused |
-| `pvrsgx_device.h` | `sdev->part` |
-| `pvrsgx_pm.c` | island-always-on policy (above) |
-| `tests/pvrsgx_core_test.c` | CONFIG bits are not identity; an empty window is not a part |
-| `Kconfig` | help text: Clover Trail, and what its power policy costs |
-| `drm/ci/clovertrail.fragment` | test-kernel config: simpledrm + powervr_sgx, no gma500 |
+## On a 32-bit kernel
 
-`CORE_REVISION` is the one value the table cannot hold yet. `PVRSGX_CLV_CORE_REV` is
-`0`, which no core reports, so a Clover Trail logs
+The tablet runs i386 without PAE: there is no `ZONE_DMA32`, and `__GFP_DMA32` means
+lowmem, about 830 MiB of the 2 GiB. With the default allocation a browser took
+`LowFree` from 483 MiB to 7 MiB and the kernel OOM-killed Xorg inside
+`pvrsgx_rtds_create()`. The `highmem` module parameter lets buffers come from HIGHMEM;
+it needs two x86 fixes that are not in mainline (the platform repo above carries them),
+so it is off by default.
 
-    SGX core id 0x0115xxxx revision 0x000100xx is not one this driver knows; not touching it.
+## Traps
 
-and stays untouched until the placeholder is replaced. That is the intended first result
-on hardware, not a failure.
+- **D3 is fatal here**: nothing powers the island again. Hence the permanent reference,
+  and no `pci_set_power_state()`.
+- **Do not sweep MMIO on this SoC.** A read of a register that waits for a handshake
+  hangs the CPU with no recovery but a cold boot; seen in the audio block's window
+  (`0xFFAE0000`). The driver touches only the registers named on this page.
+- **The SCU IPC mailbox (`0xFF11C000`)** resets or powers off the tablet on a write.
+- **The core table alone finds the CE5300.** Clover Trail reports the CE5300's
+  revision, so without the part's clock the microkernel's timer would assume 400 MHz on
+  a 533 MHz core.
 
-## What to measure, in order
+## Not in this driver
 
-Use `~/elitepad-dev/tools/sgx-ident/sgx-ident` from the initramfs (busybox has `devmem`
-too, but the tool takes one page, checks the PCI identity first and prints the
-interpretation). Boot from USB, never flash.
-
-1. **Nothing** (`sgx-ident --dry-run`): confirms the paths, `8086:08cf`, and BAR 0.
-2. `sgx-ident`: reads the eight registers once. Expected: `CORE_ID` `0x0115xxxx`,
-   `CORE_REVISION` `0x0001000d`, `0x0001000e`, or something new.
-   - `0x00000000` or `0xffffffff` on every register: the window is not at +0x80000, or
-     the island is gated. Stop; do not try other offsets blind. Check the APM status
-     (config space of `00:00.0`, ports 0x7a/0x78, then `APM_STS`) before anything else.
-   - `CORE_ID` with a different core number (not `0x0115`): wrong window, or a part that
-     isn't an SGX545.
-3. With the revision in hand, set `PVRSGX_CLV_CORE_REV` and rebuild. The next boot should
-   log `SGX core id ... : Intel Clover Trail (SGX545 1.0.xx)` and then
-   `microkernel started` — or fail in `pvrsgx_fw_start()`, which is the honest next
-   stage ([kernel.md](../kernel.md) 5).
-4. Then the CE5300 stage order: `powervr_sgx_test submit-null-job`,
-   `powervr_sgx_frame -n 1 -v`, `powervr_sgx_blit -n 10`, `powervr_sgx_hang -n 5`.
-5. `simpledrm` + kmsro: `es2gears` at 1280x800, then `glmark2-es2-drm`.
-
-## Traps, in the order they will bite
-
-- **A wrong offset is a hang, not an error.** Both engines answer on the same BAR; a read
-  of a display register can take the machine down. The tool reads exactly eight
-  addresses, each once.
-- **STRICT_DEVMEM** allows this: the window is MMIO, not RAM. `/dev/mem` needs root, and
-  the initramfs runs as root.
-- **The interrupt is shared with the display** (INTx A, GSI 16). If the display engine
-  keeps the line asserted, the SGX handler will be called for events that aren't its
-  own: it returns `IRQ_NONE` when `EVENT_STATUS` has no `SW_EVENT`, and the first boots
-  can run without claiming the line at all if there is a storm.
-- **D3 is fatal here**: the P-Unit can gate the island with the function's D-state, and
-  nothing brings it back. Hence the permanent reference, and no `pci_set_power_state()`.
-- **Never write `CLKGATECTL` or `SOFT_RESET` from userspace.** The driver's reset
-  sequence is the only writer.
-- **The microkernel may simply not start.** Same core, same firmware, but this is a
-  different stepping of the SoC, and it is the biggest risk in the plan. A failed start
-  logs `INIT_STATUS`, `EVENT_STATUS` and the BIF fault registers; that log is the
-  evidence to collect before changing anything.
-
-## Not in this branch
-
-- APM/P-Unit island control, and with it runtime PM and system sleep.
+- APM/P-Unit island control, and with it runtime PM.
 - The display: no KMS driver for Cloverview's display engine, and none attempted.
-- Any change to the microkernel, the MMU tables, the init script or the uAPI: the core is
-  the same SGX545.
-- Upstreaming. `AGENTS.md` puts Clover Trail out of scope because of the display; this
-  branch is local, and the driver-side change is small enough to propose on its own once
-  hardware confirms the window and the revision.
+- Any change to the microkernel, the MMU tables or the uAPI: the core is the same SGX545.
