@@ -742,8 +742,7 @@ sgx_resource_target(struct sgx_screen *screen, struct sgx_resource *res,
        * rendered linear instead, the same bytes for one row.  Other levels
        * with a side below 16 can't be rendered in the sampler's layout
        * either way (docs/GL3.md). */
-      bool twiddled = util_is_power_of_two_nonzero(w) &&
-                      util_is_power_of_two_nonzero(h) && h > 1;
+      bool twiddled = sgx_tex_twiddled(&res->base, w, h) && h > 1;
 
       t->va = res->bo.va + sgx_tex_offset(&res->base, level, layer);
       t->stride = twiddled ? w : align(w, 8);

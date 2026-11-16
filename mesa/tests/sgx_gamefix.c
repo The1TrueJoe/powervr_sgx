@@ -24,6 +24,9 @@
  *   npot     a 60x44 texture sampled over the target, plainly and at a
  *            computed coordinate
  *   rtnpot   the same of a 60x44 texture rendered into first
+ *   rtsmall  16x2, 2x16, 8x8, 4x4, 16x4 and 16x16 textures rendered into (each
+ *            texel its coordinates), then tiled over the target with GL_REPEAT
+ *            (glamor's window-border pieces, issue #13)
  *   subimg   a sampled 128x128 texture updated by rows and small rectangles
  *            between draws, every texel checked; the time an update takes
  *   drawbuffers2  four colour buffers, a colour mask each for a clear and a
@@ -841,6 +844,60 @@ rtnpot(void)
    }
 }
 
+/* rtsmall: small power-of-two textures rendered into (each texel its own
+ * coordinates), then sampled over the 64x64 target with GL_REPEAT, a texel a
+ * pixel: X's glamor draws window-border pieces (16x2, 2x36) into pixmaps and
+ * tiles them (issue #13) */
+static unsigned sw, sh;
+
+static void
+want_rtsmall(unsigned x, unsigned y, float c[4])
+{
+   c[0] = ((x % sw) + 0.5f) / 16.0f * 255.0f;
+   c[1] = ((y % sh) + 0.5f) / 16.0f * 255.0f;
+   c[2] = 127.5f;
+   c[3] = 255.0f;
+}
+
+static void
+rtsmall(void)
+{
+   static const unsigned sizes[][2] = {{16, 2}, {2, 16}, {8, 8}, {4, 4}, {16, 4}, {16, 16}};
+   const char *mark = "#version 110\n"
+                      "void main() {\n"
+                      "   gl_FragColor = vec4(gl_FragCoord.xy / 16.0, 0.5, 1.0);\n"
+                      "}\n";
+   const char *tile = "#version 110\n"
+                      "uniform sampler2D t;\n"
+                      "uniform vec2 size;\n"
+                      "void main() { gl_FragColor = texture2D(t, gl_FragCoord.xy / size); }\n";
+   char name[32];
+
+   for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+      GLuint t;
+
+      sw = sizes[i][0];
+      sh = sizes[i][1];
+      fbw = sw;
+      fbh = sh;
+      fbo(&t, false);
+      program(vs_uv, mark);
+      fullscreen();
+      fbw = fbh = S;
+      fbo(NULL, false);
+      glActiveTexture_(GL_TEXTURE0);
+      glBindTexture_(GL_TEXTURE_2D, t);
+      glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+      glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+      GLuint p = program(vs_uv, tile);
+      glUniform1i_(glGetUniformLocation_(p, "t"), 0);
+      glUniform2f_(glGetUniformLocation_(p, "size"), (float)sw, (float)sh);
+      fullscreen();
+      snprintf(name, sizeof(name), "rtsmall %ux%u", sw, sh);
+      result(name, check(name, want_rtsmall, 2), S * S);
+   }
+}
+
 static double
 now_ms(void)
 {
@@ -1162,6 +1219,7 @@ main(int argc, char **argv)
                 {"blitnpot", blitnpot},
                 {"npot", npot},
                 {"rtnpot", rtnpot},
+                {"rtsmall", rtsmall},
                 {"subimg", subimg},
                 {"copyx", copyx},
                 {"bigfbo", bigfbo},
