@@ -866,9 +866,12 @@ sgxws_dev_create(int fd, const struct sgxws_dev_options *opts)
    d->flush_rt = opts->flush_rt;
    d->frame_gap_us = opts->frame_gap_us;
    d->state_always = opts->state_always;
-   /* four: the next frame records while this one renders (a game's frame is
-    * three renders); docs/PERF.md */
-   d->slots = opts->slots ? CLAMP(opts->slots, 2, SGXWS_MAX_SLOTS) : 4;
+   /* six: the next frame records while this one renders when a frame is
+    * up to four renders (a game's two or three, plus a recorder's blit and
+    * pack: Minecraft with capture went from 13 to 17 fps against four).
+    * Each slot is ~20 MB of rings per context; SGX_SLOTS overrides (2-8).
+    * docs/PERF.md */
+   d->slots = opts->slots ? CLAMP(opts->slots, 2, SGXWS_MAX_SLOTS) : 6;
    d->ta_split = d->kif->kick_ta ? opts->ta_split : 0;
    d->dry_run = opts->dry_run;
 
