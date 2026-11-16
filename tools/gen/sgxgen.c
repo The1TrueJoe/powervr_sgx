@@ -1297,7 +1297,10 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	pds_d0(&p, 4, doutu_w0(c, getenv("SGXGEN_STATE_EMPTYTASK") ? c->empty_v :
 			       c->state_emit[getenv("SGXGEN_STATE_PTR") ? 1 : n], 1, 0) |
 		      (getenv("SGXGEN_STATE_BIT21") ? 0x200000 : 0) | (getenv("SGXGEN_DOUTU_B4") ? 0x10 : 0));
-	pds_d0(&p, 5, 0);
+	/* SGXGEN_STATE_W1 / SGXGEN_STATE_W2 (bring-up probes, SGX530): the state task's
+	 * DOUTU words 1 and 2 (0; the 530 microkernel's launch needs word 2 = 1 with b21) */
+	pds_d0(&p, 5, env_u32("SGXGEN_STATE_W1"));
+	pds_d1(&p, 0, env_u32("SGXGEN_STATE_W2"));
 	CODE(&p, TST1(S1_DS0(0)));
 	CODE(&p, BRA_P0(6));
 	CODE(&p, MOVS(MV, 0, 0, 0, 1, 0, 0, DOUTD));
