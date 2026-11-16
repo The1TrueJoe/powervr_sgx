@@ -1252,6 +1252,14 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 
 		memset(q.p, 0, 16);
 		q.p[0] = b.va + env_u32("SGXGEN_STATE_PTR_ADD");
+		/* SGXGEN_STATE_PTR_FILL=<v>: point it at 256 bytes of <v> instead of the block */
+		if (getenv("SGXGEN_STATE_PTR_FILL")) {
+			struct sgx_ptr f = ring_alloc(&c->pds_vtx, 256, DMA_ALIGN);
+
+			for (unsigned i = 0; i < 64; i++)
+				f.p[i] = env_u32("SGXGEN_STATE_PTR_FILL");
+			q.p[0] = f.va;
+		}
 		b = q;
 		dma_dwords = 1;
 		kind = 0;
