@@ -271,7 +271,14 @@ The draw is six words:
 - **The TA terminate's USSE task (`0x3c000000`) is the same program for two
   dwords** (`mov o0, pa0 [rcnt rpt=2]`). It forwards the two attributes the
   terminate's DOUTAs wrote: pa0 = 0x2000 (ctrl 0) and pa1 = 0x0016000e
-  (ctrl 0x100, written three times). What those two words mean, and whether
+  (ctrl 0x100, written three times). pa1 is the region the terminate closes,
+  `(tile columns - 1) << 16 | (32-pixel rows - 1)`: 0x0016000e is 720x480's
+  (23 tiles, 15 rows of 32). A terminate smaller than the target leaves the
+  tiles outside it unclosed: the scene renders, but the DPM keeps their pages
+  counted in use (0x724, 0x728) after the render, 82 of a 2048x1200 scene's
+  153, until the TA's thresholds fire. Sized to the target, the count is 0
+  after every render [hardware, open driver: a CE5300 board, 2026-11-15,
+  `docs/log/entries/2026-11-15-2015-terminate-region.md`]. pa0, and whether
   the three repeats are needed, is [guess].
 - **The vertex secondary task (`0x3c000080`) is one instruction,**
   `phas.i #0, #0 [end wait=7]` (`fa4c0700 00000000`): the DMA itself loads
