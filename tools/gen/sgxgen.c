@@ -1378,10 +1378,15 @@ static void vdm_draw(struct sgx_ctx *c, uint32_t prim, uint32_t count, uint32_t 
 		batch = 8;
 		bf = vpt >= 16 ? 3 : vpt >= 8 ? 2 : vpt >= 4 ? 1 : 0;
 	}
-	vdm(c, 0x80000000 | 0x00c00000 | (d530 ? 0x01000000 : 0) | prim << 26 | count);
+	/* SGXGEN_DRAW535 (bring-up probe): the public SGX535 driver's draw entry, without
+	 * b23 and the index-range word it flags */
+	int d535 = getenv("SGXGEN_DRAW535") != NULL;
+
+	vdm(c, 0x80000000 | (d535 ? 0x00400000 : 0x00c00000) | (d530 ? 0x01000000 : 0) | prim << 26 | count);
 	vdm(c, idx & ~1u);				/* 16-bit indices */
 	vdm(c, (batch - 1) << 28);
-	vdm(c, 0x003fffff);
+	if (!d535)
+		vdm(c, 0x003fffff);
 	vdm(c, (vpt - 1) << 28 | vdm_pds(c, va));
 	vdm(c, (out_dwords + 3) >> 2 << 24 | ((in_dwords * 4 + 0xf) >> 4) << 7 | bf << 22 | rows);
 }
@@ -1410,6 +1415,14 @@ void sgx_clear(struct sgx_ctx *c, const float rgba[4], float depth)
 	blk[5] = pds_word(c, c->clear_pds, 2);
 	blk[6] = 0x80000000 | 0 << 16 | (s->rt.xt - 1);		/* region clip: whole surface, in tiles */
 	blk[7] = 0 << 16 | (s->rt.yt - 1);
+	/* SGXGEN_PIX535 / SGXGEN_RGN535 (bring-up probes): the public SGX535 driver's forms of
+	 * the pixel group (secondary word without rows, DMS 0x30000) and the region clip (0, 0) */
+	if (getenv("SGXGEN_PIX535")) {
+		blk[3] &= 0x03ffffff;
+		blk[4] = 0x00030000;
+	}
+	if (getenv("SGXGEN_RGN535"))
+		blk[6] = blk[7] = 0;
 	/* SGXGEN_OUTSEL530: the 530 vendor stream has the output dword count at b24 */
 	blk[8] = 8 << (getenv("SGXGEN_OUTSEL530") ? 24 : 16) | 0x1800;	/* 8 output dwords [D], 0x1800 [G] */
 	/* SGXGEN_MTE530: the 530 vendor clear's MTE control */
