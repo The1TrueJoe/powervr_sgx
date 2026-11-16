@@ -1263,8 +1263,14 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 		b = q;
 		dma_dwords = 1;
 		kind = 0;
-		if (!c->state_emit[1])
-			c->state_emit[1] = usse_load(c, usse_state_emit[1], 1);
+		/* SGXGEN_STATE_PTR_W1=<v>: a second output word, <v> (is o1 a PDS program word?) */
+		if (getenv("SGXGEN_STATE_PTR_W1")) {
+			q.p[1] = env_u32("SGXGEN_STATE_PTR_W1");
+			dma_dwords = 2;
+			kind = 1;
+		}
+		if (!c->state_emit[dma_dwords])
+			c->state_emit[dma_dwords] = usse_load(c, usse_state_emit[dma_dwords], 1);
 	} else if (!c->state_emit[n])
 		c->state_emit[n] = usse_load(c, usse_state_emit[n], 1);
 	/* Bring-up probes (SGX530), once per run, ahead of the first state program:
@@ -1303,7 +1309,7 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	/* SGXGEN_DOUTU_B4: b4, set in every 530 vendor DOUTU of a task that emits to the MTE
 	 * (0x00200f1a, 0x0020111a, 0x00201a1a, 0x0000281a) and in none of the others */
 	pds_d0(&p, 4, doutu_w0(c, getenv("SGXGEN_STATE_EMPTYTASK") ? c->empty_v :
-			       c->state_emit[getenv("SGXGEN_STATE_PTR") ? 1 : n], 1, 0) |
+			       c->state_emit[getenv("SGXGEN_STATE_PTR") ? (getenv("SGXGEN_STATE_PTR_W1") ? 2 : 1) : n], 1, 0) |
 		      (getenv("SGXGEN_STATE_BIT21") ? 0x200000 : 0) | (getenv("SGXGEN_DOUTU_B4") ? 0x10 : 0));
 	/* SGXGEN_STATE_W1 / SGXGEN_STATE_W2 (bring-up probes, SGX530): the state task's
 	 * DOUTU words 1 and 2 (0; the 530 microkernel's launch needs word 2 = 1 with b21) */
