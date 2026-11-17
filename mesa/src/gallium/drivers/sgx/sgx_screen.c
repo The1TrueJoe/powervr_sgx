@@ -257,6 +257,10 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
     * GL_ARB_draw_buffers_blend (Portal and other Source games use
     * glColorMaskIndexedEXT, issue #5) */
    caps->indep_blend_enable = caps->indep_blend_func = true;
+   /* GL_FRAMEBUFFER_SRGB: st hands over a linear view of the buffer when it's
+    * off, the sRGB one (encoded: lower_srgb_output) when on; with the sRGB
+    * render targets (SGX_DEBUG=glsl130) */
+   caps->dest_surface_srgb_control = !!(sgx_drv_debug & SGX_DEBUG_GLSL130);
    /* 1.30 with SGX_DEBUG=glsl130 (native integers, EXT_texture_integer),
     * for the GL 3.0 work's tests on a board */
    caps->glsl_feature_level = caps->glsl_feature_level_compatibility =
@@ -351,10 +355,14 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
           format != PIPE_FORMAT_R8_UINT && format != PIPE_FORMAT_R8_SINT &&
           format != PIPE_FORMAT_R8G8_UINT && format != PIPE_FORMAT_R8G8_SINT &&
           format != PIPE_FORMAT_R32_UINT && format != PIPE_FORMAT_R32_SINT &&
-          /* RG32 and RGBA32: a pass a channel into their planes; under
-           * SGX_DEBUG=glsl130 until that passes on a board */
+          /* RG32 and RGBA32: a pass a channel into their planes; and sRGB
+           * (encoded by the program, blended in it with integer ops:
+           * lower_srgb_output); under SGX_DEBUG=glsl130 until they pass on
+           * a board */
           !((sgx_drv_debug & SGX_DEBUG_GLSL130) &&
-            (format == PIPE_FORMAT_R32G32B32A32_UINT ||
+            (format == PIPE_FORMAT_R8G8B8A8_SRGB ||
+             format == PIPE_FORMAT_B8G8R8A8_SRGB ||
+             format == PIPE_FORMAT_R32G32B32A32_UINT ||
              format == PIPE_FORMAT_R32G32B32A32_SINT ||
              format == PIPE_FORMAT_R32G32_UINT ||
              format == PIPE_FORMAT_R32G32_SINT)))
