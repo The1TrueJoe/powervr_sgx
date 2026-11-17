@@ -548,10 +548,8 @@ moves to `docs/log/`. The replacements:
 Long bring-up narratives move to a dated `docs/log/entries/` file, with a
 pointer left in their place.
 
-Box-specific references are checked by the `name-guard` CI workflow
-(`.github/workflows/name-guard.yml`); its match pattern lives in the
-`NAME_GUARD_PATTERN` repository variable, so the names are not written into the
-tree. The check must stay at zero.
+Box-specific references were checked by a `name-guard` CI workflow, removed on
+2026-11-17; keep describing the hardware generically by hand.
 The last column is the count of lines naming a branch, commit or log entry.
 
 | doc | box refs | branch/log refs | status | owner |
