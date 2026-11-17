@@ -656,7 +656,7 @@ int pvrsgx_fw_start(struct pvrsgx_device *sdev)
 		queue_work(sdev->free_wq, &sdev->reap_work);
 	}
 	memset(hc, 0, layout[PVRSGX_FW_HOSTCTL].size);
-	hc[HOSTCTL_UK_TIMER_CLOCK] = sdev->core->clock_hz / UKERNEL_TIMER_HZ;
+	hc[HOSTCTL_UK_TIMER_CLOCK] = pvrsgx_clock_hz(sdev) / UKERNEL_TIMER_HZ;
 	hc[HOSTCTL_FLAGS] = HOSTCTL_HOST_BGBLOCK;
 	/* The power status starts clear at every start. */
 	hc[HOSTCTL_POWER_STATUS] = 0;

@@ -187,21 +187,71 @@ void pvrsgx_reset(struct pvrsgx_device *sdev, bool recovery)
 	reset_sleep(sdev);
 }
 
+/*
+ * Behind the display engine (Clover Trail) the SGX's request is latched in the
+ * display's IDENTITY register, and the MSI is sent on that latch's edge: a bit
+ * left set blocks every later MSI.
+ */
+static void vdc_ack(struct pvrsgx_device *sdev)
+{
+	if (sdev->vdc)
+		writel(PVRSGX_VDC_IRQ_SGX, sdev->vdc + PVRSGX_VDC_INT_IDENTITY);
+}
+
+/* Lets the SGX's bit through the display's mask and enable, or stops it. */
+static void vdc_irq_enable(struct pvrsgx_device *sdev, bool on)
+{
+	void __iomem *vdc = sdev->vdc;
+	u32 mask = readl(vdc + PVRSGX_VDC_INT_MASK);
+	u32 enable = readl(vdc + PVRSGX_VDC_INT_ENABLE);
+
+	if (on) {
+		vdc_ack(sdev);
+		writel(mask & ~PVRSGX_VDC_IRQ_SGX, vdc + PVRSGX_VDC_INT_MASK);
+		writel(enable | PVRSGX_VDC_IRQ_SGX, vdc + PVRSGX_VDC_INT_ENABLE);
+	} else {
+		writel(enable & ~PVRSGX_VDC_IRQ_SGX, vdc + PVRSGX_VDC_INT_ENABLE);
+		writel(mask | PVRSGX_VDC_IRQ_SGX, vdc + PVRSGX_VDC_INT_MASK);
+		vdc_ack(sdev);
+	}
+}
+
 /* The microkernel raises SW_EVENT when it wants the host. */
 static irqreturn_t pvrsgx_irq(int irq, void *arg)
 {
 	struct pvrsgx_device *sdev = arg;
+	unsigned int events = 0;
 	u32 status;
 
-	if (!READ_ONCE(sdev->powered))
+	if (!READ_ONCE(sdev->powered)) {
+		vdc_ack(sdev);
 		return IRQ_NONE;
-	status = sgx_rd(sdev, SGX_CR_EVENT_STATUS) & sgx_rd(sdev, SGX_CR_EVENT_HOST_ENABLE);
-	if (!(status & SGX_CR_EVENT_STATUS_SW_EVENT))
+	}
+	for (;;) {
+		status = sgx_rd(sdev, SGX_CR_EVENT_STATUS) &
+			 sgx_rd(sdev, SGX_CR_EVENT_HOST_ENABLE);
+		if (!(status & SGX_CR_EVENT_STATUS_SW_EVENT)) {
+			vdc_ack(sdev);
+			break;
+		}
+		trace_pvrsgx_irq(status);
+		sgx_wr(sdev, SGX_CR_EVENT_HOST_CLEAR,
+		       SGX_CR_EVENT_HOST_CLEAR_SW_EVENT | SGX_CR_EVENT_HOST_CLEAR_MASTER_INTERRUPT);
+		/* The display latches the SGX's line: clear it after the source. */
+		vdc_ack(sdev);
+		atomic_inc(&sdev->irq_count);
+		if (events)
+			atomic_inc(&sdev->irq_late);
+		/*
+		 * An event between the two clears found the latch still set and
+		 * sent no MSI of its own: look again behind the display, a few
+		 * times at most.
+		 */
+		if (!sdev->vdc || ++events == 4)
+			break;
+	}
+	if (!events)
 		return IRQ_NONE;
-	trace_pvrsgx_irq(status);
-	sgx_wr(sdev, SGX_CR_EVENT_HOST_CLEAR,
-	       SGX_CR_EVENT_HOST_CLEAR_SW_EVENT | SGX_CR_EVENT_HOST_CLEAR_MASTER_INTERRUPT);
-	atomic_inc(&sdev->irq_count);
 	if (!READ_ONCE(sdev->fw_running))
 		return IRQ_HANDLED;
 	/*
@@ -286,8 +336,13 @@ static int identify(struct pvrsgx_device *sdev)
 			sdev->family->name, sdev->core_id, sdev->core_rev);
 		return -ENODEV;
 	}
-	drm_info(&sdev->base, "SGX core id 0x%08x revision 0x%08x: %s\n",
-		 sdev->core_id, sdev->core_rev, sdev->core->name);
+	if (sdev->part)
+		drm_info(&sdev->base, "SGX core id 0x%08x revision 0x%08x: %s (%s, %u MHz)\n",
+			 sdev->core_id, sdev->core_rev, sdev->part->name, sdev->core->name,
+			 pvrsgx_clock_hz(sdev) / 1000000);
+	else
+		drm_info(&sdev->base, "SGX core id 0x%08x revision 0x%08x: %s\n",
+			 sdev->core_id, sdev->core_rev, sdev->core->name);
 	return 0;
 }
 
@@ -356,14 +411,20 @@ void pvrsgx_irq_sync(struct pvrsgx_device *sdev)
 
 static int irq_setup(struct pvrsgx_device *sdev)
 {
+	int err;
+
 #if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_GMA500)
 	if (sdev->gma_sgx) {
 		INIT_WORK(&sdev->irq_work, pvrsgx_gma_irq_work);
 		return sdev->gma_sgx->set_irq_handler(sdev->gma_sgx, pvrsgx_gma_irq, sdev);
 	}
 #endif
-	return request_threaded_irq(sdev->irq, pvrsgx_irq, pvrsgx_irq_thread, IRQF_SHARED,
-				    "powervr_sgx", sdev);
+	err = request_threaded_irq(sdev->irq, pvrsgx_irq, pvrsgx_irq_thread, IRQF_SHARED,
+				   "powervr_sgx", sdev);
+	/* Only with the handler in place. */
+	if (!err && sdev->vdc)
+		vdc_irq_enable(sdev, true);
+	return err;
 }
 
 static void irq_teardown(struct pvrsgx_device *sdev)
@@ -375,6 +436,8 @@ static void irq_teardown(struct pvrsgx_device *sdev)
 		return;
 	}
 #endif
+	if (sdev->vdc)
+		vdc_irq_enable(sdev, false);
 	free_irq(sdev->irq, sdev);
 }
 

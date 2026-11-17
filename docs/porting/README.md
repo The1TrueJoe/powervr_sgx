@@ -19,6 +19,11 @@ microkernel source. A new core is added as data in each of them, not by copying 
 | SGX540 | USSE | TI OMAP4 | Wanted |
 | SGX543, SGX544, SGX554 | USSE2 | TI OMAP5 and AM57xx, Allwinner A31 and A83T, some MediaTek SoCs | Wanted; needs USSE2 support in the compiler and assembler |
 
+A new board of a core already supported is only platform glue, and gets a note instead of
+a row: [cores/clovertrail.md](cores/clovertrail.md) is the SGX545 of Intel Clover Trail
+(Atom Z2760), where it sits behind the display engine's BAR on a PCI function nothing else
+drives.
+
 The cores marked USSE share an instruction set with the SGX545, so most of the work is
 the per-core facts and the platform glue. Each core's facts, sourced and tagged, go in a fact sheet under
 [cores/](cores/) before they go into the driver tables. USSE2 is a different instruction set and a

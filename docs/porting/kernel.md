@@ -49,8 +49,11 @@ the bus telling it which core to expect. Even `CORE_ID` moves between cores (0x1
 
 Three patterns:
 
-- **The SGX is a PCI function of its own** (CE5300, `8086:089b`): an entry in
-  `pvrsgx_pci_ids` with the core number as `driver_data`.
+- **The SGX is a PCI function of its own** (CE5300, `8086:089b`; Clover Trail,
+  `8086:08cf`, where the SGX window sits behind the display engine's half of BAR 0 and no
+  driver owns the function): an entry in `pvrsgx_pci_ids` whose `driver_data` indexes
+  `pvrsgx_parts[]` — the core number, the window's offset inside BAR 0, the clock, and
+  its power and interrupt flags ([cores/clovertrail.md](cores/clovertrail.md)).
 - **The SGX shares a PCI function with a display engine** (Cedarview, behind `gma500`):
   the display driver publishes an auxiliary device, `gma500_gfx.sgx`
   (`include/drm/gma500_sgx.h`), with the mapped register window, the core number and an

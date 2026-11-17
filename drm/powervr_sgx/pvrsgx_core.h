@@ -63,6 +63,46 @@ struct pvrsgx_heap_layout {
 	u32 pb_max_pages;
 };
 
+/* Part flags (&struct pvrsgx_part). */
+/*
+ * Nothing on this part can power the graphics island back once it is gated:
+ * ACPI's GFX0 _PS0 only writes GDDS, the island belongs to the P-Unit's APM
+ * block and the driver has no APM hand-over yet. It then keeps the device
+ * awake for as long as it is bound.
+ */
+#define PVRSGX_PART_ISLAND_ALWAYS_ON	BIT(0)
+/*
+ * The SGX has no interrupt line of its own: it is bit 18 of the display
+ * engine's interrupt registers in the same BAR 0, and that block signals the
+ * CPU by MSI (Interrupt Pin reads 0). gma500 does this on Cedarview; on Clover
+ * Trail no display driver exists, so powervr_sgx owns that one bit.
+ */
+#define PVRSGX_PART_VDC_IRQ		BIT(1)
+
+/**
+ * struct pvrsgx_part - What a board adds to the core it has
+ *
+ * Several parts carry the same SGX545 and differ in where its window sits and
+ * in who manages its power. The bus glue picks the entry, and the core number
+ * from it: the PCI id table's driver_data is the index.
+ */
+struct pvrsgx_part {
+	/** @name: The part, as "Intel Clover Trail", for the log. */
+	const char *name;
+	/** @core: Its core's number, as the family table names it (545). */
+	unsigned int core;
+	/** @regs_off: Offset of the SGX's window inside BAR 0. */
+	u32 regs_off;
+	/**
+	 * @clock_hz: The SGX's clock on this part, for the microkernel's timer;
+	 * 0 takes the core entry's. Parts with the same core revision differ
+	 * here, so it can't live in the core table.
+	 */
+	u32 clock_hz;
+	/** @flags: PVRSGX_PART_*. */
+	u32 flags;
+};
+
 /*
  * struct pvrsgx_core_regs - Registers that move or change between SGX5xx cores
  *

@@ -189,8 +189,12 @@ static const struct pvrsgx_core_family families[] = {
 
 static const struct pvrsgx_core_info cores[] = {
 	{
+		/*
+		 * The CE5300's and Clover Trail's: the part (struct pvrsgx_part)
+		 * names the board and its clock.
+		 */
 		.family = &families[0],
-		.name = "Intel CE5300 (SGX545 1.0.14)",
+		.name = "SGX545 1.0.14",
 		.core_rev = 0x0001000e,
 		.clock_hz = 400000000,
 		.fw_name = "powervr_sgx/sgx545_ukernel.bin",
@@ -296,6 +300,9 @@ const struct pvrsgx_core_info *pvrsgx_core_lookup(const struct pvrsgx_core_famil
 						  u32 core_id, u32 core_rev)
 {
 	if (core_id != family->core_id)
+		return NULL;
+	/* What a window reads with no core behind it: unpowered, or not there. */
+	if (!core_rev || core_rev == ~0u)
 		return NULL;
 	for (unsigned int i = 0; i < ARRAY_SIZE(cores); i++)
 		if (cores[i].family == family && cores[i].core_rev == core_rev)
