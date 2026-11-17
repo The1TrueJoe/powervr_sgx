@@ -88,6 +88,11 @@ struct sgx_pipe_shader {
    unsigned mem_dwords, n_mem_bases;
    uint8_t mem_base_slot[8];
    unsigned n_attribs; /* vertex: attribute slots, 4 dwords each */
+   /* vertex: gl_VertexID's attribute slot + 1 (0: not read), an input the
+    * draw gathers itself (sgx_program.c lower_vertex_id), as a raw integer
+    * under native integers, otherwise a float */
+   unsigned vertex_id_slot;
+   bool vertex_id_int;
    /* fragment: the shader's code, kept for the blend variants (the colour
     * epilogue is the blend, sgxws_blend) */
    uint64_t *code; /* with the dependent samples' smp put in */
