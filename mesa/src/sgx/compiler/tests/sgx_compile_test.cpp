@@ -1044,6 +1044,45 @@ TEST_F(sgx_compile_test, fragment_dependent_sample)
       EXPECT_FALSE(out.iters[i].sample) << "a PDS sample";
 }
 
+/* vertex texture fetch (ISA.md "Vertex texture fetch"): a vertex program's
+ * texture2D is a dependent smp at LOD c48 (0.0), no derivatives there, with
+ * its own texture state block (the driver puts it in the vertex SA) */
+TEST_F(sgx_compile_test, vertex_texture_fetch_lod0)
+{
+   native = true;
+   start(MESA_SHADER_VERTEX);
+   nir_variable *uv =
+      var(nir_var_shader_in, glsl_vec_type(2), "uv", VERT_ATTRIB_GENERIC0);
+   nir_variable *smp =
+      var(nir_var_uniform,
+          glsl_sampler_type(GLSL_SAMPLER_DIM_2D, false, false, GLSL_TYPE_FLOAT),
+          "t", -1);
+   nir_variable *pos = var(nir_var_shader_out, glsl_vec4_type(), "gl_Position",
+                           VARYING_SLOT_POS);
+   nir_deref_instr *sd = nir_build_deref_var(&b, smp);
+   struct nir_tex_builder tb = {};
+   tb.coord = nir_load_var(&b, uv);
+   tb.texture_deref = sd;
+   tb.sampler_deref = sd;
+   tb.dim = GLSL_SAMPLER_DIM_2D;
+   tb.dest_type = nir_type_float32;
+   nir_store_var(&b, pos, nir_build_tex_struct(&b, nir_texop_tex, tb), 0xf);
+
+   ASSERT_TRUE(compile()) << out.log;
+   expect_decodes();
+   ASSERT_EQ(out.n_samples, 1u);
+   EXPECT_TRUE(out.samples[0].dependent);
+   EXPECT_EQ(out.n_dep_states, 1u);
+   EXPECT_EQ(out.samples[0].state, 0u);
+   char text[256];
+   ASSERT_TRUE(sgx_disasm_one(out.samples[0].smp, NULL, text, sizeof(text)));
+   std::string t(text);
+   EXPECT_EQ(t.find("smp"), 0u) << t;
+   /* the LOD form (h8-9 = 2) with c48 as its LOD */
+   EXPECT_EQ((out.samples[0].smp >> 40) & 3, 2u) << t;
+   EXPECT_NE(t.find("c48"), std::string::npos) << t;
+}
+
 /* a post-processing pass's taps: 40 dependent samples (past the 16 a
  * program once had; a game's blur and effect passes take that many, issue
  * #5) of two textures, which share two texture state blocks, one a texture,
