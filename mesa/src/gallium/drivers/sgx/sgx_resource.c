@@ -762,6 +762,7 @@ sgx_resource_target(struct sgx_screen *screen, struct sgx_resource *res,
    case PIPE_FORMAT_R32G32_SINT:
    case PIPE_FORMAT_R32G32B32A32_UINT:
    case PIPE_FORMAT_R32G32B32A32_SINT:
+   case PIPE_FORMAT_R11G11B10_FLOAT: /* F32 planes (sgx_tex_f32_conv) */
       t->pbe_format = 0;
       t->t1_format = SGX_TEXSTATE_FORMAT_F32;
       t->raw = true;

@@ -147,6 +147,8 @@ struct sgx_pipe_shader {
    uint32_t not_bgra; /* units bound to a texture not sampled B, G, R, A
                          ordered (sgx_tex_bgra) */
    uint32_t depth;    /* units bound to a depth texture (sgx_tex_depth) */
+   uint32_t snorm;    /* units bound to an snorm texture, stored offset
+                         binary (sgx_tex_snorm, lower_snorm_texel) */
    /* colour buffer 0 is an integer format (pack_int_outputs): 0 not, 1 one of
     * 8 bits a channel, 2 R32, 3 + c channel c's plane of RG32 / RGBA32 */
    uint8_t rt_int;
