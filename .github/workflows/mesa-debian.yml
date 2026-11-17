@@ -28,6 +28,17 @@ on:
       - docs/uapi/**
       - tools/gen/**
       - .github/workflows/mesa-debian.yml
+  # pull requests run it themselves (no test branches)
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - mesa/**
+      - drm/powervr_sgx/include/uapi/**
+      - drm/tools/mkukfw.py
+      - ukernel/**
+      - docs/uapi/**
+      - tools/gen/**
+      - .github/workflows/mesa-debian.yml
 
 permissions:
   contents: read
