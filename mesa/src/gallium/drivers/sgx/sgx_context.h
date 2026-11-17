@@ -69,10 +69,19 @@ struct sgx_const {
 /* unit u's level count (textureQueryLevels, and the compiler's own level
  * choice for word-by-word fetches) at SGX_K_LEVELS + u, a raw integer */
 #define SGX_K_LEVELS       2120
+/* unit u's texture state for a 2D array's layers (sgx_program.c
+ * lower_tex_array), raw words from SGX_K_TEXSTATE + 10u: T0-T3 for the
+ * bound sampler, T0-T3 for a texelFetch, the bytes from one layer to the
+ * next, the view's layer count */
+#define SGX_K_TEXSTATE     2136
+#define SGX_K_TEXSTATE_N   10
 
 static_assert(SGX_MAX_VS_CONST_DWORDS <= SGX_K_TEXSIZE,
               "the driver's constants are past every uniform");
-static_assert(SGX_K_LEVELS + SGX_K_SIZE_UNITS <= SGX_MAX_CONST_K,
+static_assert(SGX_K_LEVELS + SGX_K_SIZE_UNITS <= SGX_K_TEXSTATE,
+              "a unit's level count before the array state");
+static_assert(SGX_K_TEXSTATE + SGX_K_TEXSTATE_N * SGX_K_SIZE_UNITS <=
+                 SGX_MAX_CONST_K,
               "and under the compiler's limit");
 
 /* a fragment program's dependent samples, and their texture state blocks

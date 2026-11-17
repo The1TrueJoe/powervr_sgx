@@ -3766,7 +3766,9 @@ sample_only_load(struct sgx_ctx *c, nir_intrinsic_instr *ld, unsigned comps)
          return false;
       nir_tex_instr *t = nir_instr_as_tex(ui);
       int ci = nir_tex_instr_src_index(t, nir_tex_src_coord);
+      /* (a sample with its state in temporaries is dependent: emit_tex) */
       if (t->op != nir_texop_tex || (t->backend_flags & SGX_TEX_PLANAR) ||
+          nir_tex_instr_src_index(t, nir_tex_src_texture_handle) >= 0 ||
           ci < 0 || u != &t->src[ci].src ||
           nir_tex_instr_src_index(t, nir_tex_src_bias) >= 0 ||
           nir_tex_instr_src_index(t, nir_tex_src_projector) >= 0 ||
@@ -4045,6 +4047,7 @@ find_projected(struct sgx_ctx *c, nir_function_impl *impl)
          int pi = nir_tex_instr_src_index(tex, nir_tex_src_projector);
          if (ci < 0 || pi < 0 || tex->coord_components != 2 ||
              tex->op != nir_texop_tex ||
+             nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) >= 0 ||
              nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0)
             continue;
          const uint8_t *cs, *ps;
@@ -4624,6 +4627,14 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
    s->fetch = tex->backend_flags & SGX_TEX_FETCH;
    bool planar = tex->backend_flags & SGX_TEX_PLANAR;
    s->plane = tex->backend_flags >> SGX_TEX_PLANE_SHIFT & 3;
+   /* the texture state as a value of the program's (a 2D array layer's
+    * address): a dependent sample whose state is in temporaries */
+   int hi = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
+   if (hi >= 0 && (tex->src[hi].src.ssa->num_components != 4 ||
+                   tex->src[hi].src.ssa->bit_size != 32)) {
+      sgx_fail(c, "texture state source not 4 words");
+      return;
+   }
    /* non-dependent: the coordinate is (the start of) a varying the PDS
     * iterates, no bias; the PDS then samples and leaves the texel in pa */
    nir_legacy_src ls = nir_legacy_chase_src(&tex->src[ci].src);
@@ -4635,7 +4646,7 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
                 : NULL;
    if (he && !ss)
       ss = _mesa_hash_table_search(c->sample_set, he->data);
-   if (planar)
+   if (planar || hi >= 0)
       ss = he = NULL;
    if (ss) {
       /* a set only samples read: no plain iteration (drop_sample_only_iters) */
@@ -4659,7 +4670,7 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
          sgx_fail(c, "projected read of a varying that isn't iterated");
          return;
       }
-   } else if (!vertex && bi < 0 && pi < 0 && !planar && !grad) {
+   } else if (!vertex && bi < 0 && pi < 0 && !planar && !grad && hi < 0) {
       /* (a whole varying, or its first components; directly or through a
        * mov that takes its first components in order) */
       int pa = -1;
@@ -4694,7 +4705,7 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
    _mesa_hash_table_insert(c->tex_sample, tex, s);
    struct sgx_ins *i = ins_alloc(c, SGX_INS_SAMPLE, 0);
    i->smp = s;
-   struct sgx_ref raw;
+   struct sgx_ref raw, st = {0};
    if (!s->dependent) {
       /* a texel read at mediump returns F16 (f16_samples); one that is the
        * colour as it is keeps RGBA8 for the byte path */
@@ -4796,7 +4807,7 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
        * saves their two unpacks for one more register */
       unsigned rd = nir_def_components_read(&tex->def);
       s->f16_return = c->opts->f16_samples && c->opts->dep_f16_samples &&
-                      tex->def.bit_size == 16 &&
+                      tex->def.bit_size == 16 && hi < 0 &&
                       !raw_unit(c, tex->texture_index) &&
                       tex != c->colour_tex && (rd & 3) && (rd & 12) &&
                       !sgx_debug(c, SGX_DBG_NO_DEP_F16) &&
@@ -4806,6 +4817,19 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
       } else {
          unsigned rv = new_vreg(c, 1);
          raw = vref(rv, 0);
+      }
+      /* the state's 4 words, in consecutive temporaries */
+      if (hi >= 0) {
+         nir_legacy_src lh = nir_legacy_chase_src(&tex->src[hi].src);
+         unsigned t = new_vreg(c, 4);
+         struct sgx_ref td[4], ts[1][4];
+         for (unsigned k = 0; k < 4; k++) {
+            td[k] = vref(t, k);
+            ts[0][k] = src_comp(c, &lh, k);
+         }
+         emit_runs(c, SGX_OP_MOV, 0xf, td, 1, ts, &NOF, 0);
+         st = vref(t, 0);
+         s->state_reg = true;
       }
       i->ndst = 1;
       i->nops = 2;
@@ -4861,6 +4885,16 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
       struct sgx_ref m = materialize(c, i, i->op[2], 1);
       i->op[2] = m;
       i->op[2].step = 0;
+   }
+   /* (op[3]: the state's first temporary, all four read; op[2] the unused
+    * LOD's placeholder without one) */
+   if (s->state_reg) {
+      if (i->nops == 2) {
+         i->op[2] = cref(48);
+         i->op[2].step = 0;
+      }
+      i->op[3] = st;
+      i->nops = 4;
    }
 
    emit_texel(c, tex, s, raw);
@@ -6629,8 +6663,10 @@ place_in_pa(struct sgx_ctx *c, const BITSET_WORD *six, unsigned nins,
          unsigned n = r->step && i->rpt > 1 ? i->rpt : 1;
          if (i->kind == SGX_INS_SAMPLE && k < i->ndst && i->smp->f16_return)
             n = 2;
-         /* (a gradient sample reads four from its src2) */
-         if (i->kind == SGX_INS_SAMPLE && k == 2 && i->smp->lod == 3)
+         /* (a gradient sample reads four from its src2; a sample's state in
+          * temporaries, all four words) */
+         if (i->kind == SGX_INS_SAMPLE &&
+             ((k == 2 && i->smp->lod == 3) || (k == 3 && i->smp->state_reg)))
             n = 4;
          unsigned first = half ? r->comp / 2 : r->comp;
          bool early = (i->rpt > 1 && !is_fdp(i->form)) ||

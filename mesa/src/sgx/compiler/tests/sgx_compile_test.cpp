@@ -2392,6 +2392,48 @@ TEST_F(sgx_compile_test, vertex_texture_fetch)
    EXPECT_NE(std::string(text).find("c48"), std::string::npos) << text;
 }
 
+/* a sample whose texture state is the program's (a texture_handle source:
+ * the driver's 2D array layers): dependent though its coordinate is a whole
+ * varying, the varying iterated, and the state's four words in consecutive
+ * temporaries (sgx_sample_info.state_in_r / state_r) */
+TEST_F(sgx_compile_test, fragment_sample_state_in_temporaries)
+{
+   native = true;
+   start(MESA_SHADER_FRAGMENT);
+   nir_variable *uv =
+      var(nir_var_shader_in, glsl_vec_type(2), "uv", VARYING_SLOT_VAR0);
+   nir_variable *smp = var(
+      nir_var_uniform,
+      glsl_sampler_type(GLSL_SAMPLER_DIM_2D, false, false, GLSL_TYPE_FLOAT),
+      "t", -1);
+   nir_variable *st = var(nir_var_uniform, glsl_ivec4_type(), "st", -1);
+   nir_variable *col = var(nir_var_shader_out, glsl_vec4_type(), "color",
+                           FRAG_RESULT_COLOR);
+   nir_def *w = nir_load_var(&b, st);
+   nir_def *state = nir_vec4(&b, nir_channel(&b, w, 0), nir_channel(&b, w, 1),
+                             nir_iadd_imm(&b, nir_channel(&b, w, 2), 4096),
+                             nir_channel(&b, w, 3));
+   nir_deref_instr *sd = nir_build_deref_var(&b, smp);
+   struct nir_tex_builder tb = {};
+   tb.coord = nir_load_var(&b, uv);
+   tb.texture_deref = sd;
+   tb.sampler_deref = sd;
+   tb.dim = GLSL_SAMPLER_DIM_2D;
+   tb.dest_type = nir_type_float32;
+   nir_def *t = nir_build_tex_struct(&b, nir_texop_tex, tb);
+   /* (the builder takes one texture source: the handle added after, as
+    * lower_tex_array adds it) */
+   nir_tex_instr_add_src(nir_instr_as_tex(nir_def_instr(t)),
+                         nir_tex_src_texture_handle, state);
+   nir_store_var(&b, col, t, 0xf);
+   ASSERT_TRUE(compile()) << out.log;
+   expect_decodes();
+   ASSERT_EQ(out.n_samples, 1u);
+   EXPECT_TRUE(out.samples[0].dependent);
+   EXPECT_TRUE(out.samples[0].state_in_r);
+   EXPECT_FALSE(out.samples[0].f16);
+}
+
 /* a render target word the driver packs (rt_packed): moved to the colour
  * register as it is, and the tile's word read from o0 */
 TEST_F(sgx_compile_test, fragment_packed_render_target)

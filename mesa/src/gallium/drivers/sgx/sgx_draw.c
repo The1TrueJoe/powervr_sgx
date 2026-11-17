@@ -1025,6 +1025,18 @@ record_ubo(struct sgx_context *ctx, mesa_shader_stage stage, unsigned n,
    u->bytes = MIN2(u->bytes, (unsigned)SGX_UBO_BYTES);
 }
 
+/* a texelFetch reads the texel at an explicit level, whatever the bound
+ * sampler filters or wraps (the compiler's sgx_lower_tex puts the coordinate
+ * at the texel's centre) */
+static const struct pipe_sampler_state fetch_sampler = {
+   .wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+   .wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+   .wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+   .min_img_filter = PIPE_TEX_FILTER_NEAREST,
+   .mag_img_filter = PIPE_TEX_FILTER_NEAREST,
+   .min_mip_filter = PIPE_TEX_MIPFILTER_NEAREST,
+   .max_lod = 1000.0f,
+};
 /* A program's dependent samples' texture state: each block's 4 DOUTT words in
  * SA, block[so->dep_sa[j] - first] (first: the SA register block[0] goes
  * to); the units read into *sampled from bit `bit` (sampled_view). False
@@ -1047,19 +1059,9 @@ dep_states(struct sgx_context *ctx, const struct sgx_pipe_shader *so,
                  so->prog.vertex ? "vertex " : "", unit);
          return false;
       }
-      /* a texelFetch reads the texel at an explicit level, whatever the
-       * bound sampler filters or wraps (the compiler's sgx_lower_tex
-       * puts the coordinate at the texel's centre) */
-      const struct pipe_sampler_state fetch = {
-         .wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-         .wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-         .wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-         .min_img_filter = PIPE_TEX_FILTER_NEAREST,
-         .mag_img_filter = PIPE_TEX_FILTER_NEAREST,
-         .min_mip_filter = PIPE_TEX_MIPFILTER_NEAREST,
-         .max_lod = 1000.0f,
-      };
-      sgx_tex_words(view, so->dep_fetch[j] ? &fetch : samplers[unit], w);
+      /* (a texelFetch: fetch_sampler) */
+      sgx_tex_words(view, so->dep_fetch[j] ? &fetch_sampler : samplers[unit],
+                    w);
       /* a read of plane c of an RG32 / RGBA32 texture: c planes on
        * (T2 is the address, unshifted) */
       if (so->dep_plane[j])
@@ -1153,6 +1155,32 @@ fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
          raw = true;
       }
 
+      if (stage == MESA_SHADER_FRAGMENT && k->k >= SGX_K_TEXSTATE &&
+          k->k < SGX_K_TEXSTATE + SGX_K_TEXSTATE_N * SGX_K_SIZE_UNITS) {
+         /* a 2D array's state (sgx_program.c lower_tex_array): the
+          * sampler's words and a texelFetch's for its first layer, the
+          * layer stride and the layer count */
+         unsigned u = (k->k - SGX_K_TEXSTATE) / SGX_K_TEXSTATE_N,
+                  w = (k->k - SGX_K_TEXSTATE) % SGX_K_TEXSTATE_N;
+         const struct pipe_sampler_view *view = ctx->views[u];
+         const struct pipe_resource *t = view ? view->texture : NULL;
+         uint32_t tw[4];
+
+         word = 0;
+         if (t && w < 8) {
+            size_t stride = sgx_tex_offset(t, 0, 1) - sgx_tex_offset(t, 0, 0);
+
+            sgx_tex_words(view, w < 4 ? ctx->samplers[u] : &fetch_sampler,
+                          tw);
+            tw[2] += (uint32_t)(view->u.tex.first_layer * stride);
+            word = tw[w & 3];
+         } else if (t && w == 8) {
+            word = (uint32_t)(sgx_tex_offset(t, 0, 1) - sgx_tex_offset(t, 0, 0));
+         } else if (t && w == 9) {
+            word = view->u.tex.last_layer - view->u.tex.first_layer + 1;
+         }
+         raw = true;
+      }
       if (k->k >= SGX_K_LEVELS && k->k < SGX_K_LEVELS + SGX_K_SIZE_UNITS) {
          /* a view's level count (sgx_program.c lower_txs): a texture of F32
           * words is sampled at its base level alone (sgx_tex_words) */

@@ -132,6 +132,12 @@ struct sgx_compile_options {
    uint8_t rt_packed;
 };
 
+/* nir_tex_instr.backend_flags: a texelFetch lowered to txl (the driver's
+ * lower_tex_array reads it too) */
+#define SGX_TEX_FETCH 1
+#define SGX_TEX_PLANAR 2 /* a plane of a tex_r32x4 / x2 unit: always dependent */
+#define SGX_TEX_PLANE_SHIFT 2
+
 /* a vertex attribute's raw format in PA, unpacked by the shader. Components
  * a format doesn't hold read as 0, 0, 1 (y, z, w) */
 enum sgx_vtx_fmt {
@@ -256,6 +262,9 @@ struct sgx_sample_info {
     * share one; the driver puts block k's four words in SA after the
     * constants, at 4k on */
    uint8_t state;
+   /* dependent: the state is the program's, its 4 words in r<state_r> on
+    * (a texture_handle source), not the block above */
+   uint8_t state_in_r, state_r;
    uint64_t smp; /* dependent: the smp, destination r0, texture state #0 */
 };
 

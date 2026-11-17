@@ -113,11 +113,6 @@ struct sgx_iter {
    unsigned sampler;
 };
 
-/* nir_tex_instr.backend_flags: a texelFetch lowered to txl */
-#define SGX_TEX_FETCH 1
-#define SGX_TEX_PLANAR 2 /* a plane of a tex_r32x4 / x2 unit: always dependent */
-#define SGX_TEX_PLANE_SHIFT 2
-
 struct sgx_sample {
    unsigned id;
    unsigned sampler;
@@ -136,7 +131,11 @@ struct sgx_sample {
    bool f16_return; /* returns F16 pairs: pa, pa + 1; dependent: its two
                        destination registers */
    unsigned state; /* dependent: its texture state block (place_constants) */
-   /* dependent: the SAMPLE pseudo-instruction (dst raw, coord, lod) */
+   /* dependent: its 4 texture state words are the program's, in the
+    * temporaries the SAMPLE's op[3] names (a texture_handle source: a 2D
+    * array layer's address, the driver's lower_tex_array) */
+   bool state_reg;
+   /* dependent: the SAMPLE pseudo-instruction (dst raw, coord, lod[, state]) */
    struct sgx_ins *ins;
 };
 
