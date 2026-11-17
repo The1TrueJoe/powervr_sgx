@@ -7,6 +7,9 @@ This guide installs the open graphics driver for the PowerVR SGX545 GPU on Debia
   3600" or "GMA 3650" graphics. Many 2012-era netbooks and small desktop boards.
 - **Intel Atom CE5300 / CE5310** boards.
 
+Intel Clover Trail tablets (Atom Z2760) work too, but they need a 32-bit kernel and setup this
+guide doesn't cover: see `docs/porting/cores/clovertrail.md`.
+
 Everything here is open source. No Intel or Imagination software is installed.
 
 > **Status: early.** 3D works in our tests, but long desktop sessions haven't been fully
@@ -161,7 +164,7 @@ powervr_sgx ...: powervr_sgx/sgx545_ukernel.bin: open microkernel ..., features 
 powervr_sgx ...: microkernel started
 ```
 
-On a CE5300 board, the first line reads `revision 0x0001000e: Intel CE5300 (SGX545 1.0.14)`
+On a CE5300 board, the first line reads `revision 0x0001000e: Intel CE5300 (SGX545 1.0.14, 400 MHz)`
 instead.
 
 On Cedarview, `ls /sys/bus/auxiliary/devices/` should also list `gma500_gfx.sgx.` followed by a number. That
