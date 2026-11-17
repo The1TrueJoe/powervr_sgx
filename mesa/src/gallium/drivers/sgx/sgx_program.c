@@ -920,8 +920,11 @@ lower_srgb_filter(nir_builder *b, nir_instr *instr, void *data)
       nir_def *c =
          nir_fadd(b, i0, nir_imm_vec2(b, (k & 1) + 0.5f, (k >> 1) + 0.5f));
 
+      /* the coordinate before the tap that reads it */
+      if (sz)
+         c = nir_fdiv(b, c, sz);
       nir_builder_instr_insert(b, &tap->instr);
-      nir_src_rewrite(&tap->src[ci].src, sz ? nir_fdiv(b, c, sz) : c);
+      nir_src_rewrite(&tap->src[ci].src, c);
       t[k] = &tap->def;
    }
    unsigned n = tex->def.num_components;

@@ -17,7 +17,8 @@
  *  7. REVERSE_SUBTRACT
  *  8. a colour mask with a blend: G kept
  *  9. a discard with a blend (pass type 2): the discarded half kept
- * 10. the sRGB texture sampled into a linear RGBA8 target: decoded
+ * 10. the sRGB texture sampled into a linear RGBA8 target: decoded; 10b
+ *     LINEAR, filtered after the decode (lower_srgb_filter)
  * 11. a linear RGBA8 target: as before, not encoded
  * 12. MRT, an sRGB and a linear buffer from one program
  *
@@ -281,6 +282,45 @@ main(void)
    quad();
    check("10 sRGB texture sampled into RGBA8", 32, 32, un(0.5f), un(0.5f),
          un(0.5f), 255, t);
+
+   /* 10b: LINEAR between sRGB 0 and 255 is linear 0.5 (128), decoded before
+    * it's filtered (lower_srgb_filter); the TPU's filter of the encoded
+    * bytes would give 55.  The coordinate from a varying */
+   {
+      static const char *vsv = "#version 300 es\n"
+                               "in vec2 a;\nout vec2 uv;\n"
+                               "void main() { uv = a * 0.5 + 0.5;"
+                               " gl_Position = vec4(a, 0.0, 1.0); }\n";
+      static const char *fsv = "#version 300 es\nprecision highp float;\n"
+                               "uniform sampler2D s;\nin vec2 uv;\nout vec4 o;\n"
+                               "void main() { o = texture(s, uv); }\n";
+      GLuint pv = glCreateProgram();
+      const char *src[2] = {vsv, fsv};
+      GLenum ty[2] = {GL_VERTEX_SHADER, GL_FRAGMENT_SHADER};
+      for (int i = 0; i < 2; i++) {
+         GLuint sh = glCreateShader(ty[i]);
+         glShaderSource(sh, 1, &src[i], NULL);
+         glCompileShader(sh);
+         glAttachShader(pv, sh);
+      }
+      glBindAttribLocation(pv, 0, "a");
+      glLinkProgram(pv);
+      const unsigned char px2[8] = {0, 0, 0, 255, 255, 255, 255, 255};
+      GLuint t2;
+      glGenTextures(1, &t2);
+      glBindTexture(GL_TEXTURE_2D, t2);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, 2, 1, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, px2);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glUseProgram(pv);
+      glUniform1i(glGetUniformLocation(pv, "s"), 0);
+      quad();
+      check("10b sRGB texture LINEAR halfway, varying coord", 32, 32,
+            un(0.5f), un(0.5f), un(0.5f), 255, 4);
+      glBindTexture(GL_TEXTURE_2D, stex);
+   }
 
    /* 11 */
    colour(pu, 0.2f, 0.5f, 0.8f, 1.0f);
