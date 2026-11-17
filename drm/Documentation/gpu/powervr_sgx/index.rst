@@ -6,9 +6,12 @@ drm/powervr_sgx PowerVR SGX545 GPU Driver
 
 ``powervr_sgx`` is a render-only DRM driver for the PowerVR SGX545. It binds
 the GPU where it is a PCI function of its own, as in the Intel CE5300
-(``8086:089b``, core revision 1.0.14), and on Cedarview (GMA3600/3650, core
-revision 1.0.13), where the SGX shares a PCI function with the display engine,
-as the auxiliary device ``gma500_gfx.sgx`` that gma500 publishes. Scanout goes
+(``8086:089b``, core revision 1.0.14); on Clover Trail (Atom Z2760,
+``8086:08cf``, core revision 1.0.14), where it sits behind the display engine in
+the same BAR and interrupts through the display's MSI, with no display driver
+of its own; and on Cedarview (GMA3600/3650, core revision 1.0.13), where the
+SGX shares a PCI function with the display engine, as the auxiliary device
+``gma500_gfx.sgx`` that gma500 publishes. Scanout goes
 through a separate KMS driver, and buffers move between the two as dma-bufs.
 
 .. toctree::
