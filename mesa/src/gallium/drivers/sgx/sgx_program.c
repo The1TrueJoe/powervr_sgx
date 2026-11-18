@@ -1249,8 +1249,14 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
             if (prev == var)
                break;
             if (var->name && prev->name && !strcmp(var->name, prev->name)) {
-               var->name = ralloc_asprintf(var, "%s#%d", var->name,
-                                           var->data.driver_location);
+               /* (a variable isn't a ralloc context: nir_variable_create
+                * takes it from the shader's gc allocator; set_namef frees
+                * the old name first, so it's copied out) */
+               char name[256];
+
+               snprintf(name, sizeof(name), "%s", var->name);
+               nir_variable_set_namef(nir, var, "%s#%d", name,
+                                      var->data.driver_location);
                break;
             }
          }
