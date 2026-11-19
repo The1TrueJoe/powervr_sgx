@@ -105,3 +105,44 @@ DPM's first page, or any of the TA's address registers above. Next options, no v
    `SGXGEN_MAP_PDS0` did for the PDS base). The run then goes past the fault, and the
    page's contents afterwards show whether the access is a write and what it writes.
 2. Load 0x668 (the PDS threshold) on the SGX530 path of the open microkernel, as the SGX545 does.
+
+## 22:48-22:58 UTC: the read at absolute 0 is the empty update's record; every update hands the MTE a pointer
+
+New: module parameter `probe_va0` (d184dc6c; a page at device address 0 in each SGX530
+client VM, filled with a pattern, changed words logged when the VM goes), and sgxgen
+`SGXGEN_END_NOEMPTY` (61c15b9e; the stream without its empty secondary update) and
+`SGXGEN_END_PTR` (f47cf381; the pre-terminate and terminate tasks hand the MTE the address of
+a record holding their two words). Pointer mode as above.
+
+| variant | result |
+|---|---|
+| VA 0 mapped (0xa5a5a5a5), no draw, no pre-terminate | the b1 fault is gone; next, the b2 read at the PDS exec base (fault 0x0d800000) |
+| VA 0 and the PDS exec base page both mapped, with or without the draw | no fault, the TA times out (2 s): no region headers or tail pointers, no DPM page handed out. The VA 0 page is unchanged: **the access at 0 is a read** |
+| 0x668 written 0xf00 by the host (`probe_init`) and loaded by the microkernel | reads back 0: **the SGX530 has no read/write register at 0x668 (C)** |
+| no empty secondary update (`END_NOEMPTY`), no draw, no pre-terminate | the b1 fault at 0 is gone; b2 at the PDS exec base |
+| the same, with the pre-terminate's first word 0x00300800 | **b1 fault at 0x00300000** |
+| the same, terminate's first word 0x00502000 | b2 at the PDS exec base |
+| `END_NOEMPTY` + `END_PTR` (pointer mode for every update), with or without the draw or the pre-terminate | b2 at the PDS exec base only |
+| the same with the PDS exec base page mapped | no fault, the TA times out |
+| the same, record markers in the pre-terminate's second word or the terminate's | b2 at the PDS exec base (one run without a fault did not repeat) |
+
+**Every MTE-bound update's first output word is the address of its record (C):** the
+clear's state (earlier), the empty secondary update (its task emits nothing, so 0, and the
+MTE reads a record at absolute 0: that was the b1 fault at 0), and the pre-terminate (its
+0x800 header, read as a record address at 0x800; moving it moves the fault). The SGX530
+needs every state-type update in pointer form, or none in the stream.
+
+**Correction to the 21:45-22:10 tables:** the b1 and b2 accesses both happen and race, and
+the BIF reports whichever faults first. So the earlier "the pre-terminate's info / mode word
+removes the b2 read" rows show which fault won, not a cause. With all updates in pointer
+form, the b2 read at `PDS_EXEC_BASE` + 0 happens in every configuration tried.
+
+## Where it stands (22:58 UTC)
+
+In pointer mode everywhere, the one fault left is a requestor-b2 read at `PDS_EXEC_BASE` + 0.
+With that page mapped, nothing faults and the TA hangs before the DPM hands out a page.
+Next: find what issues that read. It isn't the record's PDS words (relative already, and
+marker records don't move it). Candidates are a PDS address field this core takes from a
+part of the record or command we haven't varied, or a register our docs name for event or
+state programs. Every source moved so far moved a fault first, which hides a later read, so
+the next probes should map the moved address rather than unmap it.
