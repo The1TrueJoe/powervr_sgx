@@ -1201,6 +1201,46 @@ TEST_F(sgx_compile_test, vertex_constants_in_memory)
    EXPECT_NE(disasm().find("ld.a.d"), std::string::npos) << disasm();
 }
 
+/* an array too large for SA indexed by an attribute straight into a
+ * varying (D3D9-style vc[256]): fold_movs puts the output register in the
+ * indexed mov, which a load can't write, so it loads into a temporary and
+ * moves it after the wdf */
+TEST_F(sgx_compile_test, vertex_indexed_memory_constants_to_varying)
+{
+   start(MESA_SHADER_VERTEX);
+   nir_variable *arr =
+      var(nir_var_uniform, glsl_array_type(glsl_vec4_type(), 200, 0), "vc", -1);
+   nir_variable *in =
+      var(nir_var_shader_in, glsl_float_type(), "i", VERT_ATTRIB_GENERIC0);
+   nir_variable *pos = var(nir_var_shader_out, glsl_vec4_type(), "gl_Position",
+                           VARYING_SLOT_POS);
+   nir_variable *col =
+      var(nir_var_shader_out, glsl_vec4_type(), "col", VARYING_SLOT_VAR0);
+   nir_store_var(&b, pos, nir_imm_vec4(&b, 0, 0, 0, 1), 0xf);
+   nir_def *ix = nir_f2i32(&b, nir_load_var(&b, in));
+   nir_store_var(
+      &b, col,
+      nir_load_deref(&b, nir_build_deref_array(&b, nir_build_deref_var(&b, arr),
+                                               ix)),
+      0xf);
+
+   ASSERT_TRUE(compile()) << out.log;
+   expect_decodes();
+   std::string s = disasm();
+   EXPECT_NE(s.find("ld.a.d"), std::string::npos) << s;
+   size_t w = s.rfind("wdf");
+   ASSERT_NE(w, std::string::npos) << s;
+   /* the varying is written after the wait (a mov, repeated or not) */
+   bool moved = false;
+   for (size_t at = s.find('\n', w); at != std::string::npos && !moved;
+        at = s.find('\n', at + 1)) {
+      std::string line = s.substr(at + 1, s.find('\n', at + 1) - at - 1);
+      moved = line.find("mov") != std::string::npos &&
+              line.find(" o") != std::string::npos;
+   }
+   EXPECT_TRUE(moved) << s;
+}
+
 /* what feeds a derivative runs on helper instances too: skipinv clear */
 TEST_F(sgx_compile_test, fragment_derivative_source_no_skipinv)
 {

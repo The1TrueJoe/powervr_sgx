@@ -86,7 +86,7 @@ struct sgx_pipe_shader {
    /* constants past sa127 (the compiler's ld.a.d): a block of mem_dwords per
     * draw, its address + 512 * j in SA slot mem_base_slot[j] */
    unsigned mem_dwords, n_mem_bases;
-   uint8_t mem_base_slot[8];
+   uint8_t mem_base_slot[SGX_MAX_MEM_BASES];
    unsigned n_attribs; /* vertex: attribute slots, 4 dwords each */
    /* vertex: gl_VertexID's attribute slot + 1 (0: not read), an input the
     * draw gathers itself (sgx_program.c lower_vertex_id), as a raw integer

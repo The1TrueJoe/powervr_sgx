@@ -1165,6 +1165,10 @@ fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
    }
 }
 
+static_assert(ARRAY_SIZE(((struct sgxws_const_mem *)0)->base) ==
+                 SGX_MAX_MEM_BASES,
+              "a window base for each of the compiler's");
+
 /* a program's constants in memory for this draw (sgxws_const_mem), filled into
  * a buffer of the context's; NULL when it has none */
 static void
