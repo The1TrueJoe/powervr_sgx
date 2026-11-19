@@ -1589,15 +1589,21 @@ static uint32_t vdm_end(struct sgx_ctx *c)
 
 	int i530 = getenv("SGXGEN_VDMINFO530") != NULL;
 
-	vdm(c, 0x40000000 | vdm_pds(c, c->empty_state));
+	/* SGXGEN_END_ADD=<a>,<b>,<c> (bring-up probe, SGX530): bytes added to the empty
+	 * secondary update's, the pre-terminate's and the terminate's program addresses,
+	 * to see which one a PDS fault follows */
+	uint32_t add[3] = { 0 };
+	if (getenv("SGXGEN_END_ADD"))
+		sscanf(getenv("SGXGEN_END_ADD"), "%i,%i,%i", (int *)&add[0], (int *)&add[1], (int *)&add[2]);
+	vdm(c, 0x40000000 | vdm_pds(c, c->empty_state + add[0]));
 	/* each word's rows are its program's own (the 8-word interleave gives 4 where
 	 * the 2-dword one gives 1 or 3; a mismatch starts the PDS inside the data) */
 	vdm(c, c->empty_rows << 26 | (i530 ? 0x16100 : 0xe100));
 	if (getenv("SGXGEN_PRETERM530")) {
-		vdm(c, 0x40000000 | vdm_pds(c, c->preterm));
+		vdm(c, 0x40000000 | vdm_pds(c, c->preterm + add[1]));
 		vdm(c, c->preterm_rows << 26 | 0x2c201);
 	}
-	vdm(c, 0x60000000 | vdm_pds(c, c->terminate));
+	vdm(c, 0x60000000 | vdm_pds(c, c->terminate + add[2]));
 	vdm(c, c->term_rows << 26 | (i530 ? 0x2a201 : 0x2022401));
 	vdm(c, 0xc0000000);
 	return at;
