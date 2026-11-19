@@ -146,3 +146,44 @@ marker records don't move it). Candidates are a PDS address field this core take
 part of the record or command we haven't varied, or a register our docs name for event or
 state programs. Every source moved so far moved a fault first, which hides a later read, so
 the next probes should map the moved address rather than unmap it.
+
+## 23:00-23:10 UTC: the read at the PDS exec base is the SGX545-form tasks' `emit.t3` (C)
+
+New sgxgen knobs: `SGXGEN_STATE_1DMA`, `SGXGEN_TERM_NOTASK` (03fa3dea), `SGXGEN_SKIP_CLEAR`
+(cd50456c). Pointer mode everywhere (`STATE_PTR`, `END_NOEMPTY`, `END_PTR`), no
+pre-terminate unless noted. Because the b2 read was intermittent, each variant ran 2-5 times.
+
+| variant | b2 fault at 0x0d800000 |
+|---|---|
+| base, no draw | 2 of 3 (plus earlier runs: most) |
+| the state program as one unconditional DOUTD + DOUTU (`STATE_1DMA`) | 2 of 2 |
+| the terminate without its task (`TERM_NOTASK`) | 2 of 3 |
+| the clear's record moved (`CLEAR_PDSADD` 1 MiB), all markers, or header 0 | 6 of 6 |
+| the event-program registers (0xa58 0x2204b00f, 0xa68 0x014042c0, 0xa6c 3, 0xa70 0x13d01) | the same in fault and no-fault runs; 0xa68 is the kernel's event program |
+| no clear at all, only the end (`SKIP_CLEAR`) | 3 of 3 |
+| the same without the terminate's task | **0 of 2** |
+| **the state tasks' one-emit twins** (`SGXGEN_EMIT530=state1`: one `emit.t1` ending, no `emit.t3`): no draw, draw, end only, with the pre-terminate | **0 of 5** (a sixth run lost to the link) |
+
+The read comes from the MTE-bound USSE tasks (the clear's state task and the terminate's),
+and goes away when they don't end with the SGX545's `emit.t3`. That matches the 2026-11-16
+emit sweep, where a final `emit.t3 r0, #0, #0` gave this fault and `emit.t1` didn't. On
+the SGX530 `emit.t3` starts a PDS fetch (at its operand, here 0 → `PDS_EXEC_BASE` + 0).
+**The SGX530 state tasks must end with the one-emit form** (G for what t3 means, C for
+the effect).
+
+**The fault-free hang.** With the one-emit tasks nothing faults, but the TA never
+finishes. In every run the PDS PC is 0x0020046c = 0x0e0011b0, the terminate program's
+first instruction (its data at 0x0e001180, 3 rows; `SGXGEN_DUMP_PDS`). It's the same with
+only the end of the stream. The DPM hands out no page and no region headers or tail
+pointers are written, with or without the draw.
+
+## Where it stands (23:10 UTC)
+
+The SGX530 stream now runs to its terminate without a fault: every MTE-bound update hands
+over a record address, there's no empty update, and the state tasks use the one-emit
+ending. The pass doesn't end. Next, all without vendor code:
+- whether the terminate program runs at all, or the PDS waits in front of it (move it
+  within mapped memory and see whether the PC follows; give it a HALT-only form);
+- the terminate record's form for this core: header 0x2000 + the last tile (3, 3);
+- whether the MTE accepts the clear's state at all: with the draw, no primitive reaches the
+  DPM.
