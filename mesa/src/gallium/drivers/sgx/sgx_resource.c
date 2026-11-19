@@ -1341,11 +1341,22 @@ sgx_resource_create_with_modifiers(struct pipe_screen *pscreen,
    return NULL;
 }
 
-/* LINEAR only for what can be shared: 4 bytes a pixel (shareable()). */
+/* LINEAR only for the colour formats a shared buffer is rendered in: RGBA
+ * and BGRA of 8 bits a channel (shareable(), is_render_target).  Other
+ * 4-byte formats (depth, R32F, RG16) would pass shareable() but are never
+ * buffers to share. */
 static bool
 format_shareable(enum pipe_format format)
 {
-   return util_format_get_blocksize(format) == 4;
+   switch (format) {
+   case PIPE_FORMAT_B8G8R8A8_UNORM:
+   case PIPE_FORMAT_B8G8R8X8_UNORM:
+   case PIPE_FORMAT_R8G8B8A8_UNORM:
+   case PIPE_FORMAT_R8G8B8X8_UNORM:
+      return true;
+   default:
+      return false;
+   }
 }
 
 static void
