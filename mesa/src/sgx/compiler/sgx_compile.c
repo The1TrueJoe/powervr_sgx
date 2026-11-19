@@ -3296,10 +3296,20 @@ emit_intrinsic(struct sgx_ctx *c, nir_intrinsic_instr *in)
          c->n_ix_arr = MAX2(c->n_ix_arr, a + 1);
          nir_legacy_src lo = nir_legacy_chase_src(&in->src[0]);
          unsigned t = new_vreg(c, 1);
+         struct sgx_ref off = src_comp(c, &lo, 0);
+         /* with native integers the offset is an integer (gl_VertexID, an
+          * int uniform), not the float nir_lower_int_to_float leaves: to a
+          * float first, so the pck below (and mem_index's clamp, which
+          * reads the pck's source as a float) see what they always have */
+         if (c->opts->native_integers) {
+            struct sgx_ref f = vref(new_vreg(c, 1), 0);
+            emit_i2f(c, f, off, true);
+            off = f;
+         }
          struct sgx_ins *pk = ins_alloc(c, SGX_INS_ALU, SGX_OP_PCK_S16_F32);
          pk->nops = 3;
          pk->op[0] = vref(t, 0);
-         pk->op[1] = src_comp(c, &lo, 0);
+         pk->op[1] = off;
          pk->op[2] = ref(SGX_F_IMM, 0);
          fld(pk, SGX_FLD_DMASK, 3);
          emit(c, pk);

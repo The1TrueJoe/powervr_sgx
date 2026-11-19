@@ -747,6 +747,9 @@ struct fetch {
     * them */
    bool raw;
    unsigned raw_bytes;
+   /* gl_VertexID (sgx_program.c lower_vertex_id): no buffer, the vertex's
+    * index itself, an integer's bits or a float (vertex_id_int) */
+   bool vertex_id, vertex_id_int;
    struct sgx_resource *res; /* the buffer, NULL for client memory */
    uint32_t offset;          /* where in it */
    unsigned vb;              /* its vertex buffer binding */
@@ -767,6 +770,7 @@ setup_fetch(struct sgx_context *ctx, unsigned e, struct fetch *f)
    f->vb = ve->vertex_buffer_index;
    f->res = NULL;
    f->raw = false;
+   f->vertex_id = false;
    if (vb->is_user_buffer) {
       f->base = vb->buffer.user;
    } else if (vb->buffer.resource) {
@@ -788,11 +792,31 @@ setup_fetch(struct sgx_context *ctx, unsigned e, struct fetch *f)
    return true;
 }
 
+/* gl_VertexID's input: the index into the buffers, the base vertex in it
+ * (each path hands fetch_vertex/fetch_range the buffer index), as (id, 0, 0,
+ * 1).  A nonzero stride and no resource: the vertex cache leaves it alone */
+static void
+setup_vertex_id(struct fetch *f, bool ints)
+{
+   memset(f, 0, sizeof(*f));
+   f->vertex_id = true;
+   f->vertex_id_int = ints;
+   f->format = PIPE_FORMAT_R32_FLOAT;
+   f->stride = 4;
+}
+
 static void
 fetch_vertex(const struct fetch *f, unsigned index, uint32_t *out)
 {
    const uint8_t *src = f->base + (size_t)index * f->stride;
    float v[4] = {0, 0, 0, 1};
+
+   if (f->vertex_id) {
+      out[0] = f->vertex_id_int ? index : fui((float)index);
+      out[1] = out[2] = 0;
+      out[3] = f->vertex_id_int ? 1 : fui(1.0f);
+      return;
+   }
 
    if (f->raw) {
       memcpy(out, src, f->raw_bytes);
@@ -850,7 +874,7 @@ fetch_range(const struct fetch *f, unsigned first, unsigned n, uint32_t *dst,
    const uint8_t *src = f->base + (size_t)first * f->stride;
    float *o = (float *)dst;
 
-   if (!f->defaults) {
+   if (!f->defaults || f->vertex_id) {
       for (unsigned i = 0; i < n; i++)
          fetch_vertex(f, first + i, dst + i * vertex_dwords);
       return;
@@ -1888,7 +1912,7 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       /* zero-copy (sgx_screen.zero_copy): inputs the vertex shader unpacks
        * itself, when the compiler knows every format */
       raw = sgx_screen(ctx->base.screen)->zero_copy && ctx->velems &&
-            ctx->vs->n_attribs <= 16 &&
+            !ctx->vs->vertex_id_slot && ctx->vs->n_attribs <= 16 &&
             ctx->vs->n_attribs <= ctx->velems->num_elements;
       for (unsigned e = 0; raw && e < ctx->vs->n_attribs; e++)
          raw = vtx_format(ctx->velems->elements[e].src_format, &vfmt[e],
@@ -2108,7 +2132,9 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       return;
    }
    for (unsigned e = 0; e < n_fetch; e++) {
-      if (!setup_fetch(ctx, e, &f[e]))
+      if (compiled && ctx->vs->vertex_id_slot == e + 1)
+         setup_vertex_id(&f[e], ctx->vs->vertex_id_int);
+      else if (!setup_fetch(ctx, e, &f[e]))
          SKIP("a vertex input it can't fetch");
       if (compiled) {
          f[e].dwords = 4;
@@ -2204,7 +2230,8 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
        * a vertex from its cached gather and its quads' indices expanded
        * once, where zero-copy DMAs each input and expands them every draw
        * (docs/PERF.md) */
-      bool zc = compiled && sgx_screen(ctx->base.screen)->zero_copy;
+      bool zc = compiled && sgx_screen(ctx->base.screen)->zero_copy &&
+                !ctx->vs->vertex_id_slot;
 
       /* (zero-copy's draw from an index buffer as it is goes first: nothing
        * of it is read on the CPU) */
