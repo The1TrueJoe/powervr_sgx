@@ -66,3 +66,42 @@ That looks like an end-of-pass write through a base register the 530 run leaves 
 Next: read the SGX545 TA kick's address registers (our record of our own microkernel's
 writes, `docs/log/data/2026-10-28-ukernel-impl/ours-registers.txt` on the sgx530 branch)
 on the 530 at that hang, with the new read-only module parameter `probe_read`.
+
+## 22:30-22:40 UTC: the registers at the b1-at-0 hang (read only)
+
+New module parameters: `probe_read` (a839a5b6; offsets added to the read_ukregs hang dump,
+read only) and `probe_pb_skip` (912a985d; starts the free list N pages into the PB). All
+offsets read are named in our own `docs/UKERNEL.md` (TA kick and PB tables) and in our record
+of our SGX545 microkernel's writes (`docs/log/data/2026-10-28-ukernel-impl/ours-registers.txt`
+on the sgx530 branch). Pointer mode, no draw, no pre-terminate:
+
+| register | SGX530 at the hang | SGX545 (our microkernel, TA kick) |
+|---|---|---|
+| 0x204 TE_AA | 0 | 0x20000000 (a flag) |
+| 0x208 / 0x20c / 0x210 / 0x214 | 0x01004004 / 0x01004004 / 0x00003003 / 0x10 | (frame-dependent) |
+| 0x21c region headers / 0x220 tail pointers | 0x0c405000 / 0x0c400000 | 0x20005140 / 0x20000000 |
+| 0x234 / 0x62c / 0x634 | 0x0c402000 / 0x0c406000 / 0x0c401000 | 0x20002000 / 0x20008140 / 0x20001000 |
+| 0x238 VDM base | 0x01841000 | 0x3e040000 |
+| 0x618 free list / 0x61c head / 0x648 end | 0x09422000 / 0x10210000 / 0x10200000 | 0x10422000 / 0x04210000 / 0x04200000 |
+| 0x620 TA / 0x624 ZLS / 0x628 global | 0x1032 / 0x1000 / 0x11000 | 0x432 / 0x400 / 0x10400 |
+| 0x668 PDS threshold | **0** (the kernel's descriptor says 0xf00) | 0x300 |
+| 0x700 live head / 0x724 / 0x72c | 0x10210000 / 0 / 0 | |
+| others in 0x600-0x67c, 0x700-0x74c | 0, except 0x614 = 0x2000, 0x644 = 0x3db8, 0x710 = 0x1020, 0x738 = 1 | |
+
+Every address register holds a real parameter-heap address, and the PB thresholds follow
+the SGX545 formulas for this PB (0x1022 pages). The DPM hands out no page before the fault
+(the live head is unchanged). 0x668 isn't loaded on this path.
+
+**The fault at 0 is not the DPM's first page (C):** with `probe_pb_skip` = 0x10 or 0x100
+the live head's low half moves to 0x10 / 0x100, and the fault stays at absolute 0 (b1). The
+same skip with the draw in normal mode keeps the 0xd000 fault.
+
+## Where it stands (22:40 UTC)
+
+Pointer mode reaches the end of the pass. Every configuration then ends in a requestor-b1
+access at absolute 0 that isn't the record, a stream program, an end task's word, the
+DPM's first page, or any of the TA's address registers above. Next options, no vendor code:
+1. A kernel probe that maps a scratch page at device VA 0 in the client's VM (as
+   `SGXGEN_MAP_PDS0` did for the PDS base). The run then goes past the fault, and the
+   page's contents afterwards show whether the access is a write and what it writes.
+2. Load 0x668 (the PDS threshold) on the SGX530 path of the open microkernel, as the SGX545 does.
