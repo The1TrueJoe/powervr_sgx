@@ -43,6 +43,23 @@ for m in "$B/common/kernel" "$B/ea/common/kernel"; do
 	grep -v '^[[:space:]]*#' "$m/objs.mk" | grep '|' | grep -v sgx545ce |
 	while IFS='|' read -r mk line; do
 		obj=${line##*+= }
+		# A line for a driver this checkout doesn't have (a submodule outside
+		# the sparse checkout, such as iio-fan): left out, as the vendor's.
+		case $line in
+		source*)
+			kc=$(printf '%s\n' "$line" | sed -n 's/^source "\(.*\)"$/\1/p')
+			if [ -n "$kc" ] && [ ! -e "$SRC/$kc" ]; then
+				echo ">> skip $mk: $line (not in this tree)"
+				continue
+			fi
+			;;
+		*+=*/)
+			if [ ! -d "$SRC/$(dirname "$mk")/$obj" ]; then
+				echo ">> skip $mk: $line (not in this tree)"
+				continue
+			fi
+			;;
+		esac
 		grep -q "$obj" "$SRC/$mk" || printf '\n%s\n' "$line" >> "$SRC/$mk"
 	done
 done
