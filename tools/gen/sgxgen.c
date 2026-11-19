@@ -1302,6 +1302,23 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 		b = q;
 		dma_dwords = 1;
 		kind = 0;
+		/* SGXGEN_STATE_PTR_WORDS=<w1>,<w2>,... (bring-up probe, SGX530): more output words
+		 * after the pointer (up to 15), DMA'd with it, and the matching state task */
+		if (getenv("SGXGEN_STATE_PTR_WORDS")) {
+			struct sgx_ptr q2 = ring_alloc(&c->pds_vtx, 64, DMA_ALIGN);
+			char *sp = getenv("SGXGEN_STATE_PTR_WORDS"), *ep;
+			unsigned m = 1;
+
+			memset(q2.p, 0, 64);
+			q2.p[0] = q.p[0];
+			for (; m < 16 && *sp; m++, sp = *ep ? ep + 1 : ep)
+				q2.p[m] = (uint32_t)strtoul(sp, &ep, 0);
+			b = q2;
+			dma_dwords = m;
+			kind = 3;
+			if (!c->state_emit[m])
+				c->state_emit[m] = usse_load(c, usse_state_emit[m], 1);
+		}
 		/* SGXGEN_STATE_PTR_W1=<v>: a second output word, <v> (is o1 a PDS program word?) */
 		if (getenv("SGXGEN_STATE_PTR_W1")) {
 			q.p[1] = env_u32("SGXGEN_STATE_PTR_W1");
@@ -1359,6 +1376,7 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	pds_d0(&p, 4, doutu_w0(c, getenv("SGXGEN_STATE_EMPTYTASK") ? c->empty_v :
 			       c->state_emit[getenv("SGXGEN_STATE_PTR") ?
 					     (getenv("SGXGEN_STATE_PTR_N") ? env_u32("SGXGEN_STATE_PTR_N") :
+					      getenv("SGXGEN_STATE_PTR_WORDS") ? dma_dwords :
 					      getenv("SGXGEN_STATE_PTR_W1") ? 2 : 1) : n], 1, 0) |
 		      (getenv("SGXGEN_STATE_BIT21") ? 0x200000 : 0) | (getenv("SGXGEN_DOUTU_B4") ? 0x10 : 0));
 	/* SGXGEN_STATE_W1 / SGXGEN_STATE_W2 (bring-up probes, SGX530): the state task's
