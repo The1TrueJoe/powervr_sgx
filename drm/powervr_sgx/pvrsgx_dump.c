@@ -35,6 +35,12 @@ static bool pvrsgx_read_ukregs;
 module_param_named(read_ukregs, pvrsgx_read_ukregs, bool, 0444);
 MODULE_PARM_DESC(read_ukregs, "Bring-up: dump the SGX530 registers its microkernel reads (read only; default off)");
 
+/* Bring-up, read only (with read_ukregs, SGX530): more registers for the dump */
+static unsigned int pvrsgx_probe_read[32];
+static int pvrsgx_probe_read_n;
+module_param_array_named(probe_read, pvrsgx_probe_read, uint, &pvrsgx_probe_read_n, 0444);
+MODULE_PARM_DESC(probe_read, "Bring-up (SGX530, with read_ukregs): register offsets to add to the hang dump, read only (default none)");
+
 static void dump_ukregs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 {
 	static const u16 regs[] = {
@@ -49,6 +55,10 @@ static void dump_ukregs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 	for (int i = 0; i < ARRAY_SIZE(regs); i++)
 		seq_buf_printf(sb, "UK_READ              0x%04x 0x%08x\n", regs[i],
 			       sgx_rd(sdev, regs[i]));
+	for (int i = 0; i < pvrsgx_probe_read_n; i++)
+		if (pvrsgx_probe_read[i] < 0x4000 && !(pvrsgx_probe_read[i] & 3))
+			seq_buf_printf(sb, "PROBE_READ           0x%04x 0x%08x\n", pvrsgx_probe_read[i],
+				       sgx_rd(sdev, pvrsgx_probe_read[i]));
 }
 
 /* Registers safe to read while the clocks are on. */
