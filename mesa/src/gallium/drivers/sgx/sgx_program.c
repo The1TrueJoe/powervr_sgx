@@ -1914,7 +1914,9 @@ tex_key_of(const nir_shader *nir, struct pipe_sampler_view *const *views,
               v->u.tex.first_level == v->u.tex.last_level))
             k->srgb_filter |= 1u << unit;
       }
-      if (!sgx_tex_bgra(v->format))
+      unsigned plane = sgx_tex_plane_format(v->texture);
+
+      if (!sgx_tex_bgra(v->format) || plane)
          k->not_bgra |= 1u << unit;
       /* one F32 word a texel (tex_f32): depth, and R32 (raw); RG32 and
        * RGBA32 a read a plane (tex_r32x2 / x4) */
@@ -1946,6 +1948,21 @@ tex_key_of(const nir_shader *nir, struct pipe_sampler_view *const *views,
          for (unsigned c = 0; c < 4; c++)
             if (sw[c] == PIPE_SWIZZLE_W)
                sw[c] = PIPE_SWIZZLE_1;
+      }
+      /* An imported video plane comes back as L8 (L, L, L, 1) or LA88
+       * (L, L, L, A): GL's R8 is (r, 0, 0, 1) and RG8 (r, g, 0, 1), g being
+       * the second byte, A */
+      if (plane) {
+         static const uint8_t r8[4] = {PIPE_SWIZZLE_X, PIPE_SWIZZLE_0,
+                                       PIPE_SWIZZLE_0, PIPE_SWIZZLE_1};
+         static const uint8_t rg8[4] = {PIPE_SWIZZLE_X, PIPE_SWIZZLE_W,
+                                        PIPE_SWIZZLE_0, PIPE_SWIZZLE_1};
+         const uint8_t *m =
+            plane == SGX_TEXSTATE_FORMAT_L8 ? r8 : rg8;
+
+         for (unsigned c = 0; c < 4; c++)
+            if (sw[c] <= PIPE_SWIZZLE_W)
+               sw[c] = m[sw[c]];
       }
       /* XYZW: none, 0 */
       if (sw[0] != PIPE_SWIZZLE_X || sw[1] != PIPE_SWIZZLE_Y ||

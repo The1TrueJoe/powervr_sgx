@@ -662,6 +662,14 @@ wrap(enum pipe_tex_wrap w)
    }
 }
 
+/* The texture format an imported video plane is sampled as (L8, LA88), or 0
+ * (sgx_resource.plane_format) */
+unsigned
+sgx_tex_plane_format(const struct pipe_resource *prsc)
+{
+   return prsc ? ((const struct sgx_resource *)prsc)->plane_format : 0;
+}
+
 void
 sgx_tex_words(const struct pipe_sampler_view *view,
               const struct pipe_sampler_state *sampler, uint32_t t[4])
@@ -730,6 +738,8 @@ sgx_tex_words(const struct pipe_sampler_view *view,
       {
          t0.pitch_lo = p & 7;
          t0.pitch_hi = p >> 3;
+         /* an imported video plane is L8 or LA88 (plane_format) */
+         t0.unknown_30 = res->plane_format != 0;
          if (sampler) {
             t0.wrap_t = wrap(sampler->wrap_t);
             t0.wrap_s = wrap(sampler->wrap_s);
@@ -739,9 +749,15 @@ sgx_tex_words(const struct pipe_sampler_view *view,
       sgx_pack(&t[1], TEXSTATE_WORD1, t1)
       {
          t1.layout = SGX_TEXSTATE_LAYOUT_STRIDED;
-         t1.format = bgra ? 0x0c : 0x0d;
+         t1.format = res->plane_format ? res->plane_format : bgra ? 0x0c : 0x0d;
          t1.width = prsc->width0 - 1;
          t1.height = prsc->height0 - 1;
+      }
+      if (res->plane_format) {
+         /* an imported video plane (sgx_resource.plane_format): its bytes
+          * at plane_offset, the pitch as for any strided surface */
+         sgx_pack(&t[2], TEXSTATE_WORD2, t2)
+            t2.address = SGX_DEV_ADDR(res->bo.va + res->plane_offset);
       }
    }
    if (sgx_tex_word32(prsc->format)) {

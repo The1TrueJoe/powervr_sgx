@@ -52,6 +52,9 @@ defaulting to the value they always have.
   <!-- WORD0 of a LAYOUT_STRIDED surface: the pitch - 1, in 32-bit words,
        split over b9-11 (low 3 bits) and b17-26 -->
   <struct name="STRIDED_WORD0" length="1">
+    <!-- as WORD0's: set for L8 and LA88 (an imported video plane read
+         without it is wrong at nearly every texel, vxdk_eglimport) -->
+    <field name="unknown_30" start="30" end="30" type="bool"/>
     <field name="pitch_hi" start="17" end="26" type="uint"/>
     <field name="mag_linear" start="12" end="12" type="bool"/>
     <field name="pitch_lo" start="9" end="11" type="uint"/>
