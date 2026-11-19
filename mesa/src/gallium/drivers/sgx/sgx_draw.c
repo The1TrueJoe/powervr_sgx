@@ -270,11 +270,14 @@ fs_writes_target(const struct sgx_context *ctx, unsigned t)
            BITFIELD64_BIT(FRAG_RESULT_DATA0 + t));
 }
 
-/* the bound colour mask of render target 0 */
+/* the bound colour mask of the render target being drawn (rt_index) */
 static unsigned
 colour_mask(const struct sgx_context *ctx)
 {
-   return ctx->blend ? ctx->blend->base.rt[0].colormask : PIPE_MASK_RGBA;
+   return ctx->blend
+             ? ctx->blend->base.rt[sgx_blend_rt(ctx->blend, ctx->rt_index)]
+                  .colormask
+             : PIPE_MASK_RGBA;
 }
 
 static void clear_one(struct pipe_context *pctx, unsigned buffers,
@@ -551,9 +554,7 @@ build_state(struct sgx_context *ctx, struct sgxws_state *st)
 {
    const struct pipe_rasterizer_state *rs =
       ctx->rasterizer ? &ctx->rasterizer->base : NULL;
-   unsigned mask = word_mask(
-      ctx, (ctx->blend ? ctx->blend->base.rt[0].colormask : PIPE_MASK_RGBA) &
-              target_mask(ctx));
+   unsigned mask = word_mask(ctx, colour_mask(ctx) & target_mask(ctx));
 
    memset(st, 0, sizeof(*st));
    st->depth_func = depth_func(ctx);
@@ -746,6 +747,9 @@ struct fetch {
     * them */
    bool raw;
    unsigned raw_bytes;
+   /* gl_VertexID (sgx_program.c lower_vertex_id): no buffer, the vertex's
+    * index itself, an integer's bits or a float (vertex_id_int) */
+   bool vertex_id, vertex_id_int;
    struct sgx_resource *res; /* the buffer, NULL for client memory */
    uint32_t offset;          /* where in it */
    unsigned vb;              /* its vertex buffer binding */
@@ -766,6 +770,7 @@ setup_fetch(struct sgx_context *ctx, unsigned e, struct fetch *f)
    f->vb = ve->vertex_buffer_index;
    f->res = NULL;
    f->raw = false;
+   f->vertex_id = false;
    if (vb->is_user_buffer) {
       f->base = vb->buffer.user;
    } else if (vb->buffer.resource) {
@@ -787,11 +792,31 @@ setup_fetch(struct sgx_context *ctx, unsigned e, struct fetch *f)
    return true;
 }
 
+/* gl_VertexID's input: the index into the buffers, the base vertex in it
+ * (each path hands fetch_vertex/fetch_range the buffer index), as (id, 0, 0,
+ * 1).  A nonzero stride and no resource: the vertex cache leaves it alone */
+static void
+setup_vertex_id(struct fetch *f, bool ints)
+{
+   memset(f, 0, sizeof(*f));
+   f->vertex_id = true;
+   f->vertex_id_int = ints;
+   f->format = PIPE_FORMAT_R32_FLOAT;
+   f->stride = 4;
+}
+
 static void
 fetch_vertex(const struct fetch *f, unsigned index, uint32_t *out)
 {
    const uint8_t *src = f->base + (size_t)index * f->stride;
    float v[4] = {0, 0, 0, 1};
+
+   if (f->vertex_id) {
+      out[0] = f->vertex_id_int ? index : fui((float)index);
+      out[1] = out[2] = 0;
+      out[3] = f->vertex_id_int ? 1 : fui(1.0f);
+      return;
+   }
 
    if (f->raw) {
       memcpy(out, src, f->raw_bytes);
@@ -849,7 +874,7 @@ fetch_range(const struct fetch *f, unsigned first, unsigned n, uint32_t *dst,
    const uint8_t *src = f->base + (size_t)first * f->stride;
    float *o = (float *)dst;
 
-   if (!f->defaults) {
+   if (!f->defaults || f->vertex_id) {
       for (unsigned i = 0; i < n; i++)
          fetch_vertex(f, first + i, dst + i * vertex_dwords);
       return;
@@ -1139,6 +1164,10 @@ fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
               k->shift, v);
    }
 }
+
+static_assert(ARRAY_SIZE(((struct sgxws_const_mem *)0)->base) ==
+                 SGX_MAX_MEM_BASES,
+              "a window base for each of the compiler's");
 
 /* a program's constants in memory for this draw (sgxws_const_mem), filled into
  * a buffer of the context's; NULL when it has none */
@@ -1833,17 +1862,16 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
    if (sgx_cbuf(ctx)->texture) {
       /* the colour epilogue: blend, then the colour mask (sgxws_blend) */
       bool has_alpha = util_format_has_alpha(sgx_cbuf(ctx)->format);
-      unsigned mask =
-         (ctx->blend ? ctx->blend->base.rt[0].colormask : PIPE_MASK_RGBA) &
-         target_mask(ctx);
+      unsigned mask = colour_mask(ctx) & target_mask(ctx);
+      unsigned br = sgx_blend_rt(ctx->blend, ctx->rt_index);
 
       enum pipe_format cf = sgx_cbuf(ctx)->format;
       bool int_rt = util_format_is_pure_integer(cf);
 
       /* an integer target isn't blended (GL); its packed word is masked by
        * byte, an R32 word being all of R */
-      if (ctx->blend && ctx->blend->enable && !int_rt)
-         epi = ctx->blend->hw[has_alpha];
+      if (ctx->blend && ctx->blend->enable[br] && !int_rt)
+         epi = ctx->blend->hw[br][has_alpha];
       if (int_rt && sgx_tex_raw32(cf))
          mask = word_mask(ctx, mask);
       else if (int_rt && !has_alpha)
@@ -1888,7 +1916,7 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       /* zero-copy (sgx_screen.zero_copy): inputs the vertex shader unpacks
        * itself, when the compiler knows every format */
       raw = sgx_screen(ctx->base.screen)->zero_copy && ctx->velems &&
-            ctx->vs->n_attribs <= 16 &&
+            !ctx->vs->vertex_id_slot && ctx->vs->n_attribs <= 16 &&
             ctx->vs->n_attribs <= ctx->velems->num_elements;
       for (unsigned e = 0; raw && e < ctx->vs->n_attribs; e++)
          raw = vtx_format(ctx->velems->elements[e].src_format, &vfmt[e],
@@ -2108,7 +2136,9 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       return;
    }
    for (unsigned e = 0; e < n_fetch; e++) {
-      if (!setup_fetch(ctx, e, &f[e]))
+      if (compiled && ctx->vs->vertex_id_slot == e + 1)
+         setup_vertex_id(&f[e], ctx->vs->vertex_id_int);
+      else if (!setup_fetch(ctx, e, &f[e]))
          SKIP("a vertex input it can't fetch");
       if (compiled) {
          f[e].dwords = 4;
@@ -2204,7 +2234,8 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
        * a vertex from its cached gather and its quads' indices expanded
        * once, where zero-copy DMAs each input and expands them every draw
        * (docs/PERF.md) */
-      bool zc = compiled && sgx_screen(ctx->base.screen)->zero_copy;
+      bool zc = compiled && sgx_screen(ctx->base.screen)->zero_copy &&
+                !ctx->vs->vertex_id_slot;
 
       /* (zero-copy's draw from an index buffer as it is goes first: nothing
        * of it is read on the CPU) */

@@ -7,6 +7,9 @@ This guide installs the open graphics driver for the PowerVR SGX545 GPU on Debia
   3600" or "GMA 3650" graphics. Many 2012-era netbooks and small desktop boards.
 - **Intel Atom CE5300 / CE5310** boards.
 
+Intel Clover Trail tablets (Atom Z2760) work too, but they need a 32-bit kernel and setup this
+guide doesn't cover: see `docs/porting/cores/clovertrail.md`.
+
 Everything here is open source. No Intel or Imagination software is installed.
 
 > **Status: early.** 3D works in our tests, but long desktop sessions haven't been fully
@@ -161,7 +164,7 @@ powervr_sgx ...: powervr_sgx/sgx545_ukernel.bin: open microkernel ..., features 
 powervr_sgx ...: microkernel started
 ```
 
-On a CE5300 board, the first line reads `revision 0x0001000e: Intel CE5300 (SGX545 1.0.14)`
+On a CE5300 board, the first line reads `revision 0x0001000e: Intel CE5300 (SGX545 1.0.14, 400 MHz)`
 instead.
 
 On Cedarview, `ls /sys/bus/auxiliary/devices/` should also list `gma500_gfx.sgx.` followed by a number. That
@@ -222,9 +225,12 @@ installed together. A 32-bit game's renderer (in its log or console) should then
 **SGX545**. Steam's runtime picks up the system's Mesa. This hasn't been tested with every
 runtime yet, so if a game still reports `llvmpipe`, please report it.
 
-If the desktop reacts slowly while a game runs, let programs keep fewer frames in flight:
-add the line `SGX_SLOTS=3` to `/etc/environment` and log in again. Games then run a little
-slower. Delete the line to go back to the default of 4.
+Each program using the GPU keeps up to six renders in flight (`SGX_SLOTS`, 2 to 8; six by
+default). Each one reserves about 20 MB of GPU memory per program, so six cost about 38 MB
+more per program than the old default of four. If memory is tight, or the desktop reacts slowly
+while a game runs, add the line `SGX_SLOTS=4` (or `3`) to `/etc/environment` and log in
+again. Games then run a little slower, and a game recording its screen slows down the most.
+Delete the line to go back to the default.
 
 ## Upgrading
 

@@ -19,7 +19,7 @@ SGX family: a new core is added as data in each of them, not as a copy of the co
 
 | Core | ISA | Example hardware | Status |
 |---|---|---|---|
-| SGX545 | USSE | Intel Cedarview (Atom N2600, N2800, D2500, D2550, D2700); Intel Atom CE5300/CE5310 | **Supported** |
+| SGX545 | USSE | Intel Cedarview (Atom N2600, N2800, D2500, D2550, D2700); Intel Atom CE5300/CE5310; Intel Clover Trail (Atom Z2760) | **Supported** |
 | SGX530 | USSE | TI OMAP3 (OMAP3430, OMAP3630, DM3730), TI AM335x and AM3517 | **In bring-up** on an OMAP3630 board: the kernel driver finds and powers the core and reads its ID; the microkernel does not start yet |
 | SGX535 | USSE | Intel Poulsbo (GMA 500, Atom Z5xx) | Wanted |
 | SGX540 | USSE | TI OMAP4430/4460, Ingenic JZ4780 | Wanted |
@@ -46,7 +46,8 @@ ported to modern Linux, and our own client library. The new stack does not use t
 
 ## Status
 
-Tested on two CE5300 boards and, by testers, on Cedarview computers.
+Tested on two CE5300 boards and, by testers, on Cedarview computers. A contributor runs it on a
+Clover Trail tablet (HP ElitePad 900, Atom Z2760): see `docs/porting/cores/clovertrail.md`.
 
 - **OpenGL ES 2.0:** dEQP-GLES2 passes 16,587 tests with 129 failures, 0 GPU hangs and 0 resets
   on our kernel driver and microkernel. That is no test worse than the same Mesa on Intel's

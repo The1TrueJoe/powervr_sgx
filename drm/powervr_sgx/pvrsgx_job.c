@@ -50,6 +50,10 @@
 static unsigned int job_timeout_ms = 2000;
 module_param(job_timeout_ms, uint, 0444);
 MODULE_PARM_DESC(job_timeout_ms, "How long a job may run before the GPU is reset (default 2000 ms)");
+static int cpu_latency_us = -1;
+module_param(cpu_latency_us, int, 0444);
+MODULE_PARM_DESC(cpu_latency_us,
+		 "CPU latency limit while jobs are in flight, in us (-1, the default: the core's own, 50 on Cedarview, none elsewhere; 0: none)");
 
 /*
  * Two jobs on the GPU at once, so one render's TA runs while another's 3D
@@ -445,9 +449,12 @@ static enum drm_gpu_sched_stat pvrsgx_timedout_job(struct drm_sched_job *sched_j
 		drm_err(&sdev->base, "job page fault at 0x%08x (BIF status 0x%08x); resetting\n",
 			sgx_rd(sdev, SGX_CR_BIF_FAULT) & sdev->cr->bif_fault_addr,
 			sgx_rd(sdev, SGX_CR_BIF_INT_STAT));
-	else
-		drm_err(&sdev->base, "job timed out (ccb %llu, consumed %llu); resetting\n",
-			bad->ccb_seq, pvrsgx_ccb_consumed(sdev));
+	else	/* the done word: did the firmware ever finish it? */
+		drm_err(&sdev->base,
+			"job timed out (ccb %llu, consumed %llu, done word 0x%x for 0x%x, events 0x%08x/0x%08x); resetting\n",
+			bad->ccb_seq, pvrsgx_ccb_consumed(sdev),
+			bad->done_cpu ? READ_ONCE(*bad->done_cpu) : 0, bad->done_val,
+			sgx_rd(sdev, SGX_CR_EVENT_STATUS), sgx_rd(sdev, SGX_CR_EVENT_STATUS2));
 	WRITE_ONCE(bad->ctx->state, DRM_POWERVR_SGX_CONTEXT_STATE_GUILTY);
 	/* Counted before any fence says so: a client woken by one sees the reset. */
 	WRITE_ONCE(sdev->reset_count, sdev->reset_count + 1);
@@ -643,7 +650,8 @@ int pvrsgx_job_init(struct pvrsgx_device *sdev)
 	spin_lock_init(&sdev->fence_lock);
 	mutex_init(&sdev->reset_lock);
 	INIT_LIST_HEAD(&sdev->active);
-	cpu_latency_init(&sdev->cpu_latency, sdev->core->cpu_latency_us);
+	cpu_latency_init(&sdev->cpu_latency,
+			 cpu_latency_us < 0 ? sdev->core->cpu_latency_us : cpu_latency_us);
 	INIT_DELAYED_WORK(&sdev->poll_work, poll_work_fn);
 	INIT_WORK(&sdev->reap_work, reap_work_fn);
 	sdev->wq = alloc_workqueue("powervr_sgx", WQ_MEM_RECLAIM | WQ_UNBOUND | WQ_HIGHPRI, 0);

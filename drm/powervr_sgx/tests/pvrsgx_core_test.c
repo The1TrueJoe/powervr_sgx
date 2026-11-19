@@ -11,11 +11,25 @@ static void core_test_lookup(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, f);
 	KUNIT_EXPECT_STREQ(test, pvrsgx_core_lookup(f, 0x01150000, 0x0001000e)->name,
-			   "Intel CE5300 (SGX545 1.0.14)");
+			   "SGX545 1.0.14");
 	KUNIT_EXPECT_STREQ(test, pvrsgx_core_lookup(f, 0x01150000, 0x0001000d)->name,
 			   "Intel Cedarview (SGX545 1.0.13)");
 	KUNIT_EXPECT_NULL(test, pvrsgx_core_lookup(f, 0x01150000, 0x0001000c));
 	KUNIT_EXPECT_NULL(test, pvrsgx_core_lookup(f, 0x01120000, 0x0001000e));
+}
+
+/*
+ * A window with no core behind it reads 0 or ~0, and CORE_ID is compared whole:
+ * neither may be taken for a part.
+ */
+static void core_test_empty_window(struct kunit *test)
+{
+	const struct pvrsgx_core_family *f = pvrsgx_core_family_get(545);
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_EXPECT_NULL(test, pvrsgx_core_lookup(f, 0x01150002, 0x0001000e));
+	KUNIT_EXPECT_NULL(test, pvrsgx_core_lookup(f, 0x01150000, 0xffffffff));
+	KUNIT_EXPECT_NULL(test, pvrsgx_core_lookup(f, 0x01150000, 0));
 }
 
 static void core_test_unknown(struct kunit *test)
@@ -122,6 +136,7 @@ static void core_test_cpu_latency(struct kunit *test)
 
 static struct kunit_case pvrsgx_core_test_cases[] = {
 	KUNIT_CASE(core_test_lookup),
+	KUNIT_CASE(core_test_empty_window),
 	KUNIT_CASE(core_test_unknown),
 	KUNIT_CASE(core_test_table),
 	KUNIT_CASE(core_test_sgx545_values),

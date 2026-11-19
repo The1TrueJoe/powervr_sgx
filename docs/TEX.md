@@ -677,6 +677,18 @@ rectangle of a twiddled texture takes three blits:
 
 `sgxtex_blit_build_rect` refuses the single-blit case (returns −1).
 
+**Non-square twiddled render targets under 16 on a side land scrambled.**
+Rendered into (a draw, not the transfer queue), a 16x2, 2x16 or 16x4
+twiddled texture reads back with most texels in the wrong place or zero:
+10 of each 16x2 tile's 16 texels wrong, 3072 of 4096 sampled pixels for
+16x4. Square ones (8x8, 4x4) and 16x16 come out right. The sampler's tiles
+are min(w, h) square (section 1); the PBE's are not. The open driver lays
+out 2D textures that may be rendered into, with a side under 16 and more
+than one row, linear (as NPOT ones are), and sampling a linear texture with
+`GL_REPEAT` wraps correctly at these sizes [hardware, open driver: a CE5300
+board, 2026-11-16, `sgx_gamefix rtsmall`,
+`docs/log/entries/2026-11-16-2300-small-rt-linear.md`].
+
 **Proven on a CE5300 board** (`blitest`, `check_blit.py`): every destination byte is
 predicted, with no SGX recovery in any run.
 

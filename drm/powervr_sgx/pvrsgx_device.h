@@ -118,6 +118,12 @@ struct pvrsgx_fw {
 	u32 n_patches;
 };
 
+/* Display engine interrupt registers (gma500 psb_drv.h) and the SGX's bit. */
+#define PVRSGX_VDC_INT_ENABLE		0x20A0
+#define PVRSGX_VDC_INT_IDENTITY		0x20A4
+#define PVRSGX_VDC_INT_MASK		0x20A8
+#define PVRSGX_VDC_IRQ_SGX		BIT(18)
+
 /**
  * struct pvrsgx_device - The SGX545
  */
@@ -133,9 +139,13 @@ struct pvrsgx_device {
 
 	/** @regs: The core registers (BAR 0). */
 	void __iomem *regs;
+	/** @vdc: The display engine's registers when it carries the SGX's interrupt, or NULL. */
+	void __iomem *vdc;
 	/** @irq: Its interrupt. */
 	int irq;
 
+	/** @part: This board's part: its window's place and its power. */
+	const struct pvrsgx_part *part;
 	/** @family: The core the bus says is there, set before the probe reads a register. */
 	const struct pvrsgx_core_family *family;
 	/** @cr: Its registers that move between cores (@family's). */
@@ -211,6 +221,21 @@ struct pvrsgx_device {
 	struct list_head active;
 	/** @last_fence: Hardware fence of the job last sent to the firmware. */
 	struct dma_fence *last_fence;
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+	/** @dbg_render: The last render submitted, for debugfs "render". */
+	struct pvrsgx_render_dbg {
+		/** @dbg_render.lock: Protects the fields below. */
+		spinlock_t lock;
+		/** @dbg_render.rtds: Its dataset, a reference. */
+		struct pvrsgx_rt_dataset *rtds;
+		/** @dbg_render.kicked: The dataset of the last kick written; never dereferenced. */
+		const void *kicked;
+		/** @dbg_render.cmd_off: That kick's TA command in its context's ring. */
+		u32 cmd_off;
+		/** @dbg_render.entry: That kick's RT-data entry. */
+		u32 entry;
+	} dbg_render;
+#endif
 	/**
 	 * @wq: Runs @poll_work, which signals fences: the queue has a rescuer
 	 * and never waits on memory reclaim.
@@ -275,6 +300,11 @@ struct pvrsgx_device {
 
 	/** @irq_count: SW_EVENT interrupts taken (debugfs). */
 	atomic_t irq_count;
+	/**
+	 * @irq_late: SW_EVENTs found by looking again after clearing the
+	 * display's latch, which no MSI of their own announced (debugfs).
+	 */
+	atomic_t irq_late;
 	/** @pm_pinned: Runtime PM is held active (single-context bring-up). */
 	bool pm_pinned;
 	/** @cpu_latency: The core's CPU latency limit while jobs are in flight. */
@@ -391,5 +421,13 @@ void pvrsgx_irq_sync(struct pvrsgx_device *sdev);
 void pvrsgx_reset(struct pvrsgx_device *sdev, bool recovery);
 int pvrsgx_poll(struct pvrsgx_device *sdev, const u32 *addr, u32 mask, u32 val,
 		unsigned int timeout_us);
+
+/* The SGX's clock: the part's when it names one, else the core entry's. */
+static inline u32 pvrsgx_clock_hz(const struct pvrsgx_device *sdev)
+{
+	if (sdev->part && sdev->part->clock_hz)
+		return sdev->part->clock_hz;
+	return sdev->core->clock_hz;
+}
 
 #endif /* PVRSGX_DEVICE_H */

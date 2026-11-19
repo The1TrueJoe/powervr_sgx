@@ -20,7 +20,19 @@ on:
         description: Kernel version (default 7.3.3)
         default: ''
   push:
-    branches: [m2-drm]
+    branches: [dev, m2-drm]
+    paths:
+      - drm/**
+      - docs/uapi/**
+      - tools/gen/sgxgen.*
+      - tools/tex/sgxtex.*
+      - mesa/src/sgx/isa/sgx.xml
+      - tools/isa/asm.py
+      - tools/gen/mkusse.py
+      - .github/workflows/powervr-sgx.yml
+  # pull requests run it themselves (no test branches)
+  pull_request:
+    branches: [dev, m2-drm, main]
     paths:
       - drm/**
       - docs/uapi/**

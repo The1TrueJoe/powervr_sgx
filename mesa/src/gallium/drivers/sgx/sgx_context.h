@@ -86,8 +86,13 @@ struct sgx_pipe_shader {
    /* constants past sa127 (the compiler's ld.a.d): a block of mem_dwords per
     * draw, its address + 512 * j in SA slot mem_base_slot[j] */
    unsigned mem_dwords, n_mem_bases;
-   uint8_t mem_base_slot[8];
+   uint8_t mem_base_slot[SGX_MAX_MEM_BASES];
    unsigned n_attribs; /* vertex: attribute slots, 4 dwords each */
+   /* vertex: gl_VertexID's attribute slot + 1 (0: not read), an input the
+    * draw gathers itself (sgx_program.c lower_vertex_id), as a raw integer
+    * under native integers, otherwise a float */
+   unsigned vertex_id_slot;
+   bool vertex_id_int;
    /* fragment: the shader's code, kept for the blend variants (the colour
     * epilogue is the blend, sgxws_blend) */
    uint64_t *code; /* with the dependent samples' smp put in */
@@ -170,10 +175,16 @@ struct sgx_dsa {
    struct pipe_depth_stencil_alpha_state base;
 };
 
+/* a render target's blend in a draw's pass for it (sgx_blend_rt): each pass
+ * has its own colour epilogue, so each target may blend and mask its own way
+ * (indep_blend_enable, indep_blend_func: GL_EXT_draw_buffers2,
+ * GL_ARB_draw_buffers_blend) */
+#define SGX_BLEND_RTS 8
+
 struct sgx_blend {
    struct pipe_blend_state base;
-   bool enable;              /* render target 0 blends, in a way sop2 can */
-   struct sgxws_blend hw[2]; /* by whether the colour buffer has alpha */
+   bool enable[SGX_BLEND_RTS]; /* the target blends, in a way sop2 can */
+   struct sgxws_blend hw[SGX_BLEND_RTS][2]; /* by whether it has alpha */
 };
 
 /* one render target's TA/3D structures, by size (sgxws_rt) */
@@ -279,6 +290,14 @@ struct sgx_context {
    bool warned_shader, warned_prim, warned_blend, warned_varyings, warned_cube,
       warned_frag_depth;
 };
+
+/* the blend state's render target for the pass being drawn (rt_index) */
+static inline unsigned
+sgx_blend_rt(const struct sgx_blend *b, unsigned rt_index)
+{
+   return b && b->base.independent_blend_enable ? MIN2(rt_index, SGX_BLEND_RTS - 1)
+                                                : 0;
+}
 
 static inline struct sgx_context *
 sgx_context(struct pipe_context *pctx)

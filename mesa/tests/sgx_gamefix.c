@@ -24,6 +24,21 @@
  *   npot     a 60x44 texture sampled over the target, plainly and at a
  *            computed coordinate
  *   rtnpot   the same of a 60x44 texture rendered into first
+ *   rtsmall  16x2, 2x16, 8x8, 4x4, 16x4 and 16x16 textures rendered into (each
+ *            texel its coordinates), then tiled over the target with GL_REPEAT
+ *            (glamor's window-border pieces, issue #13)
+ *   subimg   a sampled 128x128 texture updated by rows and small rectangles
+ *            between draws, every texel checked; the time an update takes
+ *   drawbuffers2  four colour buffers, a colour mask each for a clear and a
+ *            draw, blending on one: GL_EXT_draw_buffers2, ARB_draw_buffers_blend
+ *   copyx    an RGB FBO, and then the default framebuffer, green with alpha 0
+ *            written, copied into an RGBA texture with glCopyTexSubImage2D and
+ *            drawn blended (SRC_ALPHA) over red: an RGB source's alpha is 1, so
+ *            green, unless the framebuffer has alpha (red) (Minecraft's
+ *            title-screen panorama copies its XRGB window this way: run it with
+ *            SGX_GAMEFIX_RGBX=1)
+ *   bigfbo   blended full-target frames into 2048x1200 and 1448x848 FBOs: the
+ *            time a frame takes (run it and look for job timeouts)
  *
  *   sgx_gamefix [part...]
  *
@@ -35,6 +50,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #define EGL_EGL_PROTOTYPES 0
 #define GL_GLEXT_PROTOTYPES 1
 #include <EGL/egl.h>
@@ -67,7 +83,7 @@ L(const char *n)
    X(glClear)                                                                  \
    X(glClearColor)                                                             \
    X(glClearDepth)                                                             \
-   X(glCompileShader)                                                          \
+   X(glCompileShader) X(glCopyTexSubImage2D)                                                          \
    X(glCreateProgram)                                                          \
    X(glCreateShader)                                                           \
    X(glDeleteBuffers)                                                          \
@@ -95,6 +111,10 @@ L(const char *n)
    X(glShaderSource)                                                           \
    X(glTexImage2D)                                                             \
    X(glTexImage3D)                                                             \
+   X(glTexSubImage2D)                                                          \
+   X(glBlendFunc)                                                              \
+   X(glDrawBuffers)                                                            \
+   X(glReadBuffer)                                                             \
    X(glTexParameteri)                                                          \
    X(glUniform1f)                                                              \
    X(glUniform1i)                                                              \
@@ -586,6 +606,102 @@ blit_part(const char *name)
    }
 }
 
+/* glCopyTexSubImage2D from an RGB (X8) framebuffer into an RGBA texture: the
+ * copy's alpha is 1 (GL), whatever the X byte holds */
+static void
+want_green(unsigned x, unsigned y, float c[4])
+{
+   (void)x;
+   (void)y;
+   c[0] = 0;
+   c[1] = 255;
+   c[2] = 0;
+   c[3] = 255;
+}
+
+static bool copyx_red;
+
+static void
+want_copyx(unsigned x, unsigned y, float c[4])
+{
+   want_green(x, y, c);
+   if (copyx_red) {
+      c[0] = 255;
+      c[1] = 0;
+   }
+}
+
+/* the bound texture filled from the bound read framebuffer, then drawn over red */
+static void
+copyx_draw(GLuint p, GLuint dst, const char *name)
+{
+   glBindTexture_(GL_TEXTURE_2D, dst);
+   glCopyTexSubImage2D_(GL_TEXTURE_2D, 0, 0, 0, 0, 0, S, S);
+   glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+   glViewport_(0, 0, S, S);
+   glClearColor_(1, 0, 0, 1);
+   glClear_(GL_COLOR_BUFFER_BIT);
+   glUniform1i_(glGetUniformLocation_(p, "t"), 0);
+   glUniform1f_(glGetUniformLocation_(p, "a"), -1.0f);
+   glEnable_(GL_BLEND);
+   glBlendFunc_(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+   fullscreen();
+   glDisable_(GL_BLEND);
+   result(name, check(name, want_copyx, 1), S * S);
+}
+
+static void
+copyx(void)
+{
+   const char *fs = "#version 110\n"
+                    "uniform sampler2D t;\n"
+                    "uniform float a;\n"
+                    "varying vec2 uv;\n"
+                    "void main() {\n"
+                    "   gl_FragColor = a < 0.0 ? texture2D(t, uv) : vec4(0.0, 1.0, 0.0, a);\n"
+                    "}\n";
+   GLuint fb, src, dst;
+   GLuint p = program(vs_uv, fs);
+
+   glGenFramebuffers_(1, &fb);
+   glBindFramebuffer_(GL_FRAMEBUFFER, fb);
+   glGenTextures_(1, &src);
+   glBindTexture_(GL_TEXTURE_2D, src);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGB8, S, S, 0, GL_RGB, GL_UNSIGNED_BYTE,
+                 NULL);
+   glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           src, 0);
+   if (glCheckFramebufferStatus_(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+      printf("copyx: RGB framebuffer incomplete\n");
+   glViewport_(0, 0, S, S);
+   /* green, its alpha 0 cleared and drawn: what lands in the X byte */
+   glClearColor_(0, 1, 0, 0);
+   glClear_(GL_COLOR_BUFFER_BIT);
+   glUniform1f_(glGetUniformLocation_(p, "a"), 0.0f);
+   fullscreen();
+
+   glGenTextures_(1, &dst);
+   glBindTexture_(GL_TEXTURE_2D, dst);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 NULL);
+   copyx_red = false;
+   copyx_draw(p, dst, "copyx fbo");
+
+   /* the default framebuffer as the source, as a game copies its window */
+   glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+   glViewport_(0, 0, S, S);
+   glClearColor_(0, 1, 0, 0);
+   glClear_(GL_COLOR_BUFFER_BIT);
+   glUniform1f_(glGetUniformLocation_(p, "a"), 0.0f);
+   fullscreen();
+   copyx_red = !noalpha_fb;
+   copyx_draw(p, dst, noalpha_fb ? "copyx window (RGBX)" : "copyx window (RGBA)");
+}
+
 static void
 blit(void)
 {
@@ -728,6 +844,309 @@ rtnpot(void)
    }
 }
 
+/* rtsmall: small power-of-two textures rendered into (each texel its own
+ * coordinates), then sampled over the 64x64 target with GL_REPEAT, a texel a
+ * pixel: X's glamor draws window-border pieces (16x2, 2x36) into pixmaps and
+ * tiles them (issue #13) */
+static unsigned sw, sh;
+
+static void
+want_rtsmall(unsigned x, unsigned y, float c[4])
+{
+   c[0] = ((x % sw) + 0.5f) / 16.0f * 255.0f;
+   c[1] = ((y % sh) + 0.5f) / 16.0f * 255.0f;
+   c[2] = 127.5f;
+   c[3] = 255.0f;
+}
+
+static void
+rtsmall(void)
+{
+   static const unsigned sizes[][2] = {{16, 2}, {2, 16}, {8, 8}, {4, 4}, {16, 4}, {16, 16}};
+   const char *mark = "#version 110\n"
+                      "void main() {\n"
+                      "   gl_FragColor = vec4(gl_FragCoord.xy / 16.0, 0.5, 1.0);\n"
+                      "}\n";
+   const char *tile = "#version 110\n"
+                      "uniform sampler2D t;\n"
+                      "uniform vec2 size;\n"
+                      "void main() { gl_FragColor = texture2D(t, gl_FragCoord.xy / size); }\n";
+   char name[32];
+
+   for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+      GLuint t;
+
+      sw = sizes[i][0];
+      sh = sizes[i][1];
+      fbw = sw;
+      fbh = sh;
+      fbo(&t, false);
+      program(vs_uv, mark);
+      fullscreen();
+      fbw = fbh = S;
+      fbo(NULL, false);
+      glActiveTexture_(GL_TEXTURE0);
+      glBindTexture_(GL_TEXTURE_2D, t);
+      glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+      glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+      GLuint p = program(vs_uv, tile);
+      glUniform1i_(glGetUniformLocation_(p, "t"), 0);
+      glUniform2f_(glGetUniformLocation_(p, "size"), (float)sw, (float)sh);
+      fullscreen();
+      snprintf(name, sizeof(name), "rtsmall %ux%u", sw, sh);
+      result(name, check(name, want_rtsmall, 2), S * S);
+   }
+}
+
+static double
+now_ms(void)
+{
+   struct timespec ts;
+
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
+/* subimg: a 128x128 texture the GPU samples, updated between draws with
+ * rows the width of the texture a few high (as Quake's lightmaps are) and
+ * small odd rectangles, then every texel checked; and the time an update
+ * takes */
+#define SW 128
+
+static unsigned char sub_model[SW * SW * 4];
+
+static void
+sub_texel(unsigned x, unsigned y, unsigned r, unsigned char *c)
+{
+   c[0] = (x * 2 + r * 31) & 0xff;
+   c[1] = (y * 2 + r * 17) & 0xff;
+   c[2] = (x ^ y ^ (r * 5)) & 0xff;
+   c[3] = 255;
+}
+
+static void
+sub_fill(unsigned x0, unsigned y0, unsigned w, unsigned h, unsigned r,
+         unsigned char *buf)
+{
+   for (unsigned y = 0; y < h; y++)
+      for (unsigned x = 0; x < w; x++) {
+         sub_texel(x0 + x, y0 + y, r, &buf[(y * w + x) * 4]);
+         memcpy(&sub_model[((y0 + y) * SW + x0 + x) * 4], &buf[(y * w + x) * 4], 4);
+      }
+}
+
+static void
+subimg(void)
+{
+   static unsigned char buf[SW * SW * 4], px[SW * SW * 4];
+   const char *fs = "#version 110\n"
+                    "uniform sampler2D t;\n"
+                    "varying vec2 uv;\n"
+                    "void main() { gl_FragColor = texture2D(t, uv); }\n";
+   double band_ms = 0;
+   unsigned bands = 0, bad = 0;
+   GLuint t;
+
+   fbw = fbh = SW;
+   fbo(NULL, false);
+   fbw = fbh = S;
+   GLuint p = program(vs_uv, fs);
+   glActiveTexture_(GL_TEXTURE0);
+   glGenTextures_(1, &t);
+   glBindTexture_(GL_TEXTURE_2D, t);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   sub_fill(0, 0, SW, SW, 0, buf);
+   glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, SW, SW, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, buf);
+   glUniform1i_(glGetUniformLocation_(p, "t"), 0);
+   fullscreen();
+   /* the time an update takes, the texture idle (its copy no render reads,
+    * as a game's lightmap is by the time it's updated again) */
+   glFinish_();
+   for (unsigned r = 1; r <= 200; r++) {
+      unsigned y = (r * 13) % (SW - 16);
+
+      sub_fill(0, y, SW, 16, r, buf);
+      double t0 = now_ms();
+      glTexSubImage2D_(GL_TEXTURE_2D, 0, 0, y, SW, 16, GL_RGBA,
+                       GL_UNSIGNED_BYTE, buf);
+      band_ms += now_ms() - t0;
+      bands++;
+   }
+   /* and correct under renders that read it (the second copy) */
+   for (unsigned r = 201; r <= 260; r++) {
+      unsigned y = (r * 13) % (SW - 5), x = (r * 29) % (SW - 4) + 1;
+
+      sub_fill(0, y, SW, 5, r, buf);
+      glTexSubImage2D_(GL_TEXTURE_2D, 0, 0, y, SW, 5, GL_RGBA,
+                       GL_UNSIGNED_BYTE, buf);
+      sub_fill(x, (r * 7) % (SW - 3), 3, 3, r + 1000, buf);
+      glTexSubImage2D_(GL_TEXTURE_2D, 0, x, (r * 7) % (SW - 3), 3, 3, GL_RGBA,
+                       GL_UNSIGNED_BYTE, buf);
+      fullscreen(); /* the texture is in use by the next update */
+   }
+   glReadPixels_(0, 0, SW, SW, GL_RGBA, GL_UNSIGNED_BYTE, px);
+   for (unsigned i = 0; i < SW * SW; i++)
+      if (memcmp(&px[i * 4], &sub_model[i * 4], 4)) {
+         if (bad < 4)
+            printf("subimg: texel (%u,%u) = %u,%u,%u, want %u,%u,%u\n",
+                   i % SW, i / SW, px[i * 4], px[i * 4 + 1], px[i * 4 + 2],
+                   sub_model[i * 4], sub_model[i * 4 + 1], sub_model[i * 4 + 2]);
+         bad++;
+      }
+   printf("subimg: %.3f ms a %ux16 update of an idle texture (%u updates)\n",
+          band_ms / bands, SW, bands);
+   result("subimg", bad, SW * SW);
+}
+
+/* bigfbo: frames of 30 blended full-target quads into a 2048x1200 FBO and a
+ * 1448x848 one, each frame waited for: the time a frame takes, and whether
+ * the GPU gets through them (dmesg: job timeouts) */
+static void
+bigfbo(void)
+{
+   const char *fs = "#version 110\n"
+                    "uniform sampler2D t;\n"
+                    "varying vec2 uv;\n"
+                    "void main() {\n"
+                    "   gl_FragColor = 0.25 * (texture2D(t, uv) + texture2D(t, uv.yx) +\n"
+                    "      texture2D(t, uv * 2.0) + texture2D(t, 1.0 - uv)) * 0.1;\n"
+                    "}\n";
+   static const int sz[2][2] = {{1448, 848}, {2048, 1200}};
+
+   for (unsigned k = 0; k < 2; k++) {
+      double worst = 0, sum = 0;
+      const unsigned frames = 60;
+
+      fbw = sz[k][0];
+      fbh = sz[k][1];
+      fbo(NULL, true);
+      GLuint p = program(vs_uv, fs);
+      glActiveTexture_(GL_TEXTURE0);
+      pattern(0);
+      glUniform1i_(glGetUniformLocation_(p, "t"), 0);
+      glEnable_(GL_BLEND);
+      glBlendFunc_(GL_ONE, GL_ONE);
+      for (unsigned f = 0; f < frames; f++) {
+         double t0 = now_ms();
+
+         glClearColor_(0, 0, 0, 1);
+         glClear_(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+         for (unsigned i = 0; i < 30; i++)
+            fullscreen();
+         glFinish_();
+         double ms = now_ms() - t0;
+         sum += ms;
+         worst = ms > worst ? ms : worst;
+      }
+      glDisable_(GL_BLEND);
+      printf("bigfbo %dx%d: %.1f ms a frame, worst %.1f ms\n", fbw, fbh,
+             sum / frames, worst);
+      result(k ? "bigfbo 2048x1200" : "bigfbo 1448x848",
+             glGetError_() != GL_NO_ERROR, 1);
+   }
+   fbw = fbh = S;
+}
+
+/* drawbuffers2: four colour buffers, each with its own colour mask
+ * (glColorMaskIndexedEXT, GL_EXT_draw_buffers2) for a clear and a draw, and
+ * blending on the last one only (glEnableIndexedEXT, glBlendFunciARB): every
+ * channel of every buffer checked (Portal and other Source games, issue #5) */
+static void
+drawbuffers2(void)
+{
+   const char *ext = (const char *)glGetString_(GL_EXTENSIONS);
+   if (!strstr(ext, "GL_EXT_draw_buffers2") ||
+       !strstr(ext, "GL_ARB_draw_buffers_blend")) {
+      printf("drawbuffers2: GL_EXT_draw_buffers2 %s, GL_ARB_draw_buffers_blend %s\n",
+             strstr(ext, "GL_EXT_draw_buffers2") ? "yes" : "no",
+             strstr(ext, "GL_ARB_draw_buffers_blend") ? "yes" : "no");
+      result("drawbuffers2 offered", 1, 1);
+      return;
+   }
+   void (*mask_i)(GLuint, GLboolean, GLboolean, GLboolean, GLboolean) =
+      L("glColorMaskIndexedEXT");
+   void (*enable_i)(GLenum, GLuint) = L("glEnableIndexedEXT");
+   void (*disable_i)(GLenum, GLuint) = L("glDisableIndexedEXT");
+   void (*blendfunc_i)(GLuint, GLenum, GLenum) = L("glBlendFunciARB");
+   const char *fs = "#version 110\n"
+                    "void main() {\n"
+                    "   gl_FragData[0] = vec4(0.8, 0.2, 0.4, 0.6);\n"
+                    "   gl_FragData[1] = vec4(0.6, 0.8, 0.2, 0.4);\n"
+                    "   gl_FragData[2] = vec4(0.4, 0.6, 0.8, 0.2);\n"
+                    "   gl_FragData[3] = vec4(0.2, 0.4, 0.6, 0.8);\n"
+                    "}\n";
+   static const float c[4][4] = {{0.8f, 0.2f, 0.4f, 0.6f},
+                                 {0.6f, 0.8f, 0.2f, 0.4f},
+                                 {0.4f, 0.6f, 0.8f, 0.2f},
+                                 {0.2f, 0.4f, 0.6f, 0.8f}};
+   static const float A[4] = {0.1f, 0.2f, 0.3f, 0.4f}, B[4] = {0.9f, 0.7f, 0.5f, 0.3f};
+   /* the masks: all, R, none, G and A */
+   static const bool M[4][4] = {{1, 1, 1, 1}, {1, 0, 0, 0}, {0, 0, 0, 0}, {0, 1, 0, 1}};
+   const GLenum bufs[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                           GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+   GLuint fb, t[4];
+   float want[4][4];
+   unsigned bad = 0;
+
+   glGenFramebuffers_(1, &fb);
+   glBindFramebuffer_(GL_FRAMEBUFFER, fb);
+   glGenTextures_(4, t);
+   for (unsigned i = 0; i < 4; i++) {
+      glBindTexture_(GL_TEXTURE_2D, t[i]);
+      glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA,
+                    GL_UNSIGNED_BYTE, NULL);
+      glFramebufferTexture2D_(GL_FRAMEBUFFER, bufs[i], GL_TEXTURE_2D, t[i], 0);
+   }
+   glDrawBuffers_(4, bufs);
+   glViewport_(0, 0, S, S);
+   program(vs_uv, fs);
+   glClearColor_(A[0], A[1], A[2], A[3]);
+   glClear_(GL_COLOR_BUFFER_BIT);
+   for (unsigned i = 0; i < 4; i++)
+      mask_i(i, M[i][0], M[i][1], M[i][2], M[i][3]);
+   glClearColor_(B[0], B[1], B[2], B[3]);
+   glClear_(GL_COLOR_BUFFER_BIT);
+   for (unsigned i = 0; i < 4; i++)
+      for (unsigned k = 0; k < 4; k++)
+         want[i][k] = M[i][k] ? B[k] : A[k];
+   /* blending on buffer 3 only, adding */
+   for (unsigned i = 0; i < 3; i++)
+      disable_i(GL_BLEND, i);
+   enable_i(GL_BLEND, 3);
+   blendfunc_i(3, GL_ONE, GL_ONE);
+   fullscreen();
+   for (unsigned i = 0; i < 4; i++)
+      for (unsigned k = 0; k < 4; k++)
+         if (M[i][k])
+            want[i][k] = i == 3 ? (want[i][k] + c[i][k] > 1 ? 1 : want[i][k] + c[i][k])
+                                : c[i][k];
+   for (unsigned i = 0; i < 4; i++) {
+      static unsigned char px[S * S * 4];
+
+      glReadBuffer_(bufs[i]);
+      glReadPixels_(0, 0, S, S, GL_RGBA, GL_UNSIGNED_BYTE, px);
+      for (unsigned p = 0; p < S * S; p++)
+         for (unsigned k = 0; k < 4; k++) {
+            int d = (int)px[p * 4 + k] - (int)(want[i][k] * 255 + 0.5f);
+            if (d > 2 || d < -2) {
+               if (bad < 4)
+                  printf("drawbuffers2: buffer %u channel %u = %u, want %.0f\n",
+                         i, k, px[p * 4 + k], want[i][k] * 255);
+               bad++;
+               p = S * S;
+               break;
+            }
+         }
+   }
+   for (unsigned i = 0; i < 4; i++)
+      mask_i(i, 1, 1, 1, 1);
+   disable_i(GL_BLEND, 3);
+   result("drawbuffers2", bad, 4);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -799,7 +1218,12 @@ main(int argc, char **argv)
                 {"blit", blit},
                 {"blitnpot", blitnpot},
                 {"npot", npot},
-                {"rtnpot", rtnpot}};
+                {"rtnpot", rtnpot},
+                {"rtsmall", rtsmall},
+                {"subimg", subimg},
+                {"copyx", copyx},
+                {"bigfbo", bigfbo},
+                {"drawbuffers2", drawbuffers2}};
    for (unsigned i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
       bool on = argc < 2;
       for (int a = 1; a < argc; a++)

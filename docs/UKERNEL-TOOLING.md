@@ -16,7 +16,7 @@ byte-for-byte regression check.
 
 | core | USSE | notes |
 |---|---|---|
-| SGX545 | USSE1 | shipping; CE5300 (rev 1.0.14) and Cedarview (rev 1.0.13) |
+| SGX545 | USSE1 | shipping; CE5300 and Clover Trail (rev 1.0.14), Cedarview (rev 1.0.13) |
 | SGX535 | USSE1 | next; the original SGX, single pipe |
 | SGX530 / SGX540 | USSE1 | later; low-end variants |
 | SGX543 / SGX544 / SGX554 | USSE2 | later; dual USC, MP configurations |

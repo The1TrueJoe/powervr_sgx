@@ -271,8 +271,20 @@ The draw is six words:
 - **The TA terminate's USSE task (`0x3c000000`) is the same program for two
   dwords** (`mov o0, pa0 [rcnt rpt=2]`). It forwards the two attributes the
   terminate's DOUTAs wrote: pa0 = 0x2000 (ctrl 0) and pa1 = 0x0016000e
-  (ctrl 0x100, written three times). What those two words mean, and whether
-  the three repeats are needed, is [guess].
+  (ctrl 0x100, written three times). pa1 bounds the region the terminate
+  closes. The DDK's 720x480 value fits `(32-pixel columns - 1) << 16 |
+  (32-pixel rows - 1)` (23 and 15) [capture], but on the hardware 0x0016000e
+  closes 1440x960: with it, a quad over the whole of a 1448x848, 1920x1080 or
+  2048x1200 target comes out wrong right of x = 1440 and above y = 960, and
+  1280x720 is right [hardware, open driver]. So the unit is nearer 64 pixels
+  [guess]. Tiles outside the region are not closed: their pixels are not
+  drawn as they should be, and the DPM keeps their pages counted in use
+  (0x724, 0x728) after the render, 82 of a 2048x1200 scene's 153, until the
+  TA's thresholds fire. The formula above, applied to the target, covers every
+  size tried (up to 2048x1200) and leaves the count 0 after every render
+  [hardware, open driver: a CE5300 board, 2026-11-15,
+  `docs/log/entries/2026-11-15-2015-terminate-region.md`]. pa0, the exact
+  unit, and whether the three repeats are needed, are [guess].
 - **The vertex secondary task (`0x3c000080`) is one instruction,**
   `phas.i #0, #0 [end wait=7]` (`fa4c0700 00000000`): the DMA itself loads
   the secondary attributes, and nothing is forwarded.

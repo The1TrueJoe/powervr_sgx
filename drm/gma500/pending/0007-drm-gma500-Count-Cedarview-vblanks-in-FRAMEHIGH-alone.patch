@@ -1,0 +1,44 @@
+From: Joseph Telaak <joseph@telaak.dev>
+Subject: [PATCH] drm/gma500: Count Cedarview vblanks in FRAMEHIGH alone
+
+gma_crtc_get_vblank_counter() builds the count as FRAMEHIGH << 8 |
+the frame byte of FRAMEPIXEL. On Cedarview that byte stays 0 and
+FRAMEHIGH alone counts frames, one a vblank (pipe B of an Atom N2600),
+so the DRM vblank count advanced by 256 a vblank. Clients pacing with
+it (GLX_OML_sync_control's MSC, glXSwapBuffersMscOML) saw every frame
+as 255 vblanks late and ran unpaced.
+
+On Cedarview, count FRAMEHIGH's 16 bits and say so in
+max_vblank_count.
+---
+--- a/drivers/gpu/drm/gma500/psb_drv.c
++++ b/drivers/gpu/drm/gma500/psb_drv.c
+@@ -396,7 +396,8 @@ static int psb_driver_load(struct drm_device *dev, unsigned long flags)
+ 	if (dev_priv->ops->sgx)
+ 		gma_sgx_aux_init(dev);
+ 
+-	dev->max_vblank_count = 0xffffff; /* only 24 bits of frame count */
++	/* 24 bits of frame count; Cedarview counts in FRAMEHIGH's 16 alone */
++	dev->max_vblank_count = IS_CDV(dev) ? 0xffff : 0xffffff;
+ 
+ 	psb_modeset_init(dev);
+ 	drm_kms_helper_poll_init(dev);
+--- a/drivers/gpu/drm/gma500/psb_irq.c
++++ b/drivers/gpu/drm/gma500/psb_irq.c
+@@ -497,7 +497,15 @@ u32 gma_crtc_get_vblank_counter(struct drm_crtc *crtc)
+ 			 PIPE_FRAME_HIGH_SHIFT);
+ 	} while (high1 != high2);
+ 
+-	count = (high1 << 8) | low;
++	/*
++	 * Cedarview's frame counter is FRAMEHIGH alone, a frame a count; its
++	 * FRAMEPIXEL frame byte stays 0, so the high << 8 | low count of the
++	 * others advanced 256 a vblank there.
++	 */
++	if (IS_CDV(dev))
++		count = high1;
++	else
++		count = (high1 << 8) | low;
+ 
+ err_gma_power_end:
+ 	gma_power_end(dev);

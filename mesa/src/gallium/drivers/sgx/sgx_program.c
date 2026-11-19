@@ -377,6 +377,52 @@ lower_instance_id(nir_builder *b, nir_intrinsic_instr *in, void *data)
    return true;
 }
 
+/* gl_VertexID of a vertex program (docs/GL3.md, "Crossing the
+ * driver/compiler line"): not the PDS's in0, as the draw rebases or expands
+ * the indices it gathers, but an extra vertex input the draw fills with the
+ * vertex's own index into the buffers, the base vertex included
+ * (sgx_draw.c fetch_vertex), in the attribute slot after the shader's own */
+struct vertex_id_data {
+   nir_variable *var;
+   bool ints;
+};
+
+static bool
+lower_vertex_id(nir_builder *b, nir_intrinsic_instr *in, void *data)
+{
+   struct vertex_id_data *d = data;
+
+   if (in->intrinsic != nir_intrinsic_load_vertex_id)
+      return false;
+   if (!d->var) {
+      unsigned loc = VERT_ATTRIB_GENERIC0, slot = 0;
+
+      nir_foreach_shader_in_variable (var, b->shader) {
+         loc = MAX2(loc, var->data.location +
+                            glsl_count_attribute_slots(var->type, true));
+         if (var->name)
+            slot = MAX2(slot, var->data.driver_location +
+                                 glsl_count_attribute_slots(var->type, true));
+      }
+      d->var = nir_variable_create(b->shader, nir_var_shader_in,
+                                   d->ints ? glsl_int_type() : glsl_float_type(),
+                                   "sgx_vertex_id");
+      d->var->data.location = loc;
+      d->var->data.driver_location = slot;
+      b->shader->info.inputs_read |= BITFIELD64_BIT(loc);
+   }
+   b->cursor = nir_before_instr(&in->instr);
+   nir_def *v = nir_load_var(b, d->var);
+
+   if (d->ints) {
+      nir_def_replace(&in->def, v);
+      return true;
+   }
+   rewrite_int_as_float(b, &in->def, v);
+   nir_instr_remove(&in->instr);
+   return true;
+}
+
 /*
  * varying -> set location - VAR0, the same on both sides.  Entries are named
  * the way the compiler looks varyings up (sgx_nir.c var_names): st names a
@@ -1201,8 +1247,14 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
                nir_metadata_control_flow, &opts.native_integers);
       NIR_PASS(_, nir, nir_opt_dce);
    } else {
+      struct vertex_id_data vid = {.ints = opts.native_integers};
+
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_instance_id,
                nir_metadata_control_flow, &opts.native_integers);
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_vertex_id,
+               nir_metadata_control_flow, &vid);
+      so->vertex_id_slot = vid.var ? vid.var->data.driver_location + 1 : 0;
+      so->vertex_id_int = vid.ints;
       NIR_PASS(_, nir, nir_opt_dce);
    }
    remap_legacy_varyings(nir);
@@ -1249,8 +1301,14 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
             if (prev == var)
                break;
             if (var->name && prev->name && !strcmp(var->name, prev->name)) {
-               var->name = ralloc_asprintf(var, "%s#%d", var->name,
-                                           var->data.driver_location);
+               /* (a variable isn't a ralloc context: nir_variable_create
+                * takes it from the shader's gc allocator; set_namef frees
+                * the old name first, so it's copied out) */
+               char name[256];
+
+               snprintf(name, sizeof(name), "%s", var->name);
+               nir_variable_set_namef(nir, var, "%s#%d", name,
+                                      var->data.driver_location);
                break;
             }
          }
@@ -1909,12 +1967,26 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
          if (ss && ss->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE)
             compare[unit] = ss->compare_func + 1;
       }
+      /* An X8 colour format is sampled as its alpha twin (sgx_tex_format), so
+       * the X byte would come back as alpha: GL reads it as 1.  The state
+       * tracker's views say so in their swizzle, u_blitter's source views
+       * don't (a CopyTexSubImage from an XRGB window drawn on the GPU took
+       * the X byte, 0, as alpha: Minecraft's title-screen panorama) */
+      unsigned sw[4] = {v->swizzle_r, v->swizzle_g, v->swizzle_b, v->swizzle_a};
+
+      if (util_format_get_blocksize(v->format) == 4 &&
+          !util_format_has_alpha(v->format) &&
+          !util_format_is_depth_or_stencil(v->format) &&
+          util_format_description(v->format)->channel[3].type == UTIL_FORMAT_TYPE_VOID) {
+         for (unsigned c = 0; c < 4; c++)
+            if (sw[c] == PIPE_SWIZZLE_W)
+               sw[c] = PIPE_SWIZZLE_1;
+      }
       /* XYZW: none, 0 */
-      if (v->swizzle_r != PIPE_SWIZZLE_X || v->swizzle_g != PIPE_SWIZZLE_Y ||
-          v->swizzle_b != PIPE_SWIZZLE_Z || v->swizzle_a != PIPE_SWIZZLE_W) {
+      if (sw[0] != PIPE_SWIZZLE_X || sw[1] != PIPE_SWIZZLE_Y ||
+          sw[2] != PIPE_SWIZZLE_Z || sw[3] != PIPE_SWIZZLE_W) {
          /* b15 marks one: XXXX packs to 0 */
-         swz[unit] = 0x8000 | v->swizzle_r | v->swizzle_g << 3 |
-                     v->swizzle_b << 6 | v->swizzle_a << 9;
+         swz[unit] = 0x8000 | sw[0] | sw[1] << 3 | sw[2] << 6 | sw[3] << 9;
          any_swz = true;
       }
    }

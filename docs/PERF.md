@@ -126,7 +126,8 @@ is higher on ours too.
 2. Item 3, from the traces.
 3. `SGX_DEBUG=zerocopy` as the default. It gave +6% walking and -4% standing
    in single runs: take medians first.
-4. Ring depth (`SGX_SLOTS`), once the SLOTS=6 hang is understood.
+4. Ring depth (`SGX_SLOTS`): done, six since 2026-11-16 (below). The SLOTS=6 hang was in
+   the jobs' contents, not the depth (`docs/log/entries/2026-11-08-2040-drm-queue-depth.md`).
 
 ### Measured 2026-11-09: the colour fast paths
 
@@ -787,8 +788,14 @@ overlap. The DDK's hardware work per frame is not smaller.
   present. The sysfb damage commit stopped blocking (m2-drm e874e6f): X latency
   at four slots is 23 ms median (20-53, n=20) against 25 ms at three, no damage
   lost, Minecraft 13.6 / 11.0 fps standing / walking against 12.6 / 9.2 at
-  three. Four slots are the default since (`SGX_SLOTS=3` for the old
+  three. Four slots were the default from then (`SGX_SLOTS=3` for the old
   behaviour); gma500 never had the wait.
+- Six slots are the default since 2026-11-16
+  (`docs/log/entries/2026-11-16-2130-ring-slots-six.md`). A frame of four renders (Minecraft's two
+  plus a capture's blit and pack) left four slots one frame deep, and the CPU waited out the GPU's
+  whole previous frame: capture at 360x240 cost Minecraft 18.5 → 13 fps, and 17.1-17.8 at six (eight:
+  no better). Each slot is about 20 MB of rings per context, so six cost ~38 MB more per GL
+  program than four.
 - What is left of the idle at four slots is the vendor microkernel's too: 5.3%
   all-idle on ours against 6.5% on the vendor's, same TA and 3D a frame (a
   steady window; an earlier warm-up window had suggested 1-10 ms of

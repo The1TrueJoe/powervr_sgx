@@ -1,0 +1,33 @@
+drirc: force_glsl_extensions_warn for ioquake3 and OpenArena
+
+ioquake3's OpenGL 2 renderer with r_PreferOpenglES 1 starts every shader
+with "#version 100" and "precision mediump sampler2DShadow;" but never
+enables GL_EXT_shadow_samplers, so sampler2DShadow isn't a type in GLSL ES
+1.00 and every shader fails with "default precision statements apply only
+to float, int, and opaque types", on any driver.  The renderer gives up and
+the game exits.  force_glsl_extensions_warn enables the extension with a
+warning, and the shaders compile (mesa/tests/sgx_glsl_prec, "ioq3" case).
+
+Debian's openarena runs /usr/lib/ioquake3/ioquake3; upstream builds are
+named ioquake3.<arch> and openarena.<arch>.
+
+--- a/src/util/00-mesa-defaults.conf
++++ b/src/util/00-mesa-defaults.conf
+@@ -92,6 +92,17 @@
+             <option name="allow_glsl_builtin_variable_redeclaration" value="true" />
+         </application>
+ 
++        <!-- ioquake3's OpenGL 2 renderer with r_PreferOpenglES 1 (OpenArena on
++             Debian runs it) declares a default precision for sampler2DShadow
++             without enabling GL_EXT_shadow_samplers -->
++        <application name="ioquake3" executable_regexp="^ioquake3([.](x86_64|x86|i386|arm64|armv7l))?$">
++            <option name="force_glsl_extensions_warn" value="true" />
++        </application>
++
++        <application name="OpenArena" executable_regexp="^openarena([.](x86_64|x86|i386|arm64|armv7l))?$">
++            <option name="force_glsl_extensions_warn" value="true" />
++        </application>
++
+         <application name="Doom 3: BFG" executable="Doom3BFG.exe">
+             <option name="allow_glsl_builtin_variable_redeclaration" value="true" />
+             <option name="force_glsl_extensions_warn" value="true" />

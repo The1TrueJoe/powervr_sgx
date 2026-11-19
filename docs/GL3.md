@@ -1,7 +1,9 @@
-# OpenGL 3.0, 3.1 and 3.2 on the SGX545: what the hardware does
+# OpenGL ES 3.0, OpenGL 3.0, 3.1 and 3.2 on the SGX545: what the hardware does
 
-The target is GL 3.1; 3.2 is not planned, since no hardware geometry-shader
-path is known (see "Verdict").
+The first target is OpenGL ES 3.0, then desktop GL 3.1 (decision, 2026-11-16:
+Firefox's hardware WebRender and Chromium's GPU process need ES ≥ 3.0 or
+desktop GL ≥ 3.2, and GL 3.1 reaches neither; see "OpenGL ES 3.0"). 3.2 is
+not planned, since no hardware geometry-shader path is known (see "Verdict").
 
 For each feature that GL 3.0, 3.1 and 3.2 add, this says whether the SGX545
 does it in hardware, what the driver does if it doesn't, the evidence for
@@ -74,6 +76,45 @@ are the list below. Each one also appears in the GL spec's core features.
 Occlusion queries are GL 1.5 and Mesa doesn't gate on them, but GL 3.0's
 conditional render is built on them. The driver has no queries today
 (`sgx_context.c` creates none), so they're listed under 3.0.
+
+## OpenGL ES 3.0
+
+Mesa's ES gate (`compute_version_es2()`, Mesa 26.2.5) is 24 conditions, marked
+"FINISHME: This list isn't quite right" in the source. On dev, 2026-11-16:
+
+- **Met:** `ARB_half_float_vertex`, `ARB_internalformat_query`,
+  `ARB_map_buffer_range`, `ARB_texture_rg`, `EXT_texture_sRGB`,
+  `ARB_framebuffer_object`, `ARB_draw_instanced`, `ARB_instanced_arrays`,
+  primitive restart, `MaxColorAttachments` ≥ 4 (a pass per target).
+- **Behind `SGX_DEBUG`:** `ARB_uniform_buffer_object` (`ubo`).
+- **Free with GLSL 1.30 (`glsl130`):** `OES_depth_texture_cube_map` (st
+  turns it on in its GLSL ≥ 1.30 block).
+- **Driver work, no hardware unknown:** `EXT_texture_snorm`, `EXT_sRGB`,
+  `EXT_texture_shared_exponent` (sampling only), `OES_texture_float`,
+  `OES_texture_half_float`, `OES_texture_half_float_linear` (four taps),
+  `EXT_packed_float`, `EXT_texture_type_2_10_10_10_REV`.
+- **Unknown:** `ARB_shader_texture_lod` (an explicit LOD in a fragment
+  sample), `ARB_depth_buffer_float`.
+- **Expensive:** `EXT_texture_array`, `EXT_transform_feedback` (as for GL 3.0).
+
+What the gate doesn't check but ES 3.0 needs:
+- **GLSL ES 3.00 with native integers.** st sets `NativeIntegers` only at
+  GLSL ≥ 1.30, so the `glsl130` path has to be on by default, and
+  `essl_feature_level` goes from 100 to 300.
+- **ES 3.0 core features beyond the gate:**
+  - 3D textures with `MAX_3D_TEXTURE_SIZE` ≥ 256 (the driver has one texel:
+    `max_texture_3d_levels` 1, TEX.md section 14);
+  - occlusion queries (`ANY_SAMPLES_PASSED`): the driver's are stubs that
+    return 0;
+  - `MAX_SAMPLES` ≥ 4;
+  - integer formats.
+
+  Mesa reports 3.0 without them; an honest 3.0 has them.
+
+Only ES 3.0 needs: 3D textures ≥ 256, `essl_feature_level` 300, depth cube
+maps, and the R11G11B10F / RGB9E5 / 2_10_10_10_REV sampling formats. Only
+GL 3.1 needs: GLSL 1.40, rectangle textures, texture buffer objects. The rest
+is shared.
 
 ## The pixel path is the main unknown
 
@@ -307,9 +348,11 @@ the fallback is a 3D pass per target.
   (decision, 2026-11-11). Depth clamp, seamless cube maps and the other 3.2
   pieces in the table above stay recorded, but nothing is built for them.
 
-**Target: GL 3.1 (GLSL 1.40).** Until MRT and MSAA work, Mesa's version stays
-at 2.1, but each extension below can be exposed on its own as it passes. The
-pieces a clean 3.1 needs: real 4× MSAA (H6), occlusion queries (H5), MRT and
+**Targets: OpenGL ES 3.0 first, then GL 3.1 (GLSL 1.40)** (2026-11-16). Until
+the pieces below work, Mesa's versions stay at ES 2.0 and GL 2.1, but each
+extension can be exposed on its own as it passes. ES 3.0 adds to the shared list
+below: GLSL ES 3.00 with the integer path on by default, 3D textures ≥ 256 and
+its sampling formats ("OpenGL ES 3.0"). The pieces a clean 3.1 needs: real 4× MSAA (H6), occlusion queries (H5), MRT and
 the render and sampler formats (H1-H3), transform feedback (H4), UBOs,
 instancing and primitive restart.
 
@@ -341,7 +384,15 @@ behind its cap only when piglit and dEQP pass it.
    MRT once H1 says how.
 7. Float and integer sampling formats (H2), texture arrays, transform feedback
    (H4), occlusion queries (H5), conditional render.
-8. GL 3.2 is not planned (see "Verdict").
+8. For ES 3.0: the integer path (`glsl130`) and UBOs on by default,
+   `essl_feature_level` 300, 3D textures ≥ 256 (the volume layout, TEX.md
+   section 14), the ES sampling formats, then dEQP-GLES3. Items 6 and 7 come
+   before GL 3.1's own pieces (GLSL 1.40, rectangle textures, TBOs).
+9. GL 3.2 is not planned (see "Verdict").
+
+Outside contributions go in the same way: small PRs on dev, one feature
+each, behind its own cap.
+
 
 ## Status
 
@@ -425,7 +476,10 @@ Runs 4 and 5 (the second CE5300 board, 2026-11-12; `docs/log/entries/2026-11-12-
   `fbo-alphatest-formats` intensity formats, and the 4x `alpha-blending`
   twice, `alpha-to-one-single-sample-buffer 4` and seven `interpolation 0`
   tests); 10 FBO depth tests that never ran before pass.
-- **Known failures that the cap lets run** (they skipped before):
+- **Known failures that the cap lets run** (they skipped before). Against
+  plain dev (run 34, 2026-11-13: dev 489bf56f with and without this
+  branch, full dEQP-GLES2 and the zs, ms, ff and gl21 lists), these five are
+  the only tests that go from skip to fail; nothing goes from pass to fail:
   - `tex-miplevel-selection` (`-nobias -nolod`): the sampled level is one
     below the base level at the top of the chain (level 4 for base level 5,
     max level 5).
@@ -435,6 +489,9 @@ Runs 4 and 5 (the second CE5300 board, 2026-11-12; `docs/log/entries/2026-11-12-
     whose rectangles are clipped (source or destination off the
     framebuffer) leaves the destination at its clear colour
     (`sgx_blit_resolve`); not diagnosed further.
+  - `ext_framebuffer_multisample-alpha-to-coverage-no-draw-buffer-zero 4`
+    (four colour buffers make it run): alpha to coverage from buffer 0
+    when the shader doesn't write buffer 0; not looked at.
 - **The FBO depth tests** (64): 28 pass, 31 skip (`ARB_depth_buffer_float`,
   `EXT_texture_array`), 5 fail with and without the cap, so they are known
   failures that don't come from it:

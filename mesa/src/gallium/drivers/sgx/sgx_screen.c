@@ -42,6 +42,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "vertex inputs gathered into f32 x 4, not DMAed where they are"},
    {"novboslabs", SGX_DEBUG_NO_VBO_SLABS,
     "every buffer's device copy a BO of its own, not small ones cut from shared slabs"},
+   {"notexblits", SGX_DEBUG_NO_TEX_BLITS,
+    "blits into a texture through the CPU, as 0.2.0 did (only render targets on the GPU)"},
    {"nolazyscanout", SGX_DEBUG_NO_LAZY_SCANOUT,
     "scanout buffers on a dumb-buffer display (kmsro) are the display's from the start, not when a KMS handle is asked for"},
    {"nophasesplit", SGX_DEBUG_NO_PHASE_SPLIT,
@@ -152,11 +154,13 @@ sgx_init_shader_caps(struct pipe_screen *pscreen)
        * (dEQP's nested struct arrays of mat4 fit in a fragment program, and
        * failed at a limit of 24 vec4).  The constants that don't fit are
        * loaded from a block in memory (ld.a.d, sgxws_const_mem), so the
-       * limit is GLES2's vertex minimum, 128 vec4, in both stages; a vertex
-       * program gets the 9 vec4 st keeps for lowered clip planes and point
-       * size on top, which leaves GL's 512 components to the application */
+       * limit is GLES2's minimum, 128 vec4, for a fragment program, and 256
+       * for a vertex program: Direct3D 9's vs_2_0 has 256 float constants,
+       * and games ported through a D3D9-to-GL layer declare them as one
+       * vec4 array (mesa/tests/sgx_vconst).  A vertex program gets the 9
+       * vec4 st keeps for lowered clip planes and point size on top */
       caps->max_const_buffer0_size =
-         (s == MESA_SHADER_VERTEX ? 128 + 9 : 128) * 4 * sizeof(float);
+         (s == MESA_SHADER_VERTEX ? 256 + 9 : 128) * 4 * sizeof(float);
       /* and 12 uniform blocks (SGX_DEBUG=ubo, with the native integers: the
        * float path makes a block offset a float): the compiler's ld.a.d
        * from the address the driver puts in constant SGX_K_UBO + n, of a
@@ -227,6 +231,11 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    caps->constant_buffer_offset_alignment = 16;
    /* a pass a colour buffer (sgx_draw_vbo); SGX_DEBUG=nomrt for one */
    caps->max_render_targets = sgx_drv_debug & SGX_DEBUG_NO_MRT ? 1 : 4;
+   /* each target's pass has its own colour epilogue (sgx_blend_rt): its own
+    * blend and colour mask, GL_EXT_draw_buffers2 and
+    * GL_ARB_draw_buffers_blend (Portal and other Source games use
+    * glColorMaskIndexedEXT, issue #5) */
+   caps->indep_blend_enable = caps->indep_blend_func = true;
    /* 1.30 with SGX_DEBUG=glsl130 (native integers, EXT_texture_integer),
     * for the GL 3.0 work's tests on a board */
    caps->glsl_feature_level = caps->glsl_feature_level_compatibility =

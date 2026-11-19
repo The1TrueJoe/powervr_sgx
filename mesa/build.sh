@@ -2,7 +2,7 @@
 # Build Mesa with the sgx gallium driver (over powervr_sgx), the EGL fbdev
 # platform, and GBM.
 #
-#   mesa/build.sh [x86_64] [i386] [x86_64-gl] [x86_64-x11] [debian]   (default: x86_64 i386)
+#   mesa/build.sh [x86_64] [i386] [x86_64-gl] [x86_64-x11] [i386-x11] [debian]   (default: x86_64 i386)
 #
 # Fetches the release in mesa/VERSION (checked against its sha256), unpacks
 # it under $SGX_MESA_BUILD (default build/mesa in the repo), applies
@@ -17,6 +17,8 @@
 #   x86_64-x11 x86_64 with desktop GL, GLX and the X11 platform through
 #           libglvnd, for an X server (DRI3 + Present) on the EA; compiles
 #           against the Debian root in $X11_SYSROOT (mesa/tests/x11/mkroot.py).
+#   i386-x11   the same for i386, against the Debian i386 root in $X11_SYSROOT
+#           (the Clover Trail tablet: Xorg with glamor on simpledrm, GLX over DRI3).
 #   debian  a native build on Debian (mesa/debian: CI) for /opt/sgx, for users;
 #           $SGX_MESA_LIBDIR (default lib) is its libdir under /opt/sgx: the
 #           i386 package uses lib/i386-linux-gnu, beside amd64's lib.
@@ -66,7 +68,7 @@ rm -rf "$TREE/src/sgx/kmd_stream" "$TREE/src/gallium/winsys/sgx/drm/powervr_sgx_
 for arch in $ARCHES; do
 	case $arch in
 	x86_64|x86_64-gl|x86_64-x11) target=x86_64-linux-gnu.2.36; family=x86_64; cpu=x86_64 ;;
-	i386) target=x86-linux-gnu.2.36; family=x86; cpu=i686 ;;
+	i386|i386-x11) target=x86-linux-gnu.2.36; family=x86; cpu=i686 ;;
 	debian) ;;
 	*) echo "build.sh: unknown arch $arch" >&2; exit 1 ;;
 	esac
@@ -107,11 +109,12 @@ for arch in $ARCHES; do
 		api="-Dopengl=true -Dglvnd=enabled"
 	fi
 	platforms="-Dplatforms=fbdev -Degl-native-platform=fbdev -Dglx=disabled"
-	if [ "$arch" = x86_64-x11 ]; then
-		R=${X11_SYSROOT:?x86_64-x11 needs a Debian root in X11_SYSROOT (mesa/tests/x11/mkroot.py)}
-		sed -i.bak "s|^pkg_config_libdir = .*|pkg_config_libdir = ['$R/usr/lib/x86_64-linux-gnu/pkgconfig', '$R/usr/share/pkgconfig']\nsys_root = '$R'|" "$O/cross.ini"
+	if [ "$arch" = x86_64-x11 ] || [ "$arch" = i386-x11 ]; then
+		R=${X11_SYSROOT:?$arch needs a Debian root in X11_SYSROOT (mesa/tests/x11/mkroot.py)}
+		ma=x86_64-linux-gnu; [ "$arch" = i386-x11 ] && ma=i386-linux-gnu
+		sed -i.bak "s|^pkg_config_libdir = .*|pkg_config_libdir = ['$R/usr/lib/$ma/pkgconfig', '$R/usr/share/pkgconfig']\nsys_root = '$R'|" "$O/cross.ini"
 		# the root's headers after zig's own (its libc's win), its libraries for the link
-		x="'-idirafter', '$R/usr/include', '-L$R/usr/lib/x86_64-linux-gnu'"
+		x="'-idirafter', '$R/usr/include', '-L$R/usr/lib/$ma'"
 		sed -i.bak "s|^c = \[\(.*\)\]|c = [\1, $x]|; s|^cpp = \[\(.*\)\]|cpp = [\1, $x]|" "$O/cross.ini"
 		api="-Dopengl=true -Dglvnd=enabled"
 		platforms="-Dplatforms=x11 -Degl-native-platform=x11 -Dglx=dri -Dxlib-lease=disabled"

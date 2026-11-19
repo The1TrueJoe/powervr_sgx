@@ -318,9 +318,45 @@ void pvrsgx_shutdown_common(struct pvrsgx_device *sdev)
 		pm_runtime_put_noidle(sdev->base.dev);
 }
 
+/*
+ * What the PCI id alone doesn't say: where the SGX's window is and who manages
+ * its power. driver_data in the id table is an index into this.
+ */
+enum pvrsgx_part_id {
+	PVRSGX_PART_CE5300,
+	PVRSGX_PART_CLOVER_TRAIL,
+};
+
+static const struct pvrsgx_part pvrsgx_parts[] = {
+	[PVRSGX_PART_CE5300] = {
+		.name = "Intel CE5300",
+		.core = 545,
+		.regs_off = 0,		/* the SGX is the whole PCI function */
+	},
+	[PVRSGX_PART_CLOVER_TRAIL] = {
+		.name = "Intel Clover Trail",
+		.core = 545,
+		/*
+		 * The Z2760's published GPU clock (notebookcheck, "Intel Atom
+		 * Z2760"); the CE5300's 400 MHz would run the microkernel's
+		 * timer a quarter slow.
+		 */
+		.clock_hz = 533000000,
+		/* Display engine's window first, the SGX's behind it. */
+		.regs_off = PVRSGX_CLV_SGX_OFFSET,
+		/*
+		 * ACPI can't power the island: GFX0's _PS0 only writes GDDS,
+		 * and the APM block that owns the island has no driver here yet.
+		 */
+		.flags = PVRSGX_PART_ISLAND_ALWAYS_ON | PVRSGX_PART_VDC_IRQ,
+	},
+};
+
 static int pvrsgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
+	const struct pvrsgx_part *part = &pvrsgx_parts[id->driver_data];
 	struct pvrsgx_device *sdev;
+	void __iomem *bar;
 	int err;
 
 	err = pcim_enable_device(pdev);
@@ -337,15 +373,43 @@ static int pvrsgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (IS_ERR(sdev))
 		return PTR_ERR(sdev);
 	sdev->pdev = pdev;
-	sdev->family = pvrsgx_core_family_get(id->driver_data);
+	sdev->part = part;
+	sdev->family = pvrsgx_core_family_get(part->core);
 	sdev->irq = pdev->irq;
+	if (part->flags & PVRSGX_PART_VDC_IRQ) {
+		err = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
+		if (err < 0)
+			return err;
+		sdev->irq = pci_irq_vector(pdev, 0);
+	}
+	if (!sdev->irq) {
+		dev_err(&pdev->dev, "no interrupt\n");
+		return -ENODEV;
+	}
 	pci_set_drvdata(pdev, sdev);
 
-	if (pci_resource_len(pdev, 0) < PVRSGX_REGS_MIN)
+	/*
+	 * On Clover Trail the SGX window shares BAR 0 with the display engine.
+	 * Only the window is ever touched. The firmware's framebuffer and the
+	 * KMS driver built on it (simpledrm) stay: this driver is render-only
+	 * and claims no framebuffer, so it must not call
+	 * drm_aperture_remove_conflicting_pci_framebuffers() either.
+	 */
+	if (pci_resource_len(pdev, 0) < part->regs_off + PVRSGX_REGS_MIN) {
+		dev_err(&pdev->dev, "BAR 0 is %pR: no %s window at 0x%x\n",
+			&pdev->resource[0], part->name, part->regs_off);
 		return -ENODEV;
-	sdev->regs = pcim_iomap_region(pdev, 0, PVRSGX_DRIVER_NAME);
-	if (IS_ERR(sdev->regs))
-		return PTR_ERR(sdev->regs);
+	}
+	bar = pcim_iomap_region(pdev, 0, PVRSGX_DRIVER_NAME);
+	if (IS_ERR(bar))
+		return PTR_ERR(bar);
+	sdev->regs = (u8 __iomem *)bar + part->regs_off;
+	/*
+	 * Only the SGX's bit there is ever touched (pvrsgx_device.c, irq_setup());
+	 * the display's own interrupts stay as they are.
+	 */
+	if (part->flags & PVRSGX_PART_VDC_IRQ)
+		sdev->vdc = bar;
 
 	return pvrsgx_probe_common(sdev);
 }
@@ -361,7 +425,8 @@ static void pvrsgx_shutdown(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id pvrsgx_pci_ids[] = {
-	{ PCI_VDEVICE(INTEL, 0x089b), .driver_data = 545 },	/* CE5300 family: SGX545 */
+	{ PCI_VDEVICE(INTEL, 0x089b), PVRSGX_PART_CE5300 },	/* SGX545 on its own function */
+	{ PCI_VDEVICE(INTEL, 0x08cf), PVRSGX_PART_CLOVER_TRAIL },	/* Atom Z2760 */
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, pvrsgx_pci_ids);

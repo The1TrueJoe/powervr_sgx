@@ -298,7 +298,7 @@ struct sgxws_draw {
    struct sgxws_const_mem {
       const uint32_t *words;
       uint32_t dwords; /* 0: none */
-      uint8_t n_bases, base[8];
+      uint8_t n_bases, base[12]; /* SGX_MAX_MEM_BASES */
    } vs_mem, fs_mem;
    /* Uniform blocks (the compiler's ld.a.d from a block's address): each
     * copied to frame memory, the copy's address written into the program's
@@ -337,6 +337,11 @@ struct sgxws_stats {
    unsigned state_sent, state_skipped; /* draws' TA state blocks */
    unsigned bo_allocs, bo_cached, bo_busy; /* buffers allocated; from the
                                               cache; cached ones still in use */
+   unsigned gem_live, gem_made, gem_closed, code_resets; /* GEM objects: live;
+                                              made, closed, code chunks emptied */
+   uint64_t gem_bytes;                     /* the live ones' bytes */
+   unsigned zombies, cached;               /* freed, held: for the GPU; cached */
+   uint64_t zombie_bytes, cached_bytes;
 };
 
 /* debugging aids the driver passes on (its SGX_DEBUG options) */

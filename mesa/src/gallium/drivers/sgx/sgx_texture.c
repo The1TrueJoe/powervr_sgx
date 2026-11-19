@@ -165,14 +165,28 @@ sgx_tex_bpp(enum pipe_format format)
    return util_format_get_blocksize(format);
 }
 
-static bool
-twiddled(unsigned w, unsigned h)
+/* Power-of-two levels are twiddled, except in a texture something may render
+ * into whose level 0 is under a 16x16 tile on a side and more than a row: the
+ * sampler's tiles are min(w, h) square, but the PBE twiddles a destination in
+ * tiles 16 high (TEX.md sections 1 and 10), so a render into a 16x2 or 8x8
+ * twiddled texture lands scrambled (X's glamor draws 16x2 window-border pieces
+ * into pixmaps, issue #13).  Those are linear, as an NPOT texture is.  (A row,
+ * one texel high, is the same bytes either way.) */
+bool
+sgx_tex_twiddled(const struct pipe_resource *prsc, unsigned w, unsigned h)
 {
-   return util_is_power_of_two_nonzero(w) && util_is_power_of_two_nonzero(h);
+   if (!util_is_power_of_two_nonzero(w) || !util_is_power_of_two_nonzero(h))
+      return false;
+   return !(prsc->target == PIPE_TEXTURE_2D &&
+            (prsc->bind & PIPE_BIND_RENDER_TARGET) && prsc->height0 > 1 &&
+            MIN2(prsc->width0, prsc->height0) < TILE);
 }
 
+#define twiddled(w, h) sgx_tex_twiddled(prsc, w, h)
+
 static size_t
-level_bytes(unsigned w, unsigned h, unsigned bpp)
+level_bytes(const struct pipe_resource *prsc, unsigned w, unsigned h,
+            unsigned bpp)
 {
    return (size_t)(twiddled(w, h) ? w : align(w, 8)) * h * bpp;
 }
@@ -189,7 +203,7 @@ chain_offset(const struct pipe_resource *prsc, unsigned level)
       unsigned w = u_minify(prsc->width0, l), h = u_minify(prsc->height0, l);
 
       off += word32 ? (size_t)depth_pitch(dev_width(prsc->format, w)) * h * 4
-                    : level_bytes(w, h, bpp);
+                    : level_bytes(prsc, w, h, bpp);
    }
    return off;
 }
@@ -363,6 +377,28 @@ encode_rect(struct sgx_resource *res, unsigned level, const uint8_t *src,
                   yb = MIN2(by + t, y1);
          uint8_t *out = whole ? tile : d;
 
+         if (bpp == 4 && !widen) {
+            /* RGBA8 and its kin, most textures: a word a texel, copied
+             * inline (a memcpy call of a run-time size a texel was most of
+             * a lightmap update's time: issue #5, QuakeSpasm) */
+            const uint32_t set = rgbx ? 0xff000000u : 0;
+
+            for (unsigned y = ya; y < yb; y++) {
+               const uint8_t *s = src + y * src_stride + (size_t)xa * 4;
+               uint32_t sy = spread[y - by];
+
+               for (unsigned x = xa; x < xb; x++, s += 4) {
+                  uint32_t v;
+
+                  memcpy(&v, s, 4);
+                  v |= set;
+                  memcpy(out + (size_t)(sy | spread[x - bx] << 1) * 4, &v, 4);
+               }
+            }
+            if (whole)
+               memcpy(d, tile, (size_t)t * t * 4);
+            continue;
+         }
          for (unsigned y = ya; y < yb; y++) {
             const uint8_t *s = src + y * src_stride;
 

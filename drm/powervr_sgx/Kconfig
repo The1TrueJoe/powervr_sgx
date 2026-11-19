@@ -2,7 +2,7 @@
 # Copyright © 2026 Joseph Telaak
 
 config DRM_POWERVR_SGX
-	tristate "PowerVR SGX5xx (SGX545: Intel CE5300, Cedarview)"
+	tristate "PowerVR SGX5xx (SGX545: Intel CE5300, Cedarview, Clover Trail)"
 	depends on DRM && PCI && MMU && PAGE_SIZE_4KB && (X86 || ARM || COMPILE_TEST)
 	select DRM_EXEC
 	select DRM_GEM_SHMEM_HELPER
@@ -16,9 +16,16 @@ config DRM_POWERVR_SGX
 	help
 	  Render-only DRM driver for PowerVR SGX5xx GPUs. It supports the
 	  SGX545 of the Intel Atom CE5300 media processors, where the GPU is
-	  its own PCI function (8086:089b), and of Cedarview (GMA3600/3650,
-	  with DRM_POWERVR_SGX_GMA500). The GPU runs a microkernel loaded
-	  with request_firmware().
+	  its own PCI function (8086:089b), of Cedarview (GMA3600/3650,
+	  with DRM_POWERVR_SGX_GMA500), and of Clover Trail (Atom Z2760,
+	  8086:08cf), where the GPU shares the display engine's BAR with no
+	  display driver of its own. The GPU runs a microkernel loaded with
+	  request_firmware().
+
+	  On Clover Trail the driver keeps the graphics island powered for as
+	  long as it is bound and refuses system sleep: ACPI does not power the
+	  island, the P-Unit's APM block does, and that hand-over does not
+	  exist yet. Remove the module before suspending.
 
 	  Not compatible with the out-of-tree PowerVR services driver
 	  (SGX545_CE): bind one or the other.
