@@ -1456,6 +1456,11 @@ void sgx_clear(struct sgx_ctx *c, const float rgba[4], float depth)
 	float xy[3][2] = { { 0, 0 }, { 2.0f * s->w, 0 }, { 0, 2.0f * s->h } };
 	uint32_t blk[12];
 
+	/* SGXGEN_SKIP_CLEAR (bring-up probe, SGX530): no clear at all, so the TA stream is
+	 * only its end (is a fault the clear's, or the end's and the kick's?) */
+	if (getenv("SGXGEN_SKIP_CLEAR"))
+		return;
+
 	for (int i = 0; i < 3; i++) {
 		v.p[4 * i + 0] = f32(xy[i][0]);
 		v.p[4 * i + 1] = f32(xy[i][1]);
