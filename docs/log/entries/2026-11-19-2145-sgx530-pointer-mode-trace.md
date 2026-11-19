@@ -221,3 +221,44 @@ the DPM never hands out a page. Open:
   DPM clear (0x694/0x698 = 2, confirmed earlier) runs. 0x630 and 0x65c are 0, as on a first
   kick in slot 0;
 - the TE layout registers on this core (0x208/0x20c = 0x01004004, 0x210 = 0x3003, 0x214 = 0x10).
+
+## 2026-11-19 23:42-00:05 UTC: the DPM is idle; the MTE's input has address slots at o0 and o6
+
+Same recipe (pointer mode everywhere, one-emit tasks, no empty update, no pre-terminate).
+New sgxgen knobs `SGXGEN_STATE_PTR_N` (f9c07c9b; the k-word state task over the 1-word
+pointer DMA) and `SGXGEN_STATE_PTR_WORDS` (204f558e; more output words after the pointer,
+DMA'd with it, and the matching one-emit task).
+
+**Lead (a), the DPM: not the blocker (C).** The documented PB/DPM registers (0x600-0x668,
+0x680-0x69c, 0x6a8, 0x700-0x74c as named in UKERNEL.md) are identical at the hang for end
+only, the clear without its draw, and the clear with its draw. The free list is loaded, the
+live head is unmoved, the counters are 0 and no load or store is in flight. The TA stalls
+before it asks the DPM for anything.
+
+**The MTE's input words (C).** No faults in any of these runs except at the listed addresses.
+
+| output words after the pointer | result |
+|---|---|
+| the one-emit task for 12 / 16 words over a 1-word DMA (`STATE_PTR_N`) | b1 fault at 0 / at 0x02492000 (leftover attribute contents taken as an address); 2 words: no fault |
+| o1 = 0x00502000, 0, 0x00602000 or 0xc (`STATE_PTR_W1`) | no fault: o1 isn't an address |
+| o1..o11 = i MiB + 0x1000 (2 runs), or o1..o7 | **b1 fault at 0x00601000: o6 is an address** |
+| o1..o3 | no fault |
+| only o6 set (7 words) | fault at its value; the same value in o5 (6 words): no fault |
+| o6 mapped (0x0e001000), o7..o15 unmapped | no fault: no later word is dereferenced |
+| o6 = 0x0e011000 / 0x0e010ffc | fault at 0x0e011000 (the end of the vertex PDS heap's mapping) |
+| o6 = 0x0e010ff0, 0x0e010fc0, 0x0e010f00, 0x0e010c00 | no fault |
+
+So on the SGX530 the MTE dereferences the state task's output words **o0 and o6**, and only
+those. At o6 it reads more than 4 and at most 16 bytes. In every case the TA then hangs
+without a fault, as before. The SGX545 record we've been placing at o0 has its
+region-clip word at index 6, so the 530's input isn't that record. It's a fixed layout
+with two pointer slots, whose other words and pointed-to blocks are still unknown.
+
+## Where it stands (00:05 UTC)
+
+Next, black box with our own frames:
+- how much the MTE reads at o0, the same way (needs the pointer placed at a page end);
+- what each of words 1-5 and 7+ does: sweep them one at a time for a change in the hang
+  (a fault, an event, a tail pointer or region header written), with o0 and o6 both mapped;
+- what the two pointed-to blocks hold: vary their contents (the record at o0 changed nothing
+  so far, but o6 has never pointed at anything chosen).
