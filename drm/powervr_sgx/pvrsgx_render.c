@@ -61,6 +61,15 @@ static u32 f32_one(void)
 
 /* ---------------------------------------------------------------- render context */
 
+/*
+ * Bring-up probe (SGX530): start the free list this many pages into the PB, so the
+ * first page the DPM hands out isn't page index 0 (is a fault at absolute 0 that
+ * page, taken without the TA request base?). 0, the default, changes nothing.
+ */
+static unsigned int pvrsgx_probe_pb_skip;
+module_param_named(probe_pb_skip, pvrsgx_probe_pb_skip, uint, 0444);
+MODULE_PARM_DESC(probe_pb_skip, "Bring-up (SGX530): free-list pages to skip at the PB's start (default 0)");
+
 /* The PB's free list and descriptor as new: at creation, and after a reset (pb_rearm). */
 static void pb_init(struct pvrsgx_pb *pb)
 {
@@ -70,6 +79,8 @@ static void pb_init(struct pvrsgx_pb *pb)
 	/* Free list: prev<<16 | next per page, indexed from the range's base. */
 	first = (kobj_va(pb->buf) - pvrsgx_heaps(pb->sdev)->params_3d.base) >> PAGE_SHIFT;
 	last = first + pages - 1;
+	if (pb->sdev->family->core == 530 && pvrsgx_probe_pb_skip < pages / 2)
+		first += pvrsgx_probe_pb_skip;
 	fl = kobj_cpu(pb->freelist);
 	for (u32 i = first; i <= last; i++)
 		fl[i] = (i == first ? 0xffffu : i - 1) << 16 | (i == last ? 0xffffu : i + 1);
