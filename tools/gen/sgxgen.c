@@ -1258,6 +1258,10 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 
 			for (unsigned i = 0; i < 64; i++)
 				f.p[i] = env_u32("SGXGEN_STATE_PTR_FILL");
+			/* SGXGEN_STATE_PTR_HDR=<h>: word 0 of that buffer is <h> (a header-bit sweep:
+			 * which header bit makes the MTE take an address from the words after it) */
+			if (getenv("SGXGEN_STATE_PTR_HDR"))
+				f.p[0] = env_u32("SGXGEN_STATE_PTR_HDR");
 			q.p[0] = f.va;
 		}
 		b = q;
