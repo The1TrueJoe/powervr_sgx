@@ -1387,6 +1387,9 @@ static void vdm_draw(struct sgx_ctx *c, uint32_t prim, uint32_t count, uint32_t 
 	CODE(&p, MOVS(MV_CC3, 1, 0, 0, 1, 3, 3, DOUTU));
 	CODE(&p, HALT);
 	va = pds_emit(&c->pds_vtx, &p, &rows);
+	/* SGXGEN_DRAW_PDS_ADD=<bytes> (bring-up probe, SGX530): move the vertex program's
+	 * address in the draw entry, to see whether a PDS fault follows it */
+	va += env_u32("SGXGEN_DRAW_PDS_ADD");
 	/* SGXGEN_DRAW530: the 530 vendor stream's draw: word 0 b24 set, index
 	 * batches of 8, and the batching field 2 at 8 vertices per task */
 	int d530 = getenv("SGXGEN_DRAW530") != NULL;
@@ -1462,6 +1465,10 @@ void sgx_clear(struct sgx_ctx *c, const float rgba[4], float depth)
 	} else
 		state_block(c, blk, 12, 12,
 			    getenv("SGXGEN_CLEAR_KIND") ? env_u32("SGXGEN_CLEAR_KIND") : 3);
+	/* SGXGEN_CLEAR_NODRAW (bring-up probe, SGX530): the clear's state update without its
+	 * draw, to see which faults the draw's own fetches cause */
+	if (getenv("SGXGEN_CLEAR_NODRAW"))
+		return;
 	vdm_draw(c, SGX_TRIANGLES, 3, c->idx, v.va, 16, 4, doutu_w0_shader(c, c->clear_vs, 1, 0), 4, 8);
 }
 
