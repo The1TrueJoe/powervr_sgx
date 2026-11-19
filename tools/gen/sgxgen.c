@@ -780,7 +780,10 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 	/* TA terminate (VDM type 6): DOUTA (0x2000, 0), 3 x (0x16000e, 0x100), then
 	 * a state-emit task for the two attributes [D; the values' meaning G] */
 	c->state_emit[2] = usse_load(c, &usse_state_emit_2, 1);
-	pds_d0(&t, 0, 0x2000);
+	/* SGXGEN_TERM_A0=<w> / SGXGEN_PRETERM_A0=<w> (bring-up probes, SGX530): the first
+	 * word each end-of-stream task hands the MTE (0x2000, 0x800), to see whether the
+	 * MTE takes it as an address */
+	pds_d0(&t, 0, getenv("SGXGEN_TERM_A0") ? env_u32("SGXGEN_TERM_A0") : 0x2000);
 	pds_d0(&t, 1, 0);
 	/* SGXGEN_TERM530=<word>: the 530 form seen from the vendor stack, one second
 	 * DOUTA of <word> (0x00030003 for a 64x64 target: the last tile, y<<16 | x) */
@@ -799,7 +802,7 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 	{
 		struct pds q = { 0 };
 
-		pds_d0(&q, 0, 0x800);
+		pds_d0(&q, 0, getenv("SGXGEN_PRETERM_A0") ? env_u32("SGXGEN_PRETERM_A0") : 0x800);
 		pds_d0(&q, 1, 0);
 		pds_d0(&q, 2, 0);
 		pds_d0(&q, 3, 0x100);
