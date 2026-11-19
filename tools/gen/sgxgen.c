@@ -815,7 +815,9 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 	CODE(&t, MOVS(MV, 0, 0x18, 0, 1, 2, 2, DOUTA));
 	for (int i = 0; i < (getenv("SGXGEN_TERM530") ? 1 : 3); i++)
 		CODE(&t, MOVS(MV, 1, 0x18, 0, 1, 2, 2, DOUTA));
-	CODE(&t, MOVS(MV, 2, 0, 0, 1, 2, 2, DOUTU));
+	/* SGXGEN_TERM_NOTASK (bring-up probe, SGX530): the terminate without its task */
+	if (!getenv("SGXGEN_TERM_NOTASK"))
+		CODE(&t, MOVS(MV, 2, 0, 0, 1, 2, 2, DOUTU));
 	CODE(&t, HALT);
 	c->terminate = pds_emit(&c->pds_vtx, &t, &c->term_rows);
 	/* SGXGEN_PRETERM530: the vendor stream on the 530 runs a type 4 program of
@@ -1352,14 +1354,22 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	 * DOUTU words 1 and 2 (0; the 530 microkernel's launch needs word 2 = 1 with b21) */
 	pds_d0(&p, 5, env_u32("SGXGEN_STATE_W1"));
 	pds_d1(&p, 0, env_u32("SGXGEN_STATE_W2"));
-	CODE(&p, TST1(S1_DS0(0)));
-	CODE(&p, BRA_P0(6));
-	CODE(&p, MOVS(MV, 0, 0, 0, 1, 0, 0, DOUTD));
-	CODE(&p, TST1(S1_DS0(2)));
-	CODE(&p, BRA_P0(6));
-	CODE(&p, MOVS(MV, 1, 0, 0, 1, 0, 0, DOUTD));
-	CODE(&p, MOVS(MV, 2, 0, 0, 1, 2, 0, DOUTU));
-	CODE(&p, HALT);
+	/* SGXGEN_STATE_1DMA (bring-up probe, SGX530): one unconditional DOUTD and the DOUTU,
+	 * without the tst/bra pairs or the optional second DMA */
+	if (getenv("SGXGEN_STATE_1DMA")) {
+		CODE(&p, MOVS(MV, 0, 0, 0, 1, 0, 0, DOUTD));
+		CODE(&p, MOVS(MV, 2, 0, 0, 1, 2, 0, DOUTU));
+		CODE(&p, HALT);
+	} else {
+		CODE(&p, TST1(S1_DS0(0)));
+		CODE(&p, BRA_P0(6));
+		CODE(&p, MOVS(MV, 0, 0, 0, 1, 0, 0, DOUTD));
+		CODE(&p, TST1(S1_DS0(2)));
+		CODE(&p, BRA_P0(6));
+		CODE(&p, MOVS(MV, 1, 0, 0, 1, 0, 0, DOUTD));
+		CODE(&p, MOVS(MV, 2, 0, 0, 1, 2, 0, DOUTU));
+		CODE(&p, HALT);
+	}
 	va = pds_emit(&c->pds_vtx, &p, &rows);
 	/* SGXGEN_VDM_PDS_ADD: bytes added to the state program's address in the VDM word
 	 * (bring-up probe: point the PDS at an unmapped page to see whether its fetch faults) */
