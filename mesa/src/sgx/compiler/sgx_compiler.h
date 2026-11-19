@@ -187,6 +187,9 @@ struct sgx_varyings {
  * is the driver's block (docs/GL3.md) */
 #define SGX_MAX_CONST_K   1280
 #define SGX_MAX_CONST_MAP (SGX_MAX_CONST_K + 32) /* every constant and literal */
+/* a memory block window per 128 words (ld.a.d's offset is 7 bits): enough
+ * for every slot of the map */
+#define SGX_MAX_MEM_BASES 12
 
 struct sgx_const_map {
    uint16_t k; /* constant number: uniform component (sgx_nir.c's numbering) */
@@ -312,7 +315,7 @@ struct sgx_shader {
     * 512 * j. 0: no block */
    unsigned mem_dwords;
    unsigned n_mem_bases;
-   uint8_t mem_base_slot[8];
+   uint8_t mem_base_slot[SGX_MAX_MEM_BASES];
    /* fragment: reads sa[front_sa], so it must be loaded */
    bool uses_front_face;
    uint64_t *code; /* main program, flat (branch targets resolved) */

@@ -6935,6 +6935,10 @@ place_constants(struct sgx_ctx *c)
       return;
 
    unsigned nb = DIV_ROUND_UP(c->n_sa, 128);
+   if (nb > SGX_MAX_MEM_BASES) {
+      sgx_fail(c, "too many constants for the memory block");
+      return;
+   }
    unsigned room = budget > nb ? budget - nb : 0, kept = 0;
    unsigned *uses = calloc(c->n_sa, sizeof(*uses));
    bool *keep = calloc(c->n_sa, sizeof(*keep));
@@ -7053,15 +7057,32 @@ mem_index(struct sgx_ctx *c)
       insert_before(pk, cl);
       pk->op[1] = vref(x0, 0);
 
-      int addr[8];
+      int addr[SGX_MAX_MEM_BASES];
       for (unsigned b = 0; b < ARRAY_SIZE(addr); b++)
          addr[b] = -1;
+      /* a load can write only a temporary or PA: one whose destination is
+       * something else (an output register, once fold_movs has folded the
+       * mov to it: an indexed uniform straight into a varying) loads into
+       * a temporary, moved there after the wdf */
+      struct {
+         struct sgx_ref to, from;
+         unsigned pred;
+      } late[64];
+      unsigned n_late = 0;
       struct sgx_ins *m = list_entry(ix->link.next, struct sgx_ins, link);
       while (&m->link != &c->ins && m->form == SGX_OP_MOV &&
              m->op[1].file == SGX_F_IXSA) {
          struct sgx_ins *next = list_entry(m->link.next, struct sgx_ins, link);
          struct sgx_ref d = m->op[0];
          unsigned n = m->op[1].n, rpt = m->rpt, pred = m->pred;
+         int tmp = -1;
+         if (!slot_ok(SGX_OP_LD, 0, &d)) {
+            if (n_late + rpt > ARRAY_SIZE(late)) {
+               sgx_fail(c, "indexed uniform: too many loads to move");
+               return;
+            }
+            tmp = new_vreg(c, rpt);
+         }
          /* (a repeated mov: one load per iteration) */
          for (unsigned r = 0; r < rpt; r++) {
             unsigned w = s + n + (m->op[1].step ? r : 0), b = w / 128;
@@ -7090,6 +7111,12 @@ mem_index(struct sgx_ctx *c)
                else
                   ld->op[0].n += r;
             }
+            if (tmp >= 0) {
+               late[n_late].to = ld->op[0];
+               late[n_late].from = vref(tmp, r);
+               late[n_late++].pred = pred;
+               ld->op[0] = vref(tmp, r);
+            }
             ld->op[1] = vref(addr[b], 0);
             ld->op[2] = ref(SGX_F_IMM, w % 128);
             if (r)
@@ -7103,6 +7130,18 @@ mem_index(struct sgx_ctx *c)
          list_addtail(&wd->link, &c->ins);
       else
          insert_before(m, wd);
+      for (unsigned j = 0; j < n_late; j++) {
+         struct sgx_ins *mv = ins_alloc(c, SGX_INS_ALU, SGX_OP_MOV);
+         mv->nops = 2;
+         mv->pred = late[j].pred;
+         mv->op[0] = late[j].to;
+         mv->op[0].step = false;
+         mv->op[1] = late[j].from;
+         if (&m->link == &c->ins)
+            list_addtail(&mv->link, &c->ins);
+         else
+            insert_before(m, mv);
+      }
       list_del(&ix->link);
    }
 }
@@ -7348,6 +7387,13 @@ sgx_encode_ins(struct sgx_ctx *c, const struct sgx_ins *i, uint64_t *w)
           * under format control */
          o.file = SGX_ISA_FILE_R;
          o.num += 60;
+      }
+      /* a load's destination is a temporary or PA (#dst1): the encoder has
+       * no case for anything else and would write r0 */
+      if (form == SGX_OP_LD && k == 0 &&
+          !(sgx_form_slot(form, k)->files & SGX_FILE_BIT(o.file))) {
+         sgx_fail(c, "ld: destination can't be loaded into");
+         return -1;
       }
       if (i->op[k].h16 && i->op[k].file != SGX_F_K &&
           i->op[k].file != SGX_F_C) {

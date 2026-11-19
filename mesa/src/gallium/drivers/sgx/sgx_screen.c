@@ -154,11 +154,13 @@ sgx_init_shader_caps(struct pipe_screen *pscreen)
        * (dEQP's nested struct arrays of mat4 fit in a fragment program, and
        * failed at a limit of 24 vec4).  The constants that don't fit are
        * loaded from a block in memory (ld.a.d, sgxws_const_mem), so the
-       * limit is GLES2's vertex minimum, 128 vec4, in both stages; a vertex
-       * program gets the 9 vec4 st keeps for lowered clip planes and point
-       * size on top, which leaves GL's 512 components to the application */
+       * limit is GLES2's minimum, 128 vec4, for a fragment program, and 256
+       * for a vertex program: Direct3D 9's vs_2_0 has 256 float constants,
+       * and games ported through a D3D9-to-GL layer declare them as one
+       * vec4 array (mesa/tests/sgx_vconst).  A vertex program gets the 9
+       * vec4 st keeps for lowered clip planes and point size on top */
       caps->max_const_buffer0_size =
-         (s == MESA_SHADER_VERTEX ? 128 + 9 : 128) * 4 * sizeof(float);
+         (s == MESA_SHADER_VERTEX ? 256 + 9 : 128) * 4 * sizeof(float);
       /* and 12 uniform blocks (SGX_DEBUG=ubo, with the native integers: the
        * float path makes a block offset a float): the compiler's ld.a.d
        * from the address the driver puts in constant SGX_K_UBO + n, of a
