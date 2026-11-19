@@ -783,11 +783,32 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 	/* SGXGEN_TERM_A0=<w> / SGXGEN_PRETERM_A0=<w> (bring-up probes, SGX530): the first
 	 * word each end-of-stream task hands the MTE (0x2000, 0x800), to see whether the
 	 * MTE takes it as an address */
-	pds_d0(&t, 0, getenv("SGXGEN_TERM_A0") ? env_u32("SGXGEN_TERM_A0") : 0x2000);
+	/* SGXGEN_END_PTR (bring-up probe, SGX530): the SGX530's MTE takes each update's
+	 * first output word as its record's address, so the end tasks hand it the address
+	 * of a record holding their two words, and 0 */
+	uint32_t term_w[2] = { getenv("SGXGEN_TERM_A0") ? env_u32("SGXGEN_TERM_A0") : 0x2000,
+			       getenv("SGXGEN_TERM530") ? env_u32("SGXGEN_TERM530") : 0x0016000e };
+	uint32_t pre_w[2] = { getenv("SGXGEN_PRETERM_A0") ? env_u32("SGXGEN_PRETERM_A0") : 0x800,
+			      env_u32("SGXGEN_PRETERM_A1") };
+	if (getenv("SGXGEN_END_PTR")) {
+		struct sgx_ptr tr = ring_alloc(&c->pds_vtx, 16, DMA_ALIGN), pr = ring_alloc(&c->pds_vtx, 16, DMA_ALIGN);
+
+		memset(tr.p, 0, 16);
+		memset(pr.p, 0, 16);
+		tr.p[0] = term_w[0];
+		tr.p[1] = term_w[1];
+		pr.p[0] = pre_w[0];
+		pr.p[1] = pre_w[1];
+		term_w[0] = tr.va;
+		term_w[1] = 0;
+		pre_w[0] = pr.va;
+		pre_w[1] = 0;
+	}
+	pds_d0(&t, 0, term_w[0]);
 	pds_d0(&t, 1, 0);
 	/* SGXGEN_TERM530=<word>: the 530 form seen from the vendor stack, one second
 	 * DOUTA of <word> (0x00030003 for a 64x64 target: the last tile, y<<16 | x) */
-	pds_d0(&t, 2, getenv("SGXGEN_TERM530") ? env_u32("SGXGEN_TERM530") : 0x0016000e);
+	pds_d0(&t, 2, term_w[1]);
 	pds_d0(&t, 3, 0x100);
 	pds_d0(&t, 4, doutu_w0(c, c->state_emit[2], 1, 0));
 	pds_d0(&t, 5, 0);
@@ -802,10 +823,10 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 	{
 		struct pds q = { 0 };
 
-		pds_d0(&q, 0, getenv("SGXGEN_PRETERM_A0") ? env_u32("SGXGEN_PRETERM_A0") : 0x800);
+		pds_d0(&q, 0, pre_w[0]);
 		pds_d0(&q, 1, 0);
 		/* SGXGEN_PRETERM_A1=<w> (bring-up probe, SGX530): its second DOUTA's word */
-		pds_d0(&q, 2, env_u32("SGXGEN_PRETERM_A1"));
+		pds_d0(&q, 2, pre_w[1]);
 		pds_d0(&q, 3, 0x100);
 		pds_d0(&q, 4, doutu_w0(c, c->state_emit[2], 1, 0));
 		pds_d0(&q, 5, 0);
