@@ -1262,6 +1262,14 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 			 * which header bit makes the MTE take an address from the words after it) */
 			if (getenv("SGXGEN_STATE_PTR_HDR"))
 				f.p[0] = env_u32("SGXGEN_STATE_PTR_HDR");
+			/* SGXGEN_STATE_PTR_REC=<w0>,<w1>,...: the buffer's first words (up to 64),
+			 * the rest stay <fill> (a per-word sweep of the fetched record) */
+			if (getenv("SGXGEN_STATE_PTR_REC")) {
+				char *s = getenv("SGXGEN_STATE_PTR_REC"), *e;
+
+				for (unsigned i = 0; i < 64 && *s; i++, s = *e ? e + 1 : e)
+					f.p[i] = (uint32_t)strtoul(s, &e, 0);
+			}
 			q.p[0] = f.va;
 		}
 		b = q;
