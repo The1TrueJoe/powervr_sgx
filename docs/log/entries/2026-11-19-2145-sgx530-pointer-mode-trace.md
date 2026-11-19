@@ -187,3 +187,37 @@ ending. The pass doesn't end. Next, all without vendor code:
 - the terminate record's form for this core: header 0x2000 + the last tile (3, 3);
 - whether the MTE accepts the clear's state at all: with the draw, no primitive reaches the
   DPM.
+
+## 23:10-23:20 UTC: the terminate runs; the hang doesn't depend on any record's contents
+
+Pointer mode everywhere, one-emit tasks (`SGXGEN_EMIT530=state1`), no empty update.
+
+| variant | result |
+|---|---|
+| terminate's first word raw 0x00502000 (no `END_PTR`), with the clear or end only | **b1 fault at 0x00502000**, 3 of 3: the terminate's task runs and the MTE reads its record (C) |
+| the clear's record pointer + 1 MiB | b1 fault at 0x0e101000: the MTE reads the clear's record (C) |
+| the draw with the empty vertex task | no fault, hang |
+| end only, the terminate record's last-tile word 0x00030003, 0x3003, 0, 0x0016000e, 0x33, 0x80030003 | no fault, hang; no event, no tail pointers |
+| end only, the terminate record's header 0, 0x1000, 0x4000, 0x8000, 0x10000, 0x20000000, 0x80000000 | the same |
+
+The PDS PC resting at the terminate's first instruction is just the last program it
+launched: the terminate does run. The MTE reads every record it's handed, and the pass
+still doesn't end whatever the terminate record holds. In every hang the DPM's live head
+(0x700) is unmoved and 0x724/0x72c are 0: no page was ever handed out.
+
+## Where it stands (23:20 UTC)
+
+Recipe so far (SGX530, open microkernel `sgx530_inv23`):
+- 0xa74 = 0x05208200;
+- every MTE-bound update hands the MTE a record address (`STATE_PTR`, `END_PTR`);
+- no empty secondary update (`END_NOEMPTY`);
+- state tasks end with one `emit.t1`, not the SGX545's `emit.t3` (`EMIT530=state1`).
+
+The stream then runs fault-free and the MTE reads every record, but the TA never ends and
+the DPM never hands out a page. Open:
+- whether the MTE takes the records at all past reading them: the content sweeps change
+  nothing, as if it reads and then waits;
+- what the DPM needs on this core to allocate. The free list is loaded, and the TA kick's
+  DPM clear (0x694/0x698 = 2, confirmed earlier) runs. 0x630 and 0x65c are 0, as on a first
+  kick in slot 0;
+- the TE layout registers on this core (0x208/0x20c = 0x01004004, 0x210 = 0x3003, 0x214 = 0x10).
