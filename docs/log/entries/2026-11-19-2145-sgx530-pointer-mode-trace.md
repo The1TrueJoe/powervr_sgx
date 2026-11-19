@@ -222,7 +222,7 @@ the DPM never hands out a page. Open:
   kick in slot 0;
 - the TE layout registers on this core (0x208/0x20c = 0x01004004, 0x210 = 0x3003, 0x214 = 0x10).
 
-## 2026-11-19 23:42-00:05 UTC: the DPM is idle; the MTE's input has address slots at o0 and o6
+## 23:42-23:52 UTC: the DPM is idle; the MTE's input has address slots at o0 and o6
 
 Same recipe (pointer mode everywhere, one-emit tasks, no empty update, no pre-terminate).
 New sgxgen knobs `SGXGEN_STATE_PTR_N` (f9c07c9b; the k-word state task over the 1-word
@@ -254,7 +254,7 @@ without a fault, as before. The SGX545 record we've been placing at o0 has its
 region-clip word at index 6, so the 530's input isn't that record. It's a fixed layout
 with two pointer slots, whose other words and pointed-to blocks are still unknown.
 
-## Where it stands (00:05 UTC)
+## Where it stands (23:52 UTC)
 
 Next, black box with our own frames:
 - how much the MTE reads at o0, the same way (needs the pointer placed at a page end);
