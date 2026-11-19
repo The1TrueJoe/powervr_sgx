@@ -804,7 +804,8 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 
 		pds_d0(&q, 0, getenv("SGXGEN_PRETERM_A0") ? env_u32("SGXGEN_PRETERM_A0") : 0x800);
 		pds_d0(&q, 1, 0);
-		pds_d0(&q, 2, 0);
+		/* SGXGEN_PRETERM_A1=<w> (bring-up probe, SGX530): its second DOUTA's word */
+		pds_d0(&q, 2, env_u32("SGXGEN_PRETERM_A1"));
 		pds_d0(&q, 3, 0x100);
 		pds_d0(&q, 4, doutu_w0(c, c->state_emit[2], 1, 0));
 		pds_d0(&q, 5, 0);
