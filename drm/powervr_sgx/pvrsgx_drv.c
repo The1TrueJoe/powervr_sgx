@@ -416,9 +416,7 @@ static int pvrsgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 static void pvrsgx_remove(struct pci_dev *pdev)
 {
-	struct pvrsgx_device *sdev = pci_get_drvdata(pdev);
-
-	pvrsgx_remove_common(sdev);
+	pvrsgx_remove_common(pci_get_drvdata(pdev));
 }
 
 static void pvrsgx_shutdown(struct pci_dev *pdev)
