@@ -43,7 +43,7 @@ struct sgx_resource {
                     (sgxws_use_bo) */
    struct renderonly_scanout
       *scanout;     /* kmsro: its buffer on the display device */
-   bool dumb_later; /* kmsro with a display the CPU reads: made the display's
+   bool dumb_later; /* kmsro with a dumb-buffer display: made the display's
                        dumb buffer when a KMS handle is asked for */
 
    uint32_t uid, gen; /* buffers: an id never reused, and a count of writes
