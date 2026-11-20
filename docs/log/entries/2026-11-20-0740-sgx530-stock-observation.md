@@ -99,3 +99,32 @@ this work doesn't read. No new change to try came out of the output format, so T
 still doesn't fire on ours.
 
 Board: back on the normal SD boot (one-shot 0), lock released.
+
+## 08:34-08:37 UTC: one bounded sweep of our state task's forms (Joseph: "One bounded sweep")
+
+Fixed list of 16 of our own variants, written down before the first run. Detector: an object
+in our parameter buffer, from either the hang dump's DPM registers (head 0x700 moved, or
+0x724/0x72c nonzero) or our first PB page (GPU VA 0x08400000) read back through the page
+tables mid-run. The GPU's module was held on for every read. Common to all runs: the SGX530
+forms, 0xa74 = 0x05208200, no pre-terminate, no empty secondary update, and the clear with its
+draw. "Data mode" means the state block is DMA'd into the state task with no pointer, the way the
+stock MTE takes it.
+
+| # | variant | result |
+|---|---|---|
+| 1 | data mode, one-emit state tasks | fault at 0xd000 (the header read as an address); no object |
+| 2 | data mode, the SGX545's three-emit ending, one phase | the same |
+| 3 | data mode, the SGX545 state task as is | the same |
+| 4-7 | 1 with the final emit's target t0, or t1 with f13 / f12 / f10 | the same |
+| 8-9 | 1 with n = 1 / 3 | the same |
+| 10 | 1 with the state DMA to primary attributes | the same |
+| 11 | 1 with DMA kind 1 | the same |
+| 12 | 1 without DOUTU bit 21 | the same |
+| 13 | 1 with DOUTU word 2 = 1 | the same |
+| 14 | 1 with the SGX545 VDM info form | the same |
+| 15 | pointer mode, our recipe (control) | no fault, hang; no object |
+| 16 | 15 with the 12-word task over the pointer | the same |
+
+In every run the PB page was mapped and held only zeros, and the DPM head and counts never
+moved. **No variant writes an object**, so the SGX530 is parked again, as agreed. The board
+stayed on its normal SD boot throughout.
