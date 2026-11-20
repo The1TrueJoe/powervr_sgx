@@ -329,3 +329,31 @@ word hangs** (C), so the end of the pass isn't decided by the stream's contents.
 **Parked here.** The recipe and the ruled-out list are in `docs/porting/cores/sgx530.md`
 ("The TA stream"). The next direction, when picked up, is the TA kick itself: compare it
 against our own SGX545 microkernel's, since even an empty stream doesn't complete.
+
+## 2026-11-20 00:39-00:50 UTC: the TA kick against our SGX545 microkernel's
+
+Un-parked to compare the kick itself. Our open microkernel's source (`ukernel/ukernel.py`,
+`cores/sgx530.py` on the sgx530 branch, the inv23 image's) and the hang dumps. Fault-free
+end-only stream, same recipe.
+
+- **The microkernel side is healthy (C).** The control block (`ta3dctl` in the dump, word 0 =
+  its own address) shows no bounded wait timed out (+0xa0/+0xa4 = 0), the heartbeat at 3
+  events, and the TA-in-flight flag (word 0x36) = 1. It kicked the TA and waits for
+  `EVENT_STATUS` b13 (TA finished, 0x2000 in its dispatch), which the hardware never raises.
+  `CLKGATESTATUS` shows the TA clock active (b12) through the hang.
+  `BIF_MEM_REQ_STAT` b1 toggles at idle too, so it's the microkernel's own polling, not a stuck TA request.
+- **The SGX545's TA command values (`ta_revert`, b0 tile width, b1 screen packing, b2 TE AA,
+  b3 VDM control; 1, 2, 4, 8, 3, 15) and VDM control 0xa2 / 0x82:** the same hang.
+- **0xa74 with each of bits 3-26 flipped** from 0x05208200 (b22's run lost to the link): the
+  same hang. Bits 27-31 are the TA-flags field the microkernel rewrites at every kick.
+- **Every register the kick writes from the SGX545's TA table exists on the 530 (C):** read
+  at idle before the kick (all 0) and at the hang, 0x204-0x248 hold what was written (0x208/0x20c
+  0x01004004, 0x210 0x3003, 0x214 0x10, 0x218 0x01000000, 0x21c/0x220/0x234 the region,
+  tail and control arrays, 0x230 0x80, 0x238 the stream base 0x01841000, 0x23c 0x1a2,
+  0x240/0x244 1e-6, 0x248 0x0003f03f). The ones the table zeroes (0x2a8-0x374, 0x74c, 0xa04,
+  0xaa0) read 0 at idle too, so no default is lost.
+
+So the kick programs every register the SGX545 needs, the stream runs, and the TA never
+ends. What's left is a register the SGX530's TA needs that the SGX545's kick never writes.
+Finding one by experiment means reading offsets our docs don't name, outside this work's
+rules, so it waits for the coordinator.
