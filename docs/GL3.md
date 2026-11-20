@@ -86,7 +86,9 @@ Mesa's ES gate (`compute_version_es2()`, Mesa 26.2.5) is 24 conditions, marked
   `ARB_map_buffer_range`, `ARB_texture_rg`, `EXT_texture_sRGB`,
   `ARB_framebuffer_object`, `ARB_draw_instanced`, `ARB_instanced_arrays`,
   primitive restart, `MaxColorAttachments` ≥ 4 (a pass per target).
-- **Behind `SGX_DEBUG`:** `ARB_uniform_buffer_object` (`ubo`).
+- **Behind `SGX_DEBUG`:** `ARB_uniform_buffer_object` (`ubo`); 16 vertex
+  texture units (`vtf`), which ES 3.0 needs though the gate doesn't check
+  them.
 - **Free with GLSL 1.30 (`glsl130`):** `OES_depth_texture_cube_map` (st
   turns it on in its GLSL ≥ 1.30 block).
 - **Driver work, no hardware unknown:** `EXT_texture_snorm`, `EXT_sRGB`,
@@ -222,7 +224,7 @@ rotation of each triangle's vertices on the CPU before step 2.
 | primitive restart (`NV_primitive_restart`) | none known | split on the CPU (`util_draw_vbo_without_prim_restart`); the driver already reads indices on the CPU | `sgx_draw.c` | high |
 | rectangle textures (`NV_texture_rectangle`) | NPOT linear layout (T1 layout 3) | unnormalized coordinates scaled in NIR (`nir_lower_tex` `lower_rect`) | TEX.md §1 (hardware) | high |
 | texture buffer objects (3.1 core; Mesa doesn't gate on them) | — | a linear 1D texture of the buffer, `texelFetch` through `ld` | ISA.md `ld` | medium |
-| 16 vertex texture units | the vertex program samples with `smp` (h8-9 = 2) | the compiler emits vertex samples (dependent `smp`); the driver has fragment samplers only (`sgx_screen.c`) and needs vertex sampler views and states, their DOUTT words in the vertex program's SA, and the size constants (lower_txs_int) for vertex units: until then a vertex program that samples is refused | ISA.md "Vertex texture fetch" (corpus); listed (ICD: 16) | medium |
+| 16 vertex texture units | the vertex program samples with `smp` (h8-9 = 2) | the compiler emits vertex samples (dependent `smp`); the driver's vertex sampler views and states, their DOUTT words in the vertex program's SA, and the size constants (lower_txs_int) for vertex units (in, `SGX_DEBUG=vtf,glsl130`: see "Status") | ISA.md "Vertex texture fetch" (corpus; hardware, open stack: `mesa/tests/sgx_vtf.c`); listed (ICD: 16) | high |
 
 ## GL 3.2
 
@@ -605,6 +607,29 @@ Runs 4 and 5 (the second CE5300 board, 2026-11-12; `docs/log/entries/2026-11-12-
   - The default path with this in (run 23): dEQP 78 F / 16637 P and zs, ms,
     ff, gl21 against run 19 unchanged, apart from fixed-clip-enables (the
     intermittent above).
+- **Vertex texture fetch** (`SGX_DEBUG=vtf,glsl130`: 16 vertex units,
+  `MAX_VERTEX_TEXTURE_IMAGE_UNITS`). The compiler already emitted a vertex
+  sample as a dependent `smp` at LOD c48 (or the shader's LOD) under the
+  native integers; the driver now takes it. The vertex stage has its own
+  samplers and views; a vertex program's texture state blocks go in its SA
+  after its constants (from sa10), its smps go in as a fragment program's
+  (`insert_samples`), and the draw writes the state words from the vertex
+  views. Sizes and level counts (`lower_txs`, `SGX_K_SIZE`, `SGX_K_LEVELS`)
+  come from the stage's own views, and a vertex variant is compiled for the
+  views bound to its units as a fragment one is (`tex_key`: BGRA order,
+  swizzles, depth and the R32 planes, sRGB).
+  - On the Clover Trail tablet (SGX545, 2026-11-17), `mesa/tests/sgx_vtf.c` (a
+    GLES2 and an ES 3.00 context under `MESA_GLES_VERSION_OVERRIDE=3.0`): a
+    colour per quad from a 4x1 RGBA8 texture, the sampler's LINEAR filter
+    between two texels, a displacement by a height texture (glmark2's
+    terrain), a vertex and a fragment unit bound to different textures,
+    `texelFetch` and `textureSize`, `textureLod` at levels 0-3 of a 32x32
+    texture: all exact. (A texture under 16 on a side that may be rendered
+    into is linear and so has no mipmaps: a `textureLod` past level 0 of a 2x2
+    one reads level 0, in either stage.)
+  - glmark2's terrain runs (1 FPS: its render-to-texture passes are copied on
+    the CPU, `SGX_DEBUG=stats`), and Chromium's Skia programs no longer fail
+    on `MAX_VERTEX_TEXTURE_IMAGE_UNITS` under ANGLE's GLES backend.
 
 - primitive restart, the NV extension and the fixed index: split on the CPU
   (`sgx_draw_vbo`);

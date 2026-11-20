@@ -933,7 +933,7 @@ lower_srgb_filter(nir_builder *b, nir_instr *instr, void *data)
    return true;
 }
 
-/* the units a fragment shader takes shadow samples of */
+/* the units a shader takes shadow samples of */
 static uint32_t
 shadow_units(nir_shader *nir)
 {
@@ -1186,15 +1186,16 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
    /* the units sampling 8888 texels get them B, G, R, A ordered
     * (sgx_tex_format): all of them unless the variant says otherwise */
    /* a unit sampled for a compare holds a depth texture */
-   uint32_t shadow =
-      nir->info.stage == MESA_SHADER_FRAGMENT ? shadow_units(nir) : 0;
+   uint32_t shadow = shadow_units(nir);
+   /* (a vertex program's samples too, SGX_DEBUG=vtf: its units' variant from
+    * sgx_vs_for) */
+   opts.tex_bgra = ~not_bgra & ~(depth | shadow);
+   opts.tex_f32 = depth | shadow;
+   /* RGBA32 and RG32: a read of each channel's R32 plane (each read's
+    * plane in its sample info, sgx_draw.c adds it to the address) */
+   opts.tex_r32x4 = so->r32x4;
+   opts.tex_r32x2 = so->r32x2;
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      opts.tex_bgra = ~not_bgra & ~(depth | shadow);
-      opts.tex_f32 = depth | shadow;
-      /* RGBA32 and RG32: a read of each channel's R32 plane (each read's
-       * plane in its sample info, sgx_draw.c adds it to the address) */
-      opts.tex_r32x4 = so->r32x4;
-      opts.tex_r32x2 = so->r32x2;
       /* a coordinate only samples read: the PDS samples from the set
        * itself (a pure-sample DOUTI, source 0x24, below) */
       opts.pds_samples_alone = screen->core->pds_samples;
@@ -1243,11 +1244,10 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
     * the sizes they ask for are lower_txs's */
    if (opts.native_integers)
       NIR_PASS(_, nir, sgx_lower_tex, &opts);
-   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      NIR_PASS(_, nir, nir_shader_instructions_pass, lower_txs,
-               nir_metadata_control_flow, &opts.native_integers);
-      NIR_PASS(_, nir, nir_opt_dce);
-   } else {
+   /* (a vertex program's sizes from its own units, fill_consts) */
+   NIR_PASS(_, nir, nir_shader_instructions_pass, lower_txs,
+            nir_metadata_control_flow, &opts.native_integers);
+   if (vertex) {
       struct vertex_id_data vid = {.ints = opts.native_integers};
 
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_instance_id,
@@ -1256,8 +1256,8 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
                nir_metadata_control_flow, &vid);
       so->vertex_id_slot = vid.var ? vid.var->data.driver_location + 1 : 0;
       so->vertex_id_int = vid.ints;
-      NIR_PASS(_, nir, nir_opt_dce);
    }
+   NIR_PASS(_, nir, nir_opt_dce);
    remap_legacy_varyings(nir);
    /* (names the variables the way the list does) */
    assign_varyings(nir, &vary, false);
@@ -1394,14 +1394,14 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
 
    {
       /* An instruction names an SA register in 7 bits: a program's constants
-       * (from sa9, sa10 in a vertex program) and a fragment program's
-       * texture state (after them) end at sa127.  Past it the numbers wrap,
+       * (from sa9, sa10 in a vertex program) and the texture state of its
+       * dependent samples (after them) end at sa127.  Past it the numbers wrap,
        * onto registers the program never loaded, and the 3D locks up (piglit
        * glsl-uniform-interstage-limits).  The compiler moves constants that
        * don't fit to memory (mem_dwords), so this only catches a program
        * whose SA use still runs past (a guard, not drawn). */
       unsigned end = (vertex ? 10 : 9) + MAX2(so->const_dwords, out.sa_slots) +
-                     (vertex ? 0 : 4 * info.n_states);
+                     4 * info.n_states;
 
       if (end > 128) {
          fprintf(
@@ -1423,8 +1423,35 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
       unsigned dwords = 4, tsp[SGX_MAX_SETS] = {0};
 
       so->prog.vertex = true;
-      so->prog.code =
-         sgxws_upload_vs(ctx->hw, out.code, out.n_code, out.n_temps);
+      if (info.n_deps) {
+         /* vertex texture fetch: each texture state's 4 words in SA after
+          * every register the program uses, as a fragment program's (the
+          * draw writes them, sgx_draw.c), and the smps put in */
+         unsigned sa[SGX_MAX_DEP_SAMPLES], n;
+         uint64_t *code;
+
+         so->const_dwords = MAX2(so->const_dwords, out.sa_slots);
+         for (unsigned k = 0; k < info.n_states; k++)
+            so->dep_sa[k] = 10 + so->const_dwords + 4 * k;
+         for (unsigned j = 0; j < info.n_deps; j++) {
+            unsigned k = info.deps[j].state;
+
+            so->dep_sampler[k] = info.deps[j].sampler;
+            so->dep_f16[k] = info.deps[j].f16;
+            so->dep_fetch[k] = info.deps[j].fetch;
+            so->dep_plane[k] = info.deps[j].plane;
+            sa[j] = so->dep_sa[k];
+         }
+         so->n_deps = info.n_states;
+         so->const_dwords += 4 * info.n_states;
+         code = insert_samples(out.code, out.n_code, &info, sa, &n);
+         so->prog.code =
+            code ? sgxws_upload_vs(ctx->hw, code, n, out.n_temps) : 0;
+         free(code);
+      } else {
+         so->prog.code =
+            sgxws_upload_vs(ctx->hw, out.code, out.n_code, out.n_temps);
+      }
       so->prog.in_dwords = so->prog.attr_dwords = 4 * MAX2(so->n_attribs, 1);
       for (unsigned s = 0; s < SGX_MAX_SETS; s++) {
          unsigned n = vary.set_comps[s];
@@ -1852,6 +1879,114 @@ sgx_delete_shader_state(struct pipe_context *pctx, void *hwcso)
    destroy_variant(ctx, so);
 }
 
+/* how a shader's texture units are read, from the views and samplers bound
+ * to them: what its variants are compiled for (sgx_fs_for, sgx_vs_for) */
+struct tex_key {
+   unsigned srgb;
+   uint32_t srgb_filter;
+   uint16_t swz[PIPE_MAX_SAMPLERS];
+   uint32_t not_bgra, depth;
+   uint32_t r32x4, r32x2;
+   uint8_t compare[PIPE_MAX_SAMPLERS];
+};
+
+/* false when every unit reads as a variant-free program does */
+static bool
+tex_key_of(const nir_shader *nir, struct pipe_sampler_view *const *views,
+           struct pipe_sampler_state *const *samplers, struct tex_key *k)
+{
+   bool any_swz = false;
+   unsigned unit;
+
+   memset(k, 0, sizeof(*k));
+   BITSET_FOREACH_SET (unit, nir->info.textures_used, PIPE_MAX_SAMPLERS) {
+      const struct pipe_sampler_view *v = views[unit];
+
+      if (!v)
+         continue;
+      if (util_format_is_srgb(v->format)) {
+         const struct pipe_sampler_state *ss = samplers[unit];
+
+         k->srgb |= 1u << unit;
+         /* filtered at one level: decoded before it's filtered */
+         if (ss &&
+             (ss->mag_img_filter == PIPE_TEX_FILTER_LINEAR ||
+              ss->min_img_filter == PIPE_TEX_FILTER_LINEAR) &&
+             (ss->min_mip_filter == PIPE_TEX_MIPFILTER_NONE ||
+              v->u.tex.first_level == v->u.tex.last_level))
+            k->srgb_filter |= 1u << unit;
+      }
+      if (!sgx_tex_bgra(v->format))
+         k->not_bgra |= 1u << unit;
+      /* one F32 word a texel (tex_f32): depth, and R32 (raw); RG32 and
+       * RGBA32 a read a plane (tex_r32x2 / x4) */
+      if (sgx_tex_raw32(v->format) == 1)
+         k->depth |= 1u << unit;
+      if (sgx_tex_raw32(v->format) == 4)
+         k->r32x4 |= 1u << unit;
+      else if (sgx_tex_raw32(v->format) == 2)
+         k->r32x2 |= 1u << unit;
+      if (sgx_tex_depth(v->format)) {
+         const struct pipe_sampler_state *ss = samplers[unit];
+
+         k->depth |= 1u << unit;
+         if (ss && ss->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE)
+            k->compare[unit] = ss->compare_func + 1;
+      }
+      /* An X8 colour format is sampled as its alpha twin (sgx_tex_format), so
+       * the X byte would come back as alpha: GL reads it as 1.  The state
+       * tracker's views say so in their swizzle, u_blitter's source views
+       * don't (a CopyTexSubImage from an XRGB window drawn on the GPU took
+       * the X byte, 0, as alpha: Minecraft's title-screen panorama) */
+      unsigned sw[4] = {v->swizzle_r, v->swizzle_g, v->swizzle_b, v->swizzle_a};
+
+      if (util_format_get_blocksize(v->format) == 4 &&
+          !util_format_has_alpha(v->format) &&
+          !util_format_is_depth_or_stencil(v->format) &&
+          util_format_description(v->format)->channel[3].type ==
+             UTIL_FORMAT_TYPE_VOID) {
+         for (unsigned c = 0; c < 4; c++)
+            if (sw[c] == PIPE_SWIZZLE_W)
+               sw[c] = PIPE_SWIZZLE_1;
+      }
+      /* XYZW: none, 0 */
+      if (sw[0] != PIPE_SWIZZLE_X || sw[1] != PIPE_SWIZZLE_Y ||
+          sw[2] != PIPE_SWIZZLE_Z || sw[3] != PIPE_SWIZZLE_W) {
+         /* b15 marks one: XXXX packs to 0 */
+         k->swz[unit] = 0x8000 | sw[0] | sw[1] << 3 | sw[2] << 6 | sw[3] << 9;
+         any_swz = true;
+      }
+   }
+   /* (depth alone, as before: a depth unit is not B, G, R, A either) */
+   return k->srgb || any_swz || k->not_bgra || k->r32x4 || k->r32x2;
+}
+
+static bool
+tex_key_is(const struct sgx_pipe_shader *v, const struct tex_key *k)
+{
+   return v->srgb == k->srgb && v->srgb_filter == k->srgb_filter &&
+          v->not_bgra == k->not_bgra && v->depth == k->depth &&
+          v->r32x4 == k->r32x4 && v->r32x2 == k->r32x2 &&
+          !memcmp(v->compare, k->compare, sizeof(k->compare)) &&
+          !memcmp(v->swz, k->swz, sizeof(k->swz));
+}
+
+static void
+tex_key_set(struct sgx_pipe_shader *v, const struct tex_key *k)
+{
+   v->srgb = k->srgb;
+   v->srgb_filter = k->srgb_filter;
+   memcpy(v->swz, k->swz, sizeof(k->swz));
+   v->not_bgra = k->not_bgra;
+   v->depth = k->depth;
+   v->r32x4 = k->r32x4;
+   v->r32x2 = k->r32x2;
+   memcpy(v->compare, k->compare, sizeof(k->compare));
+}
+
+/* vs_for: the vertex shader for fs's sets (NULL: its own), these input
+ * formats and points; and with vertex texture fetch, for the views and
+ * samplers bound to its units (tex_key) */
 struct sgx_pipe_shader *
 sgx_vs_for(struct sgx_context *ctx, struct sgx_pipe_shader *vs,
            const struct sgx_pipe_shader *fs, const uint8_t *vtx_fmt,
@@ -1860,20 +1995,25 @@ sgx_vs_for(struct sgx_context *ctx, struct sgx_pipe_shader *vs,
    static const uint8_t f32x4[16];
    const struct sgx_varyings *vary = fs && fs->vary ? fs->vary : vs->vary;
    struct sgx_pipe_shader **slot;
+   struct tex_key k;
+   bool tex =
+      vs->nir && tex_key_of(vs->nir, ctx->vs_views, ctx->vs_samplers, &k);
 
    if (!vtx_fmt)
       vtx_fmt = f32x4;
    points = points && vs->writes_psize;
    if ((!vs->vary || !vary || same_varyings(vs->vary, vary)) &&
-       !memcmp(vtx_fmt, f32x4, sizeof(f32x4)) && !points)
+       !memcmp(vtx_fmt, f32x4, sizeof(f32x4)) && !points && !tex)
       return vs;
+   if (!tex)
+      memset(&k, 0, sizeof(k));
    for (unsigned i = 0; i < ARRAY_SIZE(vs->variants_vs); i++) {
       struct sgx_pipe_shader *v = vs->variants_vs[i];
 
       if (v && v->points == points &&
           (!vary || (same_varyings(v->vary, vary) &&
                      v->vary->point_size == vary->point_size)) &&
-          !memcmp(v->vtx_fmt, vtx_fmt, sizeof(v->vtx_fmt)))
+          !memcmp(v->vtx_fmt, vtx_fmt, sizeof(v->vtx_fmt)) && tex_key_is(v, &k))
          return v;
    }
    if (!vs->nir)
@@ -1886,8 +2026,10 @@ sgx_vs_for(struct sgx_context *ctx, struct sgx_pipe_shader *vs,
    (*slot)->discard_pa = -1;
    (*slot)->depth_pa = -1;
    (*slot)->points = points;
-   if (!compile_shader(ctx, *slot, vs->nir, fs ? fs->vary : NULL, 0, 0, NULL, 0,
-                       vtx_fmt, points, 0, NULL) ||
+   tex_key_set(*slot, &k);
+   if (!compile_shader(ctx, *slot, vs->nir, fs ? fs->vary : NULL, k.srgb,
+                       k.srgb_filter, k.swz, k.not_bgra, vtx_fmt, points,
+                       k.depth, k.compare) ||
        !(*slot)->prog.code) {
       FREE((*slot)->vary);
       FREE(*slot);
@@ -1896,7 +2038,7 @@ sgx_vs_for(struct sgx_context *ctx, struct sgx_pipe_shader *vs,
    return *slot;
 }
 
-/* the texture units a fragment shader samples (all, when it isn't known) */
+/* the texture units a shader samples (all, when it isn't known) */
 uint32_t
 sgx_fs_textures_used(const struct sgx_pipe_shader *fs)
 {
@@ -1914,14 +2056,8 @@ struct sgx_pipe_shader *
 sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
 {
    struct sgx_pipe_shader **slot;
-   unsigned srgb = 0, unit;
-   uint32_t srgb_filter = 0;
-   uint16_t swz[PIPE_MAX_SAMPLERS] = {0};
-   uint32_t not_bgra = 0, depth = 0;
-   uint8_t compare[PIPE_MAX_SAMPLERS] = {0};
-   bool any_swz = false;
+   struct tex_key k;
    uint8_t rt_int = 0;
-   uint32_t r32x4 = 0, r32x2 = 0;
    /* MRT: a variant a colour buffer (remap_outputs) */
    uint8_t rt_target =
       ctx->framebuffer.nr_cbufs > 1 ? ctx->rt_index + 1 : 0;
@@ -1935,77 +2071,13 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
                   ? 3 + ctx->rt_plane /* a plane: channel rt_plane */
                : sgx_tex_raw32(sgx_cbuf(ctx)->format) ? 2
                                                                  : 1;
-   BITSET_FOREACH_SET (unit, fs->nir->info.textures_used, PIPE_MAX_SAMPLERS) {
-      const struct pipe_sampler_view *v = ctx->views[unit];
-
-      if (!v)
-         continue;
-      if (util_format_is_srgb(v->format)) {
-         const struct pipe_sampler_state *ss = ctx->samplers[unit];
-
-         srgb |= 1u << unit;
-         /* filtered at one level: decoded before it's filtered */
-         if (ss &&
-             (ss->mag_img_filter == PIPE_TEX_FILTER_LINEAR ||
-              ss->min_img_filter == PIPE_TEX_FILTER_LINEAR) &&
-             (ss->min_mip_filter == PIPE_TEX_MIPFILTER_NONE ||
-              v->u.tex.first_level == v->u.tex.last_level))
-            srgb_filter |= 1u << unit;
-      }
-      if (!sgx_tex_bgra(v->format))
-         not_bgra |= 1u << unit;
-      /* one F32 word a texel (tex_f32): depth, and R32 (raw); RG32 and
-       * RGBA32 a read a plane (tex_r32x2 / x4) */
-      if (sgx_tex_raw32(v->format) == 1)
-         depth |= 1u << unit;
-      if (sgx_tex_raw32(v->format) == 4)
-         r32x4 |= 1u << unit;
-      else if (sgx_tex_raw32(v->format) == 2)
-         r32x2 |= 1u << unit;
-      if (sgx_tex_depth(v->format)) {
-         const struct pipe_sampler_state *ss = ctx->samplers[unit];
-
-         depth |= 1u << unit;
-         if (ss && ss->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE)
-            compare[unit] = ss->compare_func + 1;
-      }
-      /* An X8 colour format is sampled as its alpha twin (sgx_tex_format), so
-       * the X byte would come back as alpha: GL reads it as 1.  The state
-       * tracker's views say so in their swizzle, u_blitter's source views
-       * don't (a CopyTexSubImage from an XRGB window drawn on the GPU took
-       * the X byte, 0, as alpha: Minecraft's title-screen panorama) */
-      unsigned sw[4] = {v->swizzle_r, v->swizzle_g, v->swizzle_b, v->swizzle_a};
-
-      if (util_format_get_blocksize(v->format) == 4 &&
-          !util_format_has_alpha(v->format) &&
-          !util_format_is_depth_or_stencil(v->format) &&
-          util_format_description(v->format)->channel[3].type == UTIL_FORMAT_TYPE_VOID) {
-         for (unsigned c = 0; c < 4; c++)
-            if (sw[c] == PIPE_SWIZZLE_W)
-               sw[c] = PIPE_SWIZZLE_1;
-      }
-      /* XYZW: none, 0 */
-      if (sw[0] != PIPE_SWIZZLE_X || sw[1] != PIPE_SWIZZLE_Y ||
-          sw[2] != PIPE_SWIZZLE_Z || sw[3] != PIPE_SWIZZLE_W) {
-         /* b15 marks one: XXXX packs to 0 */
-         swz[unit] = 0x8000 | sw[0] | sw[1] << 3 | sw[2] << 6 | sw[3] << 9;
-         any_swz = true;
-      }
-   }
-   if (!srgb && !any_swz && !not_bgra && !rt_int && !r32x4 && !r32x2 &&
+   if (!tex_key_of(fs->nir, ctx->views, ctx->samplers, &k) && !rt_int &&
        !rt_target)
       return fs;
    for (unsigned i = 0; i < ARRAY_SIZE(fs->variants_srgb); i++) {
-      if (fs->variants_srgb[i] && fs->variants_srgb[i]->srgb == srgb &&
-          fs->variants_srgb[i]->srgb_filter == srgb_filter &&
-          fs->variants_srgb[i]->not_bgra == not_bgra &&
-          fs->variants_srgb[i]->depth == depth &&
+      if (fs->variants_srgb[i] && tex_key_is(fs->variants_srgb[i], &k) &&
           fs->variants_srgb[i]->rt_int == rt_int &&
-          fs->variants_srgb[i]->rt_target == rt_target &&
-          fs->variants_srgb[i]->r32x4 == r32x4 &&
-          fs->variants_srgb[i]->r32x2 == r32x2 &&
-          !memcmp(fs->variants_srgb[i]->compare, compare, sizeof(compare)) &&
-          !memcmp(fs->variants_srgb[i]->swz, swz, sizeof(swz)))
+          fs->variants_srgb[i]->rt_target == rt_target)
          return fs->variants_srgb[i];
    }
    /* the oldest goes */
@@ -2016,18 +2088,11 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
       return NULL;
    (*slot)->discard_pa = -1;
    (*slot)->depth_pa = -1;
-   (*slot)->srgb = srgb;
-   (*slot)->srgb_filter = srgb_filter;
-   memcpy((*slot)->swz, swz, sizeof(swz));
-   (*slot)->not_bgra = not_bgra;
-   (*slot)->depth = depth;
+   tex_key_set(*slot, &k);
    (*slot)->rt_int = rt_int;
    (*slot)->rt_target = rt_target;
-   (*slot)->r32x4 = r32x4;
-   (*slot)->r32x2 = r32x2;
-   memcpy((*slot)->compare, compare, sizeof(compare));
-   if (!compile_shader(ctx, *slot, fs->nir, NULL, srgb, srgb_filter, swz,
-                       not_bgra, NULL, false, depth, compare) ||
+   if (!compile_shader(ctx, *slot, fs->nir, NULL, k.srgb, k.srgb_filter, k.swz,
+                       k.not_bgra, NULL, false, k.depth, k.compare) ||
        !(*slot)->code) {
       FREE((*slot)->vary);
       FREE(*slot);

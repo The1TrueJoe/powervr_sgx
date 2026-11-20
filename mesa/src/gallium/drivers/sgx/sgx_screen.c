@@ -66,6 +66,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "uniform blocks, 12 a stage of 64 KiB, each copied into the frame for a draw (ARB_uniform_buffer_object; with glsl130 only, as their offsets are integers): until that passes on a board"},
    {"zlsdump", SGX_DEBUG_ZLS_DUMP,
     "after every flushed render with a depth buffer, wait for it and write its ZLS buffer to /tmp/sgx-zls-<n>-<w>x<h>-<format>-s<samples>.bin (the layout test, docs/TEX.md section 7)"},
+   {"vtf", SGX_DEBUG_VTF,
+    "vertex texture fetch: 16 sampler units in the vertex stage (with glsl130 only, as the compiler samples in a vertex program with native integers): until it passes on a board"},
    {"tex3d", SGX_DEBUG_TEX3D,
     "3D textures up to 256 on a side, in the volume layout (docs/TEX.md section 14): until piglit and dEQP pass them"},
    {"flushrt", SGX_DEBUG_FLUSH_RT,
@@ -127,6 +129,16 @@ sgx_ubos(void)
           (SGX_DEBUG_UBO | SGX_DEBUG_GLSL130);
 }
 
+/* vertex texture fetch: SGX_DEBUG=vtf, and only with the native integers (the
+ * compiler samples in a vertex program on that path, and the sizes come from
+ * its integer block) */
+bool
+sgx_vtf(void)
+{
+   return (sgx_drv_debug & (SGX_DEBUG_VTF | SGX_DEBUG_GLSL130)) ==
+          (SGX_DEBUG_VTF | SGX_DEBUG_GLSL130);
+}
+
 static void
 sgx_init_shader_caps(struct pipe_screen *pscreen)
 {
@@ -177,6 +189,13 @@ sgx_init_shader_caps(struct pipe_screen *pscreen)
       /* GLSL 1.30's integers (the compiler's native_integers): only with
        * SGX_DEBUG=glsl130 until the GL 3.0 work passes on a board */
       caps->integers = !!(sgx_drv_debug & SGX_DEBUG_GLSL130);
+      /* vertex texture fetch (SGX_DEBUG=vtf): the compiler's dependent smp at
+       * LOD 0 with its state in the vertex program's SA (ISA.md "Vertex
+       * texture fetch"); the 16 units docs/GL3.md lists, their sizes in the
+       * native-integer block (SGX_K_SIZE_UNITS) */
+      if (s == MESA_SHADER_VERTEX && sgx_vtf())
+         caps->max_texture_samplers = caps->max_sampler_views =
+            SGX_K_SIZE_UNITS;
       if (s == MESA_SHADER_FRAGMENT) {
          caps->max_texture_samplers = caps->max_sampler_views = f->samplers;
          /* mediump and lowp in 16 bits (F16 iteration, fmad16, F16/C10
