@@ -1017,6 +1017,76 @@ record_ubo(struct sgx_context *ctx, mesa_shader_stage stage, unsigned n,
    u->bytes = MIN2(u->bytes, (unsigned)SGX_UBO_BYTES);
 }
 
+/* A program's dependent samples' texture state: each block's 4 DOUTT words in
+ * SA, block[so->dep_sa[j] - first] (first: the SA register block[0] goes
+ * to); the units read into *sampled from bit `bit` (sampled_view). False
+ * when a unit has no texture the GPU can sample: the draw is skipped. */
+static bool
+dep_states(struct sgx_context *ctx, const struct sgx_pipe_shader *so,
+           struct pipe_sampler_view *const *views,
+           struct pipe_sampler_state *const *samplers, uint32_t *block,
+           unsigned first, uint64_t *sampled, unsigned bit)
+{
+   for (unsigned j = 0; j < so->n_deps; j++) {
+      unsigned unit = so->dep_sampler[j];
+      struct pipe_sampler_view *view =
+         unit < PIPE_MAX_SAMPLERS ? views[unit] : NULL;
+      uint32_t *w = &block[so->dep_sa[j] - first];
+
+      if (!view || !sgx_resource_sampleable(sgx_resource(view->texture))) {
+         SGX_DBG(DRAW,
+                 "%ssampler %u: no texture the GPU can sample, draw skipped\n",
+                 so->prog.vertex ? "vertex " : "", unit);
+         return false;
+      }
+      /* a texelFetch reads the texel at an explicit level, whatever the
+       * bound sampler filters or wraps (the compiler's sgx_lower_tex
+       * puts the coordinate at the texel's centre) */
+      const struct pipe_sampler_state fetch = {
+         .wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+         .wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+         .wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
+         .min_img_filter = PIPE_TEX_FILTER_NEAREST,
+         .mag_img_filter = PIPE_TEX_FILTER_NEAREST,
+         .min_mip_filter = PIPE_TEX_MIPFILTER_NEAREST,
+         .max_lod = 1000.0f,
+      };
+      sgx_tex_words(view, so->dep_fetch[j] ? &fetch : samplers[unit], w);
+      /* a read of plane c of an RG32 / RGBA32 texture: c planes on
+       * (T2 is the address, unshifted) */
+      if (so->dep_plane[j])
+         w[2] +=
+            so->dep_plane[j] * (uint32_t)sgx_tex_plane_stride(view->texture);
+      /* an F16 texel: the whole T3, as for a PDS sample's */
+      if (so->dep_f16[j])
+         w[3] = 0x01028800u;
+      sgx_resource(view->texture)->use_seq = sgxws_next_seq(ctx->hw);
+      *sampled |= 1ull << (bit + unit);
+      SGX_DBG(
+         DRAW,
+         "  %sdependent sample %u: unit %u %s %ux%u target %u levels %u, state sa%u %08x %08x %08x %08x\n",
+         so->prog.vertex ? "vertex " : "", j, unit,
+         util_format_short_name(view->format), view->texture->width0,
+         view->texture->height0, view->texture->target,
+         view->texture->last_level + 1, so->dep_sa[j], w[0], w[1], w[2], w[3]);
+   }
+   return true;
+}
+
+/* the views bound to a stage's units (the vertex stage's: SGX_DEBUG=vtf) */
+static struct pipe_sampler_view **
+stage_views(struct sgx_context *ctx, mesa_shader_stage stage)
+{
+   return stage == MESA_SHADER_VERTEX ? ctx->vs_views : ctx->views;
+}
+
+/* a bit of sgx_draw_vbo_impl's sampled mask: its view */
+static struct pipe_sampler_view *
+sampled_view(struct sgx_context *ctx, unsigned bit)
+{
+   return bit >= 32 ? ctx->vs_views[bit - 32] : ctx->views[bit];
+}
+
 /* a compiled shader's constants: sa[base + slot] = constant buffer 0 float k */
 static void
 fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
@@ -1043,10 +1113,10 @@ fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
       float v = cb && k->k < avail ? cb[k->k] : 0.0f;
 
       /* a texture's size (sgx_program.c lower_txs) */
-      if (stage == MESA_SHADER_FRAGMENT && k->k >= SGX_K_TEXSIZE &&
+      if (k->k >= SGX_K_TEXSIZE &&
           k->k < SGX_K_TEXSIZE + 2 * SGX_K_TEXSIZE_UNITS) {
          const struct pipe_sampler_view *view =
-            ctx->views[(k->k - SGX_K_TEXSIZE) / 2];
+            stage_views(ctx, stage)[(k->k - SGX_K_TEXSIZE) / 2];
 
          v = !view ? 1.0f
              : (k->k - SGX_K_TEXSIZE) & 1
@@ -1078,8 +1148,7 @@ fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
          /* a view's level count (sgx_program.c lower_txs): a texture of F32
           * words is sampled at its base level alone (sgx_tex_words) */
          const struct pipe_sampler_view *view =
-            stage == MESA_SHADER_FRAGMENT ? ctx->views[k->k - SGX_K_LEVELS]
-                                          : NULL;
+            stage_views(ctx, stage)[k->k - SGX_K_LEVELS];
 
          word = !view || sgx_tex_word32(view->format)
                    ? 1
@@ -1090,8 +1159,7 @@ fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
          /* the base level's width, height, and depth or layers
           * (sgx_program.c lower_txs_int) */
          unsigned u = (k->k - SGX_K_SIZE) / 3, c = (k->k - SGX_K_SIZE) % 3;
-         const struct pipe_sampler_view *view =
-            stage == MESA_SHADER_FRAGMENT ? ctx->views[u] : NULL;
+         const struct pipe_sampler_view *view = stage_views(ctx, stage)[u];
          const struct pipe_resource *t = view ? view->texture : NULL;
 
          word = !t ? 1
@@ -1862,7 +1930,9 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
    unsigned n_fetch = 1, vertex_dwords = 0;
    float color[4];
    uint32_t prim;
-   uint32_t sampled = 0; /* the sampler units this draw reads */
+   /* the sampler units this draw reads: fragment unit u bit u, vertex unit u
+    * bit 32 + u (sampled_view) */
+   uint64_t sampled = 0;
    bool compiled, raw = false;
    bool points = info->mode == MESA_PRIM_POINTS;
    uint8_t vfmt[16] = {0};
@@ -1878,36 +1948,42 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * up to date before anything of this draw is recorded (it may wait).
     * Only the units the shader samples: a view left bound to another unit
     * is not this draw's */
-   uint32_t used = sgx_fs_textures_used(ctx->fs);
+   for (unsigned stage = 0; stage < 2; stage++) {
+      /* the fragment units, then the vertex ones (SGX_DEBUG=vtf) */
+      bool vtx = stage == 1;
+      uint32_t used = sgx_fs_textures_used(vtx ? ctx->vs : ctx->fs);
+      struct pipe_sampler_view **views = vtx ? ctx->vs_views : ctx->views;
+      struct pipe_sampler_state **samplers =
+         vtx ? ctx->vs_samplers : ctx->samplers;
 
-   for (unsigned unit = 0; unit < PIPE_MAX_SAMPLERS; unit++) {
-      struct pipe_sampler_view *view =
-         used >> unit & 1 ? ctx->views[unit] : NULL;
+      for (unsigned unit = 0; unit < PIPE_MAX_SAMPLERS; unit++) {
+         struct pipe_sampler_view *view = used >> unit & 1 ? views[unit] : NULL;
 
-      /* stopgap: no layout is known for NPOT cube faces, and sampling one of
-       * 16 texels or more, or its mipmaps, locks the 3D (piglit cubemap
-       * npot: a recovery a draw) */
-      if (view && view->texture->target == PIPE_TEXTURE_CUBE &&
-          !util_is_power_of_two_or_zero(view->texture->width0) &&
-          (view->texture->width0 >= 16 ||
-           (ctx->samplers[unit] &&
-            ctx->samplers[unit]->min_mip_filter != PIPE_TEX_MIPFILTER_NONE &&
-            view->u.tex.last_level > view->u.tex.first_level))) {
-         if (!ctx->warned_cube)
-            fprintf(
-               stderr,
-               "sgx: NPOT cube maps of 16 texels or more, or mipmapped, not drawn yet\n");
-         ctx->warned_cube = true;
-         return;
+         /* stopgap: no layout is known for NPOT cube faces, and sampling one
+          * of 16 texels or more, or its mipmaps, locks the 3D (piglit cubemap
+          * npot: a recovery a draw) */
+         if (view && view->texture->target == PIPE_TEXTURE_CUBE &&
+             !util_is_power_of_two_or_zero(view->texture->width0) &&
+             (view->texture->width0 >= 16 ||
+              (samplers[unit] &&
+               samplers[unit]->min_mip_filter != PIPE_TEX_MIPFILTER_NONE &&
+               view->u.tex.last_level > view->u.tex.first_level))) {
+            if (!ctx->warned_cube)
+               fprintf(
+                  stderr,
+                  "sgx: NPOT cube maps of 16 texels or more, or mipmapped, not drawn yet\n");
+            ctx->warned_cube = true;
+            return;
+         }
+         /* sampled past its last level: the device tail from that level */
+         if (view && samplers[unit] &&
+             samplers[unit]->min_mip_filter != PIPE_TEX_MIPFILTER_NONE)
+            sgx_resource_tail(ctx, sgx_resource(view->texture),
+                              view->u.tex.last_level);
+         if (view && sgx_tex_uses_cube0(view, samplers[unit]) &&
+             !sgx_resource_cube0(ctx, sgx_resource(view->texture)))
+            SKIP("no level-0 copy of a cube map");
       }
-      /* sampled past its last level: the device tail from that level */
-      if (view && ctx->samplers[unit] &&
-          ctx->samplers[unit]->min_mip_filter != PIPE_TEX_MIPFILTER_NONE)
-         sgx_resource_tail(ctx, sgx_resource(view->texture),
-                           view->u.tex.last_level);
-      if (view && sgx_tex_uses_cube0(view, ctx->samplers[unit]) &&
-          !sgx_resource_cube0(ctx, sgx_resource(view->texture)))
-         SKIP("no level-0 copy of a cube map");
    }
    build_state(ctx, &st);
    if (ctx->rasterizer) {
@@ -2003,7 +2079,8 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
        * varyings move up to leave set 0 free) */
       if (vfs && fs->reads_pointcoord && !ctx->vs->writes_psize)
          SKIP("gl_PointCoord without a point size");
-      if (vfs || raw || points) {
+      /* (and one for the views its units are bound to, sgx_vs_for) */
+      if (vfs || raw || points || sgx_vtf()) {
          if (raw && !(vs = sgx_vs_for(ctx, ctx->vs, vfs, vfmt, points)))
             raw = false;
          if (!raw && !(vs = sgx_vs_for(ctx, ctx->vs, vfs, NULL, points)))
@@ -2018,6 +2095,11 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
          mem_consts(ctx, MESA_SHADER_VERTEX, vs, vsc, 0, &d.vs_mem);
       else
          fill_consts(ctx, MESA_SHADER_VERTEX, vs, vsc, 0, NULL);
+      /* vertex texture fetch: the texture states in the vertex program's SA,
+       * from sa10 as its constants */
+      if (!dep_states(ctx, vs, ctx->vs_views, ctx->vs_samplers, vsc, 10,
+                      &sampled, 32))
+         return;
       d.n_ubos = ctx->n_draw_ubos;
       d.vs_consts = vsc;
       n_fetch = ctx->vs->n_attribs;
@@ -2079,51 +2161,8 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
          fsk[4] = 0xee00;
       }
       /* a dependent sample's texture state: the DOUTT words, in SA */
-      for (unsigned j = 0; j < fs->n_deps; j++) {
-         unsigned unit = fs->dep_sampler[j];
-         struct pipe_sampler_view *view =
-            unit < PIPE_MAX_SAMPLERS ? ctx->views[unit] : NULL;
-
-         if (!view || !sgx_resource_sampleable(sgx_resource(view->texture))) {
-            SGX_DBG(DRAW,
-                    "sampler %u: no texture the GPU can sample, draw skipped\n",
-                    unit);
-            return;
-         }
-         /* a texelFetch reads the texel at an explicit level, whatever the
-          * bound sampler filters or wraps (the compiler's sgx_lower_tex
-          * puts the coordinate at the texel's centre) */
-         const struct pipe_sampler_state fetch = {
-            .wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-            .wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-            .wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE,
-            .min_img_filter = PIPE_TEX_FILTER_NEAREST,
-            .mag_img_filter = PIPE_TEX_FILTER_NEAREST,
-            .min_mip_filter = PIPE_TEX_MIPFILTER_NEAREST,
-            .max_lod = 1000.0f,
-         };
-         sgx_tex_words(view, fs->dep_fetch[j] ? &fetch : ctx->samplers[unit],
-                       &fsk[fs->dep_sa[j]]);
-         /* a read of plane c of an RG32 / RGBA32 texture: c planes on
-          * (T2 is the address, unshifted) */
-         if (fs->dep_plane[j])
-            fsk[fs->dep_sa[j] + 2] +=
-               fs->dep_plane[j] *
-               (uint32_t)sgx_tex_plane_stride(view->texture);
-         /* an F16 texel: the whole T3, as for a PDS sample's */
-         if (fs->dep_f16[j])
-            fsk[fs->dep_sa[j] + 3] = 0x01028800u;
-         sgx_resource(view->texture)->use_seq = sgxws_next_seq(ctx->hw);
-         sampled |= 1u << unit;
-         SGX_DBG(
-            DRAW,
-            "  dependent sample %u: unit %u %s %ux%u target %u levels %u, state sa%u %08x %08x %08x %08x\n",
-            j, unit, util_format_short_name(view->format),
-            view->texture->width0, view->texture->height0,
-            view->texture->target, view->texture->last_level + 1, fs->dep_sa[j],
-            fsk[fs->dep_sa[j]], fsk[fs->dep_sa[j] + 1], fsk[fs->dep_sa[j] + 2],
-            fsk[fs->dep_sa[j] + 3]);
-      }
+      if (!dep_states(ctx, fs, ctx->views, ctx->samplers, fsk, 0, &sampled, 0))
+         return;
       d.fs_consts = fsk;
       if (sgx_drv_debug & SGX_DEBUG_DRAW) {
          fprintf(stderr, "  fs SA block: %u dwords, %u temps:", fsp.sec_dwords,
@@ -2266,11 +2305,12 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
    /* every shared texture it samples goes in the render's buffer list: a
     * frame whose list is full is submitted first */
    {
-      const struct sgxws_bo *shared[PIPE_MAX_SAMPLERS + 1];
+      const struct sgxws_bo *shared[64 + 1]; /* (and the query slots) */
       unsigned n_shared = 0;
 
-      u_foreach_bit (unit, sampled) {
-         struct sgx_resource *tex = sgx_resource(ctx->views[unit]->texture);
+      u_foreach_bit64 (unit, sampled) {
+         struct sgx_resource *tex =
+            sgx_resource(sampled_view(ctx, unit)->texture);
 
          if (tex->shared)
             shared[n_shared++] = &tex->bo;
@@ -2292,8 +2332,8 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * temporary, sampled into the window and freed at once).  Only those: a
     * texture merely bound would look in flight, and a later upload into it
     * would go to its second copy (dEQP fbo.render.stencil*) */
-   u_foreach_bit (unit, sampled) {
-      struct sgx_resource *tex = sgx_resource(ctx->views[unit]->texture);
+   u_foreach_bit64 (unit, sampled) {
+      struct sgx_resource *tex = sgx_resource(sampled_view(ctx, unit)->texture);
 
       tex->use_seq = sgxws_next_seq(ctx->hw);
       if (tex->shared)
@@ -2452,8 +2492,8 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
    if (ctx->recording) {
       uint32_t seq = sgxws_next_seq(ctx->hw);
 
-      u_foreach_bit (unit, sampled)
-         sgx_resource(ctx->views[unit]->texture)->use_seq = seq;
+      u_foreach_bit64 (unit, sampled)
+         sgx_resource(sampled_view(ctx, unit)->texture)->use_seq = seq;
       if (ctx->recording->texture)
          ctx->recording->use_seq = seq;
       if (ctx->recording_zs && ctx->recording_zs->zls_stored &&
@@ -2497,10 +2537,14 @@ sgx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * fetched for it (setup_fetch). */
    /* depth textures renders stored into, before the frame records a draw
     * that samples them (sgx_resource_zls_for_sampling) */
-   for (unsigned i = 0; i < ARRAY_SIZE(ctx->views); i++)
+   for (unsigned i = 0; i < ARRAY_SIZE(ctx->views); i++) {
       if (ctx->views[i] && ctx->views[i]->texture)
          sgx_resource_zls_for_sampling(ctx,
                                        sgx_resource(ctx->views[i]->texture));
+      if (ctx->vs_views[i] && ctx->vs_views[i]->texture)
+         sgx_resource_zls_for_sampling(ctx,
+                                       sgx_resource(ctx->vs_views[i]->texture));
+   }
    if (ctx->stats.on)
       t = os_time_get_nano();
    ctx->base_instance = info->start_instance;
