@@ -104,8 +104,8 @@ What the gate doesn't check but ES 3.0 needs:
   GLSL ≥ 1.30, so the `glsl130` path has to be on by default, and
   `essl_feature_level` goes from 100 to 300.
 - **ES 3.0 core features beyond the gate:**
-  - 3D textures with `MAX_3D_TEXTURE_SIZE` ≥ 256 (the driver has one texel:
-    `max_texture_3d_levels` 1, TEX.md section 14);
+  - 3D textures with `MAX_3D_TEXTURE_SIZE` ≥ 256: 256 with
+    `SGX_DEBUG=tex3d` (TEX.md section 14, "Status"), one texel without;
   - occlusion queries (`ANY_SAMPLES_PASSED`): the driver's are stubs that
     return 0;
   - `MAX_SAMPLES` ≥ 4;
@@ -672,6 +672,53 @@ render, so a depth buffer of another size would be stored in the wrong
 layout. Not done: multisampled window surfaces (EGL configs), depth/stencil resolves,
 GL_MULTISAMPLE off on a 4x target (the render target's samples are fixed
 per render), sample coverage and alpha to coverage.
+
+**3D textures** (`SGX_DEBUG=tex3d`: `MAX_3D_TEXTURE_SIZE` 256, TEX.md
+section 14; a CE5300 board, 2026-11-20):
+
+- The volume layout is measured (`tools/isa/hwt_vol4.py`, `hwt_vol5.py`):
+  T1 layout 1, T3's low bits the depth - 1, T0 b0-2 wrap R; cubes of side
+  min(w, h, d, 16) in Morton order, the cubes in raster order; levels one
+  after another. LINEAR filters across r.
+- An NPOT volume's levels overlap in the sampler's addressing, so the
+  driver stores them apart and samples its view's base level only (as
+  NPOT 2D textures on cores whose NPOT mipmaps hang).
+- Sampled only: rendering into a volume's layer isn't done (its draws are
+  skipped). Not the 32-bit word formats (depth, R32, the planar float and
+  integer ones).
+- `mesa/tests/sgx_tex3d.c`: 28 of 28, 2,224,043 texels: 15 sizes to
+  256x256x256 (NPOT among them), two mipmapped volumes, wrap R, LINEAR
+  across r, a sub-box upload, RGB565, through a varying and through a
+  vertex program (`SGX_DEBUG=vtf,glsl130`).
+- piglit (the 141 tests that use 3D textures, desktop GL): 41 pass without
+  the cap, 61 with it, no pass → fail. Fail → pass: `tex3d`,
+  `tex3d-maxsize` (a crash), `tex3d-npot`, `texwrap 3d` and `3d proj`,
+  `copyteximage 3d`, `getteximage-targets 3d`, `texture-packed-formats`,
+  the four `texture-storage@3D` cases, `glsl-1.10 texture3d` and
+  `texture3d-computed-coord`. Still failing: `tex3d-depth1` and
+  `texwrap 3d bordercolor` (no border colour on dev at all),
+  `fbo-3d` and `fbo-generatemipmap-3d` (rendering into a layer),
+  `tex-miplevel-selection` 3D (as its 2D variants: LOD bias and clamps).
+- dEQP-GLES3, the 1,528 mustpass cases with "3d" in the name (1,292 of
+  them not 2D arrays), with the cap and without, on dev with 2D arrays and
+  transform feedback merged in for the run (an ES 3.0 context needs them):
+  the 3D cases go from 79 to 511 pass, nothing from pass to fail (all
+  1,528: 149 to 581). The 54 NPOT `filtering.3d.combinations` cases with
+  LINEAR_MIPMAP_LINEAR were skipped (each takes minutes in dEQP's CPU check
+  and fails: NPOT mipmaps); 7 more time out at 60 s. What still fails:
+  - NPOT volumes with mipmaps (`specification.basic_teximage3d` and
+    `texstorage3d` are 63x29x11-like, `filtering.3d.combinations` 63x57x67,
+    `mipmap.3d.basic.*_npot`): the base level only, as above;
+  - the float, integer and 16-bit-a-channel formats (`format.sized.3d`,
+    `texture.units`, most `texture_functions`): not volume formats yet;
+  - `mipmap.3d.bias`, `min_lod`, `max_lod`, `max_level`: LOD bias and
+    clamps, as for 2D textures;
+  - `fbo.color.tex3d`: rendering into a layer;
+  - `texture.vertex.3d` skipped (vertex texture fetch wasn't in that run's
+    tree; the vertex case of `sgx_tex3d` covers it).
+- A computed coordinate's LOD is wrong on some 2x2 quads, for 2D textures
+  as for volumes (`sgx_tex3d`'s mip case through gl_FragCoord): not the
+  volumes', and not looked at further here.
 
 Provoking vertex first waits for flat shading, which the driver doesn't do
 yet (DOUTI b25-26, STATE.md §3).
