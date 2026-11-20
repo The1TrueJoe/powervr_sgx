@@ -60,3 +60,42 @@ Scratch microkernel images from the sgx530 branch's source (byte-identical to
 **TA finished still doesn't fire on ours.** In every run the DPM hands out no page, where the
 stock TA gets two at once. So the difference isn't in the registers the kick leaves. It's
 upstream, in what the MTE receives from the state tasks.
+
+## 08:15-08:23 UTC: what a stock TA leaves in the parameter buffer (Joseph: "Observe stock PB output")
+
+Same capture boot. Our own tools: a page-table walker that dumps GPU address ranges through
+`/dev/mem` (checked first on our own stack, where it read our VDM stream back word for word),
+and an `LD_PRELOAD` shim that holds the render process for 25 s after it writes its readback,
+so its GPU context stays mapped. The context's page directory came from sampling
+`BIF_DIR_LIST_BASE0` during the render. Reads were made only while the GPU's module was held on.
+Parts of the dumped pages hold stale CPU data (RAM reused by the GPU heaps); that was ignored
+and isn't described. The dump stays with the captures, outside any repo.
+
+Two TA kicks per frame: the main stream (region headers 0x0c800c00, tail pointers
+0x0c800a00, two DPM pages), then a second kick (region headers 0x0c800640, tail pointers
+0x0c8000c0) before the 3D.
+
+- **Region headers** (the second kick's, 0x0c800640): 16 entries × 12 bytes, in tile order:
+  - word 0 is the position, x/8 << 16 | y/8, with b31 and b28 on the last (0x90060006);
+  - word 1 is 0x1000 + 0x40 × tile, the tile's control stream as an offset into the PB;
+  - word 2 is 0.
+- **The 3D's region array** (0x0c800000, also in PB page 2): 0x10000000 | tile × 0x1000 per
+  entry, b31 on the last.
+- **Control streams** (PB page 1, 0x40 bytes a tile): (0x4468ffff, 0x09), (0x44a8ffff, 0x1c),
+  (0x44a8ffff, 0x2d), 0xc0000000. The second word is a dword offset into the PB of an object
+  block. Tiles the triangle doesn't reach have two entries.
+- **Object blocks** (PB page 0):
+  - at dword 0x09: 0x01e00000, 0x46124612, 0x00000042, then positions;
+  - at 0x1c and 0x2d: 0x01d00200, 0x000000f0, 0x46124612, 0x00000042, then positions.
+
+  0x01d00200/0x000000f0 are the clear's ISPA/ISPB exactly as the state block carries them
+  (ISPB present because ISPA b9 is set). The preceding words carry the vertex attributes
+  (1.0, 0xff000080 per vertex).
+
+**Conclusion (O).** The stock MTE gets the state block's words as data and copies the ISP
+words into each object. On ours the same task position's first output word is taken as an
+address and nothing is written. How the stock task hands the words over is in its code, which
+this work doesn't read. No new change to try came out of the output format, so TA finished
+still doesn't fire on ours.
+
+Board: back on the normal SD boot (one-shot 0), lock released.
