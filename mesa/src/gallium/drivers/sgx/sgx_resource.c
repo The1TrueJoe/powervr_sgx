@@ -61,8 +61,8 @@ texture_size(struct pipe_resource *prsc, uint32_t stride)
       unsigned w = u_minify(prsc->width0, l), h = u_minify(prsc->height0, l);
 
       size += (size_t)(l ? util_format_get_stride(prsc->format, w) : stride) *
-              util_format_get_nblocksy(prsc->format, h) * prsc->depth0 *
-              prsc->array_size;
+              util_format_get_nblocksy(prsc->format, h) *
+              u_minify(prsc->depth0, l) * prsc->array_size;
    }
    return size;
 }
@@ -76,8 +76,8 @@ level_offset(struct pipe_resource *prsc, uint32_t stride, unsigned level)
       unsigned w = u_minify(prsc->width0, l), h = u_minify(prsc->height0, l);
 
       off += (size_t)(l ? util_format_get_stride(prsc->format, w) : stride) *
-             util_format_get_nblocksy(prsc->format, h) * prsc->depth0 *
-             prsc->array_size;
+             util_format_get_nblocksy(prsc->format, h) *
+             u_minify(prsc->depth0, l) * prsc->array_size;
    }
    return off;
 }
@@ -218,10 +218,9 @@ sgx_resource_create(struct pipe_screen *pscreen,
    if (!res->data)
       goto fail;
    /* (a depth buffer that isn't sampled has none: the ISP keeps depth) */
-   /* (a 3D texture of one slice is laid out and sampled as a 2D one:
-    * max_texture_3d_levels, lower_tex_3d) */
+   /* (a 3D texture of one slice is laid out as a 2D one, a deeper one as a
+    * volume: sgx_tex_volume) */
    if (sgx_tex_format(templ->format) &&
-       (templ->target != PIPE_TEXTURE_3D || templ->depth0 == 1) &&
        templ->last_level < ARRAY_SIZE(res->level_offset) &&
        (!sgx_tex_depth(templ->format) ||
         (templ->bind & PIPE_BIND_SAMPLER_VIEW))) {
@@ -690,6 +689,10 @@ sgx_resource_target(struct sgx_screen *screen, struct sgx_resource *res,
 {
    memset(t, 0, sizeof(*t));
    t->bo = &res->bo;
+   /* a volume's slice isn't a 2D image the PBE can write (TEX.md section
+    * 14): not yet a render target */
+   if (sgx_tex_volume(&res->base))
+      return false;
    /* an sRGB texture renders as its linear format: without
     * EXT_framebuffer_sRGB nothing is encoded on the way out */
    switch (util_format_linear(res->base.format)) {

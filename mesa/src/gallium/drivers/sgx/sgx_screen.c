@@ -66,6 +66,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "uniform blocks, 12 a stage of 64 KiB, each copied into the frame for a draw (ARB_uniform_buffer_object; with glsl130 only, as their offsets are integers): until that passes on a board"},
    {"zlsdump", SGX_DEBUG_ZLS_DUMP,
     "after every flushed render with a depth buffer, wait for it and write its ZLS buffer to /tmp/sgx-zls-<n>-<w>x<h>-<format>-s<samples>.bin (the layout test, docs/TEX.md section 7)"},
+   {"tex3d", SGX_DEBUG_TEX3D,
+    "3D textures up to 256 on a side, in the volume layout (docs/TEX.md section 14): until piglit and dEQP pass them"},
    {"flushrt", SGX_DEBUG_FLUSH_RT,
     "send SGX_FLUSH_HW_RENDER_TARGET at a target's destruction (hangs a srvinit microkernel)"},
    DEBUG_NAMED_VALUE_END};
@@ -218,11 +220,12 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
       MIN3(f->max_texture_size, screen->info->rt_max_width,
            screen->info->rt_max_height);
    caps->max_texture_cube_levels = f->max_cube_levels;
-   /* 3D textures of one texel, which sample as a 1x1 2D texture
-    * (sgx_program.c lower_tex_3d); the volume layout isn't the driver's yet
-    * (TEX.md section 14).  0 would refuse every glTexImage3D, and wined3d
-    * makes 1x1x1 ones at start-up for its unbound units (issue #5) */
-   caps->max_texture_3d_levels = 1;
+   /* 3D textures: volumes to 256 (ES 3.0's minimum, the ICD's size) with
+    * SGX_DEBUG=tex3d (sgx_tex_volume); otherwise one texel, sampled as a 1x1
+    * 2D texture (sgx_program.c lower_tex_3d).  0 would refuse every
+    * glTexImage3D, and wined3d makes 1x1x1 ones at start-up for its unbound
+    * units (issue #5) */
+   caps->max_texture_3d_levels = sgx_drv_debug & SGX_DEBUG_TEX3D ? 9 : 1;
    /* uniform blocks (SGX_DEBUG=ubo): 64 KiB, as most drivers have (GL 3.1
     * asks 16 KiB, and st takes ARB_uniform_buffer_object at no less; piglit's
     * generated blocks reach 32 KiB). Each is copied into the frame
@@ -387,9 +390,17 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    case PIPE_TEXTURE_2D:
    case PIPE_TEXTURE_RECT:
    case PIPE_TEXTURE_CUBE:
-   /* one texel, kept as a 2D texture (max_texture_3d_levels) */
-   case PIPE_TEXTURE_3D:
       return true;
+   /* A volume holds 8-, 16- and 32-bit texels (sgx_tex_volume); without
+    * SGX_DEBUG=tex3d, one texel, kept as a 2D texture (max_texture_3d_levels).
+    * Render targets answer as a 2D texture's: st picks GL_RGB 565's and
+    * GL_RGBA 4444's format only among renderable ones, and checks a layer
+    * attached to a framebuffer as a 2D texture anyway (rendering into a
+    * volume's layer isn't done: TEX.md section 14) */
+   case PIPE_TEXTURE_3D:
+      return !(sgx_drv_debug & SGX_DEBUG_TEX3D) ||
+             (!(usage & PIPE_BIND_DEPTH_STENCIL) && !sgx_tex_word32(format) &&
+              !sgx_tex_raw32(format));
    default:
       return false;
    }

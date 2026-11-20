@@ -31,6 +31,7 @@ defaulting to the value they always have.
 
   <enum name="LAYOUT">
     <value name="TWIDDLED" value="0"/>
+    <value name="VOLUME"   value="1"/>  <!-- twiddled in 3D with WORD3's depth -->
     <value name="CUBE"     value="2"/>
     <value name="LINEAR"   value="3"/>
     <value name="STRIDED"  value="6"/>  <!-- the pitch is in STRIDED_WORD0 -->
@@ -47,6 +48,7 @@ defaulting to the value they always have.
     <field name="mip_linear" start="9" end="9" type="bool"/>
     <field name="wrap_s" start="6" end="8" type="WRAP"/>
     <field name="wrap_t" start="3" end="5" type="WRAP"/>
+    <field name="wrap_r" start="0" end="2" type="WRAP"/>
   </struct>
 
   <!-- WORD0 of a LAYOUT_STRIDED surface: the pitch - 1, in 32-bit words,
@@ -79,6 +81,7 @@ defaulting to the value they always have.
     <field name="unknown_17" start="17" end="17" type="bool"/>
     <field name="unknown_15" start="15" end="15" type="bool"/>
     <field name="unknown_11" start="11" end="11" type="bool"/>
+    <field name="depth" start="0" end="10" type="uint"/>  <!-- a volume's depth - 1 -->
   </struct>
 
 </csbgen>

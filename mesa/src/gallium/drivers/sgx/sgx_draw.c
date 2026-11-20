@@ -2093,9 +2093,11 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
             fsk[fs->dep_sa[j] + 2] +=
                fs->dep_plane[j] *
                (uint32_t)sgx_tex_plane_stride(view->texture);
-         /* an F16 texel: the whole T3, as for a PDS sample's */
+         /* an F16 texel: the whole T3, as for a PDS sample's, but a
+          * volume's depth */
          if (fs->dep_f16[j])
-            fsk[fs->dep_sa[j] + 3] = 0x01028800u;
+            fsk[fs->dep_sa[j] + 3] =
+               0x01028800u | (fsk[fs->dep_sa[j] + 3] & SGX_TEX_T3_DEPTH);
          sgx_resource(view->texture)->use_seq = sgxws_next_seq(ctx->hw);
          sampled |= 1u << unit;
          SGX_DBG(

@@ -40,6 +40,7 @@
 #define SGX_DEBUG_NO_VBO_SLABS       (1 << 23)
 #define SGX_DEBUG_NO_TEX_BLITS       (1 << 24)
 #define SGX_DEBUG_NO_MERGE           (1 << 25)
+#define SGX_DEBUG_TEX3D              (1 << 26)
 
 extern uint32_t sgx_drv_debug;
 /* SGX_DUMP_CODE=dir: every compiled program's instructions written there */
