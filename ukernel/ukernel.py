@@ -431,10 +431,20 @@ class Asm:
         self.i(f"str #{CR_DPM_STATE // 4}, r5")        # DPM state load
         self.i(f"str #{CR_DPM_CONTROL // 4}, r5")      # DPM control load
         self.wait(CR_EVENT_STATUS, 0x240, CR_EVENT_HOST_CLEAR)
-        self.i("limm r5, #9")
+        self.i(f"limm r5, #{1 if 'otpm1' in UK530_VAR else 9}")
         self.i(f"str #{CR_OTPM // 4}, r5")             # OTPM invalidate + clear
         for poll, mask, ack in OTPM_CLEAR_WAITS:
             self.wait(poll, mask, ack)
+
+
+# Bring-up switches for the SGX530's TA kick (docs/porting/cores/sgx530.md, "The kick
+# itself"). All off by default, and the default build is unchanged. UK530_VAR is a comma
+# list: noreset (no TA soft reset at a first kick), nofl (no TA free-list load), nodpmload
+# (no DPM state/control load or OTPM clear), noinv (no TA-side PDS_INV0 invalidates),
+# otpm1 (OTPM clear value 1, not 9), kick2 (write TA_KICK twice). UK530_KICKVAL is the
+# TA_KICK value (default 1).
+UK530_VAR = set(filter(None, os.environ.get("UK530_VAR", "").split(",")))
+UK530_KICKVAL = int(os.environ.get("UK530_KICKVAL", "1"), 0)
 
 
 def build(a):
@@ -1682,11 +1692,18 @@ def build(a):
     # it begins the scene clean (the DDK does this early, ddk-ref line 22).
     a.i("test.and.eq p0, r13, r13")                 # render kick (r13 == 0)? skip
     a.i("(p0) ba skip_ta_reset")
-    a.i(f"limm r5, #{SOFT_RESET_TA}")
-    a.i(f"str #{CR_SOFT_RESET // 4}, r5")
-    a.i("limm r5, #0")
-    a.i(f"str #{CR_SOFT_RESET // 4}, r5")
+    if "noreset" not in UK530_VAR:
+        a.i(f"limm r5, #{SOFT_RESET_TA}")
+        a.i(f"str #{CR_SOFT_RESET // 4}, r5")
+        a.i("limm r5, #0")
+        a.i(f"str #{CR_SOFT_RESET // 4}, r5")
     a.label("skip_ta_reset")
+    # UK530_POKE=reg:val,... (bring-up switch, SGX530; off by default): register writes
+    # right after the TA soft reset, e.g. to test a register the reset restores
+    for _pk in filter(None, os.environ.get("UK530_POKE", "").split(",")):
+        _r, _v = (int(x, 0) for x in _pk.split(":"))
+        a.i(f"limm r5, #{_v}")
+        a.i(f"str #{_r // 4}, r5")
     # remember context, command, and the pointers the 3D phase needs
     a.i("ld.a.d r10, r9, #%d [moe]" % CMDTA_RD)     # render details
     a.i("ld.a.d r11, r9, #%d [moe]" % CMDTA_PB)     # PB descriptor
@@ -1787,7 +1804,8 @@ def build(a):
     if FIX_HW_BRN_28889:
         a.bif_settle()                              # the BIF invalidate drains before the MADD one
     a.label("skip_bif_invaldc")
-    a.invalidate(CR_PDS_INV0, INV_DONE_TA)
+    if "noinv" not in UK530_VAR:
+        a.invalidate(CR_PDS_INV0, INV_DONE_TA)
     # 0xa74's TA-flags field (b27-31) is written below, read-modify-write so
     # srvinit's init bits (0x00208200, b9/b15/b21 — TA/ISP config the 3D needs)
     # are PRESERVED. We used to clear 0xa74 to 0 first, which dropped 0x208200:
@@ -1810,7 +1828,8 @@ def build(a):
     a.i("test.xor.eq p0, r5, r11")              # same PB already loaded -> skip the reload
     a.i("(p0) ba skip_pb_fl")
     a.program(11, TA_PB)
-    a.dpm_freelist(3, CR_DPM_TA_FL, 0x1)        # load the TA free list before the kick
+    if "nofl" not in UK530_VAR:
+        a.dpm_freelist(3, CR_DPM_TA_FL, 0x1)    # load the TA free list before the kick
     a.i(f"st.a.d r17, #{PB_TA_LOADED}, r11 [moe]")   # remember the loaded PB
     a.i("idf")
     a.i("wdf")
@@ -1917,10 +1936,12 @@ def build(a):
     # render kick). Done before the TE registers, dpm_load's 0x240 done event
     # never fired and do_ta stalled, so it stays
     # after them (ddk-ref-frame-registers.txt lines 102-127).
-    a.invalidate(CR_PDS_INV0, INV_DONE_TA)
+    if "noinv" not in UK530_VAR:
+        a.invalidate(CR_PDS_INV0, INV_DONE_TA)
     a.i("test.and.eq p0, r13, r13")             # render kick? skip DPM state load
     a.i("(p0) ba skip_dpm_load")
-    a.dpm_load()
+    if "nodpmload" not in UK530_VAR:
+        a.dpm_load()
     if DPM_LOG:                                 # point B: 0x700 after dpm_load (kick 1)
         a.i(f"ldr r5, #{0x700 // 4}"); a.i("wdf"); a.st_sa(SA_SELF, 0x37, 5)
     a.label("skip_dpm_load")
@@ -1952,7 +1973,11 @@ def build(a):
     # while it runs is deferred, not dispatched on top of it.
     a.i("limm r5, #1")
     a.st_sa(SA_SELF, SC_TAFLIGHT, 5)            # TA in flight
+    if UK530_KICKVAL != 1:
+        a.i(f"limm r5, #{UK530_KICKVAL}")
     a.i(f"str #{CR_TA_KICK // 4}, r5")
+    if "kick2" in UK530_VAR:
+        a.i(f"str #{CR_TA_KICK // 4}, r5")
     if FRAMEPROF:
         a.i(f"ld.a.d r4, r17, #{FP_TICK} [moe]"); a.i("wdf"); a.st_sa(SA_SELF, FP_TA_KICK, 4)  # frameprof: TA kick
     if DEBUG_SENTINEL:
