@@ -20,6 +20,8 @@
  *   rgb565 a 16-bit volume (RGB565), every texel
  *   nondep sizes again with the coordinate a varying the PDS samples from
  *          (the cases above compute it: dependent samples)
+ *   vertex a vertex program's texture3DLod, a point a texel (SGX_DEBUG=vtf,
+ *          glsl130 as well)
  *
  *   SGX_DEBUG=tex3d sgx_tex3d [case...]
  *
@@ -450,6 +452,97 @@ case_565(unsigned d)
    glDeleteTextures_(1, &t);
 }
 
+/* slice z of a w x h x d volume through a vertex program: a point at each
+ * pixel centre samples its texel (texture3DLod, level 0) */
+static GLuint
+vertex_program(void)
+{
+   static const char *vs =
+      "#extension GL_OES_texture_3D : require\n"
+      "attribute vec2 p;\n"
+      "uniform highp sampler3D tex;\n"
+      "uniform vec3 size;\n"
+      "uniform float r;\n"
+      "varying lowp vec4 c;\n"
+      "void main() {\n"
+      "   c = texture3DLod(tex, vec3((p + 0.5) / size.xy, r), 0.0);\n"
+      "   gl_Position = vec4((p + 0.5) / size.xy * 2.0 - 1.0, 0.0, 1.0);\n"
+      "   gl_PointSize = 1.0;\n"
+      "}\n";
+   static const char *fs = "varying lowp vec4 c;\n"
+                           "void main() { gl_FragColor = c; }\n";
+   const char *src[2] = {vs, fs};
+   GLenum type[2] = {GL_VERTEX_SHADER, GL_FRAGMENT_SHADER};
+   GLuint p = glCreateProgram_();
+   GLint ok = 0;
+   char log[2048];
+
+   for (int i = 0; i < 2; i++) {
+      GLuint sh = glCreateShader_(type[i]);
+
+      glShaderSource_(sh, 1, &src[i], NULL);
+      glCompileShader_(sh);
+      glGetShaderiv_(sh, GL_COMPILE_STATUS, &ok);
+      if (!ok) {
+         glGetShaderInfoLog_(sh, sizeof(log), NULL, log);
+         printf("  vertex compile: %s\n", log);
+         return 0;
+      }
+      glAttachShader_(p, sh);
+   }
+   glBindAttribLocation_(p, 0, "p");
+   glLinkProgram_(p);
+   glGetProgramiv_(p, GL_LINK_STATUS, &ok);
+   return ok ? p : 0;
+}
+
+static void
+case_vertex(unsigned w, unsigned h, unsigned d)
+{
+   GLuint p = vertex_program(), t;
+   float *pts = malloc((size_t)w * h * 2 * sizeof(float));
+   uint32_t *px = malloc((size_t)w * h * 4);
+   char name[64];
+   int bad = 0;
+
+   snprintf(name, sizeof(name), "vertex %ux%ux%u", w, h, d);
+   if (!p) {
+      result(name, 1);
+      return;
+   }
+   for (unsigned y = 0; y < h; y++)
+      for (unsigned x = 0; x < w; x++)
+         pts[2 * (y * w + x)] = x, pts[2 * (y * w + x) + 1] = y;
+   t = make(w, h, d, 1, GL_NEAREST);
+   glUseProgram_(p);
+   glUniform1i_(glGetUniformLocation_(p, "tex"), 0);
+   glUniform3f_(glGetUniformLocation_(p, "size"), w, h, 1);
+   glViewport_(0, 0, w, h);
+   for (unsigned z = 0; z < d; z++) {
+      glClearColor_(0, 0, 0, 0);
+      glClear_(GL_COLOR_BUFFER_BIT);
+      glUniform1f_(glGetUniformLocation_(p, "r"), (z + 0.5f) / d);
+      glVertexAttribPointer_(0, 2, GL_FLOAT, GL_FALSE, 0, pts);
+      glEnableVertexAttribArray_(0);
+      glDrawArrays_(GL_POINTS, 0, w * h);
+      glReadPixels_(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+      for (unsigned y = 0; y < h; y++)
+         for (unsigned x = 0; x < w; x++) {
+            checked++;
+            if (px[y * w + x] != texel(x, y, z, 0)) {
+               if (bad < 4)
+                  printf("  %s (%u,%u,%u): got %08x want %08x\n", name, x, y,
+                         z, px[y * w + x], texel(x, y, z, 0));
+               bad++;
+            }
+         }
+   }
+   result(name, bad);
+   glDeleteTextures_(1, &t);
+   free(pts);
+   free(px);
+}
+
 static int
 want(int argc, char **argv, const char *c)
 {
@@ -592,6 +685,17 @@ main(int argc, char **argv)
    if (want(argc, argv, "rgb565")) {
       case_565(1); /* a 2D texture's layout (one slice) */
       case_565(8);
+   }
+   if (argc > 1 && want(argc, argv, "vertex")) {
+      GLint units = 0;
+
+      glGetIntegerv_(GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS, &units);
+      if (!units) {
+         printf("vertex: no vertex texture units (SGX_DEBUG=vtf,glsl130)\n");
+      } else {
+         case_vertex(16, 16, 4);
+         case_vertex(24, 40, 20);
+      }
    }
    if (want(argc, argv, "nondep")) {
       glUseProgram_(prog[1]);
