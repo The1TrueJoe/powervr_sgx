@@ -473,11 +473,15 @@ sgx_bind_sampler_states(struct pipe_context *pctx, mesa_shader_stage shader,
                         unsigned start, unsigned nr, void **hwcso)
 {
    struct sgx_context *ctx = sgx_context(pctx);
+   struct pipe_sampler_state **s =
+      shader == MESA_SHADER_FRAGMENT ? ctx->samplers
+      : shader == MESA_SHADER_VERTEX ? ctx->vs_samplers
+                                     : NULL;
 
-   if (shader != MESA_SHADER_FRAGMENT)
+   if (!s)
       return;
    for (unsigned i = 0; i < nr && start + i < PIPE_MAX_SAMPLERS; i++)
-      ctx->samplers[start + i] = hwcso ? hwcso[i] : NULL;
+      s[start + i] = hwcso ? hwcso[i] : NULL;
 }
 
 static struct pipe_sampler_view *
@@ -511,15 +515,17 @@ sgx_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
                       struct pipe_sampler_view **views)
 {
    struct sgx_context *ctx = sgx_context(pctx);
+   struct pipe_sampler_view **v = shader == MESA_SHADER_FRAGMENT ? ctx->views
+                                  : shader == MESA_SHADER_VERTEX ? ctx->vs_views
+                                                                 : NULL;
 
-   if (shader != MESA_SHADER_FRAGMENT)
+   if (!v)
       return;
    for (unsigned i = 0; i < nr + unbind_num_trailing_slots; i++) {
       unsigned s = start + i;
 
       if (s < PIPE_MAX_SHADER_SAMPLER_VIEWS)
-         pipe_sampler_view_reference(&ctx->views[s],
-                                     i < nr && views ? views[i] : NULL);
+         pipe_sampler_view_reference(&v[s], i < nr && views ? views[i] : NULL);
    }
 }
 
