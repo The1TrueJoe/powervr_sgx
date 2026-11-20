@@ -394,3 +394,46 @@ which a write from the host can't change. Next options:
 - with the draw, follow 0x334/0x338 to see whether any vertices are consumed;
 - sweep the rest of the window's unnamed offsets (0x000-0x1fc, 0x400-0x5fc, 0x800-0xbfc,
   0xd00-0xfff) the same way.
+
+## 2026-11-20 00:52-01:10 UTC: the rest of the register window, microkernel writes, the draw
+
+**(c) The read sweep of the rest of the SGX window**, the same guards (`probe_read` through
+the driver, 32 offsets a run, only while powered; the 2D FIFO pair 0xe10/0xe14 skipped in
+case a read pops it). 0x000-0x1fc, 0x400-0x5fc, 0x800-0xbfc and 0xd00-0xffc; no wedge.
+Nonzero at idle or changed by the hang, apart from known registers (clock control/status,
+IDs, the event enables, `USE_CODE_BASE`, the event-program registers, `PDS_EXEC_BASE`,
+`EVENT_KICKER`, `PDS_PC_BASE`):
+
+| offset | idle | hang | note |
+|---|---|---|---|
+| 0x0118 `EVENT_STATUS2` | 0 | **0x10** | b4 rises at every TA; the SGX545's list names b0-3 and b5-10, not b4 |
+| 0x0138 | 0 | 0x110 | the microkernel's invalidate-done bits |
+| 0x0040 | 0x1e00 | 0x1e00 | |
+| 0x0100 | 3 | 3 | |
+| 0x04ec | 3 | 3 | |
+| 0x0804 | 0 | 0x10000000 | set by the kick |
+| 0x0aa4, 0x0aa8 | 0xaaaaaaaa | 0xaaaaaaaa | |
+| 0x0b04 | 1 | 1 | |
+| 0x0b08-0x0b1c | 0x10000 | 0x10000, except 0xb0c 0x10001 and 0xb10 0x10003 | |
+
+**`EVENT_STATUS2` b4 is a one-shot event, not the blocker (C).** Cleared from the host
+mid-run (write 0x10 to 0x114), it reads 0 and doesn't return, and the TA still never
+finishes (end only, the clear without its draw, with it).
+
+**(a) 0x228/0x22c are read only (C).** Written by the microkernel right after its TA soft
+reset (scratch images built from the sgx530 branch's source with a `UK530_POKE` switch; with
+no pokes the build is byte-identical to `sgx530_inv23`), to 3, 0x3f or 0, they read 0x1ff at
+the hang, and the hang is unchanged.
+
+**(b) The draw (C).** 0x334 / 0x338 sampled four times mid-run: 0x01841008 and 3 each time
+(with the clear's vertex task or the empty one), while the PDS PC is on the terminate
+program. The VDM goes past the draw and issues the terminate. 0x334/0x338 hold the last
+index block's address and count, not progress.
+
+## Where it stands (01:10 UTC)
+
+Across the whole register window, no register shows a default the kick fails to set or a
+pending event that stops the pass. The TA runs its stream to the terminate and never raises
+TA finished, whatever the stream holds. What hasn't been varied is the order and timing of
+the kick itself on this core: the TA soft reset (0x80 b3), the free-list and DPM loads, the
+invalidate, and the `TA_KICK` write.
