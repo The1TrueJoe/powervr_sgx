@@ -8,6 +8,9 @@
 #
 #   mesa/tests/deqp/build-deqp.sh [x86_64|i386]    (after mesa/build.sh for that arch)
 #
+# DEQP_MODULES picks the dEQP modules (default gles2; "gles2 gles3" adds
+# deqp-gles3, its data and mustpass/gles3-main.txt).
+#
 # x86_64 (the default) is ours; i386 is for the DDK (the DDK is an i386
 # client): it links against our i386 Mesa only for the sonames, and
 # run-deqp.sh runs it on the DDK's libraries.
@@ -26,6 +29,7 @@ REPO=$(cd "$HERE/../../.." && pwd)
 W=${DEQP_WORK:-$HOME/.cache/sgx545/deqp}
 B=${SGX_MESA_BUILD:-$REPO/build/mesa}
 ARCH=${1:-x86_64}
+MODULES=${DEQP_MODULES:-gles2}
 MESA=$B/$ARCH/install/usr
 CI=$B/mesa-$MESA_VERSION/.gitlab-ci
 case $ARCH in
@@ -96,16 +100,18 @@ cmake -S "$W/src" -B "$W/build-$ARCH" -G Ninja \
 	-DCMAKE_TOOLCHAIN_FILE="$W/zig-toolchain-$ARCH.cmake" \
 	-DDEQP_TARGET=surfaceless \
 	-DCMAKE_BUILD_TYPE=Release \
-	-DSELECTED_BUILD_TARGETS=deqp-gles2 \
+	-DSELECTED_BUILD_TARGETS="$(for m in $MODULES; do printf 'deqp-%s;' "$m"; done)" \
 	-DCMAKE_EXE_LINKER_FLAGS="-L$MESA/lib" \
 	-DGLES2_LIBRARIES="$MESA/lib/libGLESv2.so" -DGLES3_LIBRARIES="$MESA/lib/libGLESv2.so" \
 	-DGLES2_INCLUDE_PATH="$MESA/include" -DGLES3_INCLUDE_PATH="$MESA/include"
-ninja -C "$W/build-$ARCH" deqp-gles2
 mkdir -p "$W/out/mustpass"
-cp "$W/build-$ARCH/modules/gles2/deqp-gles2" "$W/out/deqp-gles2$SUFFIX"
-[ -d "$W/out/gles2" ] || cp -R "$W/src/data/gles2" "$W/out/"
-cp "$W/src/external/openglcts/data/gl_cts/data/mustpass/gles/aosp_mustpass/main/gles2-main.txt" "$W/out/mustpass/"
-[ "$ARCH" = x86_64 ] || { echo "build-deqp.sh: $W/out/deqp-gles2$SUFFIX"; exit 0; }
+for m in $MODULES; do
+	ninja -C "$W/build-$ARCH" "deqp-$m"
+	cp "$W/build-$ARCH/modules/$m/deqp-$m" "$W/out/deqp-$m$SUFFIX"
+	[ -d "$W/out/$m" ] || cp -R "$W/src/data/$m" "$W/out/"
+	cp "$W/src/external/openglcts/data/gl_cts/data/mustpass/gles/aosp_mustpass/main/$m-main.txt" "$W/out/mustpass/"
+done
+[ "$ARCH" = x86_64 ] || { echo "build-deqp.sh: $W/out/deqp-*$SUFFIX"; exit 0; }
 
 # ---- deqp-runner
 if [ ! -x "$W/cargo/bin/cargo-zigbuild" ]; then
