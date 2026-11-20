@@ -44,6 +44,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "every buffer's device copy a BO of its own, not small ones cut from shared slabs"},
    {"notexblits", SGX_DEBUG_NO_TEX_BLITS,
     "blits into a texture through the CPU, as 0.2.0 did (only render targets on the GPU)"},
+   {"nomerge", SGX_DEBUG_NO_MERGE,
+    "the draws of one call drawn one by one, not merged into one draw of their triangles or lines"},
    {"nolazyscanout", SGX_DEBUG_NO_LAZY_SCANOUT,
     "scanout buffers on a dumb-buffer display (kmsro) are the display's from the start, not when a KMS handle is asked for"},
    {"nophasesplit", SGX_DEBUG_NO_PHASE_SPLIT,

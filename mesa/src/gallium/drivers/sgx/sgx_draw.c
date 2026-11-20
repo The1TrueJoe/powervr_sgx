@@ -1772,6 +1772,74 @@ sgx_draw_fini(struct sgx_context *ctx)
       return;                                                                  \
    } while (0)
 
+/* Several draws of one primitive type in one call (immediate mode's
+ * glBegin/glEnd blocks between state changes, glMultiDrawArrays): one draw
+ * of their triangles or lines, each of their vertices fetched once.  A draw
+ * costs more on the CPU than its few vertices (GoldSrc's world is a
+ * GL_POLYGON a face).  False to draw them one by one: more indices than a
+ * draw takes, or vertices too far apart to fetch as one range. */
+static bool
+merged_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
+            const struct pipe_draw_start_count_bias *draws,
+            unsigned num_draws, const void *indices, struct fetch *f,
+            unsigned n_fetch, unsigned vertex_dwords, struct sgxws_draw *d)
+{
+   enum mesa_prim mode = info->mode;
+   unsigned total = 0, j = 0, lo = ~0u, hi = 0;
+   uint32_t *ix32, *v;
+   uint16_t *ix;
+
+   for (unsigned n = 0; n < num_draws; n++) {
+      unsigned count = draws[n].count;
+
+      if (u_trim_pipe_prim(mode, &count))
+         total += expanded_count(mode, count);
+      if (total > SGXWS_MAX_INDICES)
+         return false;
+   }
+   if (!total)
+      return true;
+   if (!(ix32 = staging(ctx, total)) || !(ix = index_staging(ctx, total)))
+      return false;
+   for (unsigned n = 0; n < num_draws; n++) {
+      unsigned count = draws[n].count, out_count;
+
+      if (!u_trim_pipe_prim(mode, &count))
+         continue;
+      out_count = expanded_count(mode, count);
+      for (unsigned i = 0; i < out_count; i++) {
+         unsigned k = draws[n].start + expanded_vertex(mode, i, out_count);
+         uint32_t index = info->index_size
+                             ? get_index(info, indices, k) + draws[n].index_bias
+                             : k;
+
+         ix32[j++] = index;
+         lo = MIN2(lo, index);
+         hi = MAX2(hi, index);
+      }
+   }
+   if (hi - lo >= 65536 || hi - lo + 1 > 4 * total + 64)
+      return false;
+   for (unsigned i = 0; i < total; i++)
+      ix[i] = (uint16_t)(ix32[i] - lo);
+   /* (the indices are copied out of the staging buffer first) */
+   if (!(v = staging(ctx, (size_t)(hi - lo + 1) * vertex_dwords)))
+      return false;
+   fetch_vertices(f, n_fetch, lo, hi - lo + 1, v, vertex_dwords);
+   d->prim = u_reduced_prim(mode) == MESA_PRIM_LINES ? SGXWS_LINES
+                                                     : SGXWS_TRIANGLES;
+   d->verts = v;
+   d->count = hi - lo + 1;
+   d->indices = ix;
+   d->n_indices = total;
+   SGX_DBG(DRAW, "draw %s x%u merged (%u indices, %u vertices)\n",
+           u_prim_name(mode), num_draws, total, d->count);
+   if (sgxws_draw(ctx->hw, d))
+      fprintf(stderr, "sgx: draw of %u indices dropped\n", total);
+   d->indices = NULL;
+   return true;
+}
+
 static void
 sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
                   unsigned drawid_offset,
@@ -2212,6 +2280,11 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       if (tex->shared)
          sgxws_use_bo(ctx->hw, &tex->bo, false);
    }
+   if (num_draws > 1 && prim != SGXWS_POINTS &&
+       !(sgx_drv_debug & SGX_DEBUG_NO_MERGE) &&
+       merged_draw(ctx, info, draws, num_draws, indices, f, n_fetch,
+                   vertex_dwords, &d))
+      num_draws = 0;
    for (unsigned n = 0; n < num_draws; n++) {
       unsigned count = draws[n].count, start = draws[n].start, out_count;
       bool list = expanded_prim(info->mode);
