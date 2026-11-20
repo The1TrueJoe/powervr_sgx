@@ -262,3 +262,42 @@ Next, black box with our own frames:
   (a fault, an event, a tail pointer or region header written), with o0 and o6 both mapped;
 - what the two pointed-to blocks hold: vary their contents (the record at o0 changed nothing
   so far, but o6 has never pointed at anything chosen).
+
+## 2026-11-20 00:20-00:32 UTC: no input word or terminate emit form ends the pass
+
+Same recipe. `SGXGEN_STATE_PTR_WORDS`, o6 = 0x0e001000 (mapped), 12 words:
+
+- **Words 1-5 and 7-11 one at a time = 0xffffffff:** all the same no-fault hang, the PC at the
+  terminate, no event, no tail pointers or region headers (word 10's run lost to the link).
+  The hang doesn't depend on the MTE's input words.
+
+**The terminate task's final emit** (end-only stream, where it's the only one-emit task, via
+`SGXGEN_STATE_LAST`; fields per ISA.md: target h14-15, f10 h10, f12 h12, f13 h13, n h0-1 + h9,
+end h18; low word 0xa0200100 = `r0, #2, #0` with f3_20):
+
+| final emit | result |
+|---|---|
+| t1 (0xfb274000, ours), t0 | hang, no fault |
+| **t2 (0xfb278000), t3 (0xfb27c000), t2 + f13** | **b2 fault at `PDS_EXEC_BASE` + 0** |
+| t1 + f13 ("emit and cut" in ISA.md, unconfirmed), t1 + f12, t1 + f10 | hang |
+| t1 with n = 1, 2, 3, 4 | hang |
+
+On the SGX530, emit targets t2 and t3 start a PDS fetch at their operand (C: both, with
+r0 = 0, read exec base + 0). That's why the SGX545's `emit.t3` ending faulted. t0 and t1 go
+to the MTE. No target, flag or n makes the TA register a terminate: `EVENT_STATUS` b12 (TA
+terminate) and b13 (TA finished), at the SGX545's positions on this core per sgx530.md,
+never appear.
+
+## Where it stands (00:32 UTC)
+
+With our own frames, the SGX530's TA runs its whole stream fault-free and never ends. Every
+part varied has been ruled out as the thing that ends it:
+- the terminate's record (header and last-tile word);
+- the MTE's input words, including the two pointer slots o0 and o6;
+- the terminate task's final emit (target, flags, n);
+- the DPM, which stays idle.
+
+The cheap black-box probes on the end of the pass are used up. What's left needs a new idea
+about how this core marks the end of a TA pass. The VDM-side terminate (its type-6 state
+word and info form, and the 0xc0000000 word) is the one part of the end not varied
+on this recipe.
