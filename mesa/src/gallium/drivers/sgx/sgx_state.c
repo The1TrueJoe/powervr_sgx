@@ -1019,6 +1019,98 @@ sgx_blit_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
    return true;
 }
 
+/* A blit of boxes more than a layer deep on the CPU: a volume's mip level
+ * from the one before (util_gen_mipmap's glGenerateMipmap, two slices into
+ * one) and an array's layers.  Nearest, or LINEAR in each axis the blit
+ * scales (in z too: a 3D level's eight taps); not mirrored. */
+static bool
+sgx_blit_cpu_box(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   const struct pipe_box *sb = &info->src.box, *db = &info->dst.box;
+   enum pipe_format sf = info->src.format, df = info->dst.format;
+   struct pipe_transfer *st, *dt;
+   uint8_t *src, *dst;
+   int sw = sb->width, sh = sb->height, sd = sb->depth, dw = db->width,
+       dh = db->height, dd = db->depth;
+
+   if (info->mask != PIPE_MASK_RGBA && (info->mask & ~PIPE_MASK_RGBA))
+      return false;
+   if (info->scissor_enable || info->render_condition_enable ||
+       info->alpha_blend || info->num_window_rectangles || sw <= 0 ||
+       sh <= 0 || sd <= 0 || dw <= 0 || dh <= 0 || dd <= 0 ||
+       util_format_is_depth_or_stencil(sf) ||
+       util_format_is_pure_integer(sf) ||
+       !util_format_unpack_description(sf)->unpack_rgba ||
+       !util_format_pack_description(df)->pack_rgba_float)
+      return false;
+   src = pctx->texture_map(pctx, info->src.resource, info->src.level,
+                           PIPE_MAP_READ, sb, &st);
+   if (!src)
+      return false;
+   dst = pctx->texture_map(pctx, info->dst.resource, info->dst.level,
+                           PIPE_MAP_WRITE, db, &dt);
+   if (!dst) {
+      pipe_texture_unmap(pctx, st);
+      return false;
+   }
+   unsigned sbpp = util_format_get_blocksize(sf);
+   bool lin = info->filter == PIPE_TEX_FILTER_LINEAR;
+   bool lx = lin && sw != dw, ly = lin && sh != dh, lz = lin && sd != dd;
+   float *row = malloc(sizeof(float) * 4 * dw);
+
+   for (int z = 0; z < dd && row; z++) {
+      for (int y = 0; y < dh; y++) {
+         for (int x = 0; x < dw; x++) {
+            float f[3] = {(x + 0.5f) * sw / dw - 0.5f,
+                          (y + 0.5f) * sh / dh - 0.5f,
+                          (z + 0.5f) * sd / dd - 0.5f};
+            const int n[3] = {sw, sh, sd};
+            const bool l[3] = {lx, ly, lz};
+            int i0[3], i1[3];
+            float a[3], c[4] = {0};
+
+            for (int k = 0; k < 3; k++) {
+               if (l[k]) {
+                  i0[k] = CLAMP((int)floorf(f[k]), 0, n[k] - 1);
+                  i1[k] = MIN2(i0[k] + 1, n[k] - 1);
+                  a[k] = CLAMP(f[k] - floorf(f[k]), 0.0f, 1.0f);
+                  if (f[k] < 0)
+                     a[k] = 0;
+               } else {
+                  i0[k] = i1[k] = CLAMP((int)floorf(f[k] + 0.5f), 0, n[k] - 1);
+                  a[k] = 0;
+               }
+            }
+            for (int t = 0; t < 8; t++) {
+               float w = 1, v[4];
+               int p[3];
+
+               for (int k = 0; k < 3; k++) {
+                  bool hi = t >> k & 1;
+                  w *= hi ? a[k] : 1 - a[k];
+                  p[k] = hi ? i1[k] : i0[k];
+               }
+               if (w == 0)
+                  continue;
+               util_format_unpack_rgba(sf, v,
+                                       src + p[2] * st->layer_stride +
+                                          p[1] * st->stride + p[0] * sbpp,
+                                       1);
+               for (int i = 0; i < 4; i++)
+                  c[i] += w * v[i];
+            }
+            memcpy(&row[4 * x], c, sizeof(c));
+         }
+         util_format_pack_rgba(df, dst + z * dt->layer_stride + y * dt->stride,
+                               row, dw);
+      }
+   }
+   free(row);
+   pipe_texture_unmap(pctx, st);
+   pipe_texture_unmap(pctx, dt);
+   return !!row;
+}
+
 static void
 sgx_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
@@ -1064,6 +1156,11 @@ sgx_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
               info->src.box.height, util_format_short_name(info->dst.format),
               info->dst.box.width, info->dst.box.height,
               sgx_resource(info->dst.resource)->texture);
+      return;
+   }
+   if ((info->src.box.depth != 1 || info->dst.box.depth != 1) &&
+       sgx_blit_cpu_box(pctx, info)) {
+      ctx->stats.blit_cpu++;
       return;
    }
    fprintf(stderr, "sgx: blit %s -> %s not supported yet\n",
