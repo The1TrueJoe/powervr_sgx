@@ -287,6 +287,9 @@ sgx_context_destroy(struct pipe_context *pctx)
 
    pipe_resource_reference(&ctx->dummy_cb, NULL);
    simple_mtx_lock(&screen->lock);
+   if (sgxws_bo_valid(&ctx->query_bo))
+      sgxws_bo_free(screen->dev, &ctx->query_bo); /* (finished above) */
+   free(ctx->query_seq);
    if (ctx->hw) {
       for (unsigned i = 0; i < ctx->num_rts; i++)
          sgxws_rt_destroy(ctx->hw,

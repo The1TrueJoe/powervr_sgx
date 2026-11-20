@@ -528,10 +528,34 @@ sgx_texture_barrier(struct pipe_context *pctx, unsigned flags)
 {
 }
 
-/* queries: none of GLES2's need the GPU yet */
+/*
+ * Queries.  Occlusion queries (SGX_DEBUG=occlusion, docs/GL3.md H5): no
+ * counter is known in the hardware, so while one counts, each draw's
+ * fragment program stores 1 to the query's slot from every pixel it shades
+ * (sgxws_blend.visible), past the depth and stencil tests and a discard, in
+ * a translucent pass, which shades in submission order: a pixel a later
+ * draw hides has still counted.  ANY_SAMPLES_PASSED is exact; SAMPLES_PASSED
+ * gets 1 for any number.  The other queries return 0.
+ */
+#define SGX_QUERY_SLOTS 4096
+
 struct sgx_query {
    unsigned type;
+   unsigned slot; /* its slot in ctx->query_bo since its last begin */
+   /* the frame its result waits for: the last it was drawn in, or (results
+    * come in order) the last an earlier query was */
+   uint32_t seq;
+   bool pending, drawn;
 };
+
+static bool
+occlusion(unsigned type)
+{
+   return (sgx_drv_debug & SGX_DEBUG_OCCLUSION) &&
+          (type == PIPE_QUERY_OCCLUSION_COUNTER ||
+           type == PIPE_QUERY_OCCLUSION_PREDICATE ||
+           type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE);
+}
 
 static struct pipe_query *
 sgx_create_query(struct pipe_context *pctx, unsigned query_type, unsigned index)
@@ -546,26 +570,108 @@ sgx_create_query(struct pipe_context *pctx, unsigned query_type, unsigned index)
 static void
 sgx_destroy_query(struct pipe_context *pctx, struct pipe_query *q)
 {
+   struct sgx_context *ctx = sgx_context(pctx);
+
+   if (ctx->occlusion == (struct sgx_query *)q)
+      ctx->occlusion = NULL;
    FREE(q);
 }
 
 static bool
-sgx_begin_end_query(struct pipe_context *pctx, struct pipe_query *q)
+sgx_begin_query(struct pipe_context *pctx, struct pipe_query *pq)
 {
+   struct sgx_context *ctx = sgx_context(pctx);
+   struct sgx_screen *screen = sgx_screen(pctx->screen);
+   struct sgx_query *q = (struct sgx_query *)pq;
+
+   if (!occlusion(q->type) || !ctx->hw)
+      return true;
+   if (!sgxws_bo_valid(&ctx->query_bo)) {
+      int e;
+
+      ctx->query_seq = calloc(SGX_QUERY_SLOTS, sizeof(*ctx->query_seq));
+      if (!ctx->query_seq)
+         return false;
+      simple_mtx_lock(&screen->lock);
+      e = sgxws_bo_alloc(screen->dev, &ctx->query_bo, SGXWS_MEM_VERTEX,
+                         SGX_QUERY_SLOTS * 4, 0x1000);
+      simple_mtx_unlock(&screen->lock);
+      if (e)
+         return false;
+   }
+   q->slot = ctx->query_next++ % SGX_QUERY_SLOTS;
+   /* a slot a frame in flight may still store to: that frame first */
+   if (sgxws_seq_after(ctx->query_seq[q->slot], sgxws_done_seq(ctx->hw)))
+      sgx_finish(ctx);
+   ctx->query_bo.map[q->slot] = 0;
+   q->pending = ctx->query_pending;
+   q->seq = ctx->query_last;
+   q->drawn = false;
+   ctx->occlusion = q;
    return true;
 }
 
 static bool
-sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *q, bool wait,
-                     union pipe_query_result *result)
+sgx_end_query(struct pipe_context *pctx, struct pipe_query *q)
 {
-   memset(result, 0, sizeof(*result));
+   struct sgx_context *ctx = sgx_context(pctx);
+
+   if (ctx->occlusion == (struct sgx_query *)q)
+      ctx->occlusion = NULL;
    return true;
 }
 
+uint32_t
+sgx_query_va(const struct sgx_context *ctx)
+{
+   if (!ctx->occlusion || ctx->queries_off)
+      return 0;
+   return ctx->query_bo.va + ctx->occlusion->slot * 4 - 4;
+}
+
+void
+sgx_query_drawn(struct sgx_context *ctx)
+{
+   struct sgx_query *q = ctx->occlusion;
+
+   q->seq = ctx->query_seq[q->slot] = ctx->query_last =
+      sgxws_next_seq(ctx->hw);
+   q->pending = q->drawn = ctx->query_pending = true;
+   sgxws_use_bo(ctx->hw, &ctx->query_bo, true);
+}
+
+static bool
+sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *pq,
+                     bool wait, union pipe_query_result *result)
+{
+   struct sgx_context *ctx = sgx_context(pctx);
+   struct sgx_query *q = (struct sgx_query *)pq;
+   uint32_t v;
+
+   memset(result, 0, sizeof(*result));
+   if (!occlusion(q->type) || !q->pending)
+      return true;
+   if (sgxws_seq_after(q->seq, sgxws_done_seq(ctx->hw))) {
+      /* its frame: still recorded, or in flight */
+      if (q->seq == sgxws_next_seq(ctx->hw))
+         sgx_flush_frame(ctx);
+      if (!wait)
+         return false;
+      sgx_finish(ctx);
+   }
+   v = q->drawn ? ctx->query_bo.map[q->slot] : 0;
+   if (q->type == PIPE_QUERY_OCCLUSION_COUNTER)
+      result->u64 = v;
+   else
+      result->b = v != 0;
+   return true;
+}
+
+/* st turns queries off around its own draws (blits, util_blitter) */
 static void
 sgx_set_active_query_state(struct pipe_context *pctx, bool enable)
 {
+   sgx_context(pctx)->queries_off = !enable;
 }
 
 /* copies on the CPU: textures and buffers are CPU-visible, render targets are
@@ -997,8 +1103,8 @@ sgx_state_init(struct sgx_context *ctx)
    p->resource_release = u_default_resource_release;
    p->create_query = sgx_create_query;
    p->destroy_query = sgx_destroy_query;
-   p->begin_query = sgx_begin_end_query;
-   p->end_query = sgx_begin_end_query;
+   p->begin_query = sgx_begin_query;
+   p->end_query = sgx_end_query;
    p->get_query_result = sgx_get_query_result;
    p->set_active_query_state = sgx_set_active_query_state;
    p->resource_copy_region = sgx_resource_copy_region;
