@@ -358,7 +358,7 @@ ends. What's left is a register the SGX530's TA needs that the SGX545's kick nev
 Finding one by experiment means reading offsets our docs don't name, outside this work's
 rules, so it waits for the coordinator.
 
-## 2026-11-20 00:47-00:53 UTC: guarded read sweep of 0x200-0x3fc and 0x600-0x7fc
+## 2026-11-20 00:47-00:51 UTC: guarded read sweep of 0x200-0x3fc and 0x600-0x7fc
 
 Approved by the coordinator under the standing go for this board (any SGX register read or
 write; the named-registers rule is for the CE5300 boards). Read only, through the driver
@@ -385,7 +385,7 @@ without its draw: 0x334 = 0x01841000 (the stream's base, 0x238), 0x338 = 0. With
 (the draw's index count). So with a draw the VDM reaches it and stops there. Without one
 these two keep their kick-time values, and nothing shows where the empty pass waits.
 
-## Where it stands (00:53 UTC)
+## Where it stands (00:51 UTC)
 
 No register in the TA and DPM ranges shows a default the kick fails to set, apart from 0x228/0x22c,
 which a write from the host can't change. Next options:
