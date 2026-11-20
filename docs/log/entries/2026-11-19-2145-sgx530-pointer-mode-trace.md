@@ -330,7 +330,7 @@ word hangs** (C), so the end of the pass isn't decided by the stream's contents.
 ("The TA stream"). The next direction, when picked up, is the TA kick itself: compare it
 against our own SGX545 microkernel's, since even an empty stream doesn't complete.
 
-## 2026-11-20 00:39-00:50 UTC: the TA kick against our SGX545 microkernel's
+## 2026-11-20 00:39-00:46 UTC: the TA kick against our SGX545 microkernel's
 
 Un-parked to compare the kick itself. Our open microkernel's source (`ukernel/ukernel.py`,
 `cores/sgx530.py` on the sgx530 branch, the inv23 image's) and the hang dumps. Fault-free
