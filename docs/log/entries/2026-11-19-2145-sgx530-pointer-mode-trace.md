@@ -301,3 +301,31 @@ The cheap black-box probes on the end of the pass are used up. What's left needs
 about how this core marks the end of a TA pass. The VDM-side terminate (its type-6 state
 word and info form, and the 0xc0000000 word) is the one part of the end not varied
 on this recipe.
+
+## 2026-11-20 00:32-00:37 UTC: the VDM-side end, with Rogue as the hypothesis source; parked
+
+New sgxgen knobs (74c34e13): `SGXGEN_VDM_EXTRA` (raw VDM words before the terminate),
+`SGXGEN_END_NOTERM`, `SGXGEN_TERM_INFO`, `SGXGEN_VDM_ENDWORD`, `SGXGEN_TERM_W2`.
+The hypotheses come from Mesa's Rogue `csbgen` (MIT): a PPP terminate block is a header with
+`pres_terminate` (b25), then TERMINATE0 (clip_right b18-26, clip_bottom b0-8, in 32-px blocks)
+and TERMINATE1 (clip_left b23-31, render target b0-10), reached by a VDM PPP_STATE_UPDATE
+(block type 0: word count, address) before STREAM_TERMINATE (type 6). The SGX's 0xc0000000
+is also block type 6. End-only stream, same recipe:
+
+| variant | result |
+|---|---|
+| base | hang, no fault |
+| the terminate's VDM info word 0x2a201 with each of bits 8-17 flipped | hang |
+| the end word 0xc0000001 | hang |
+| Rogue-style terminate records: header 0x02000000 + 0x00040001 + 0; header 0x02000000 + 0x000c0003 + 0; header 0x02002000 + 0x00040001 + 0 | hang |
+| no terminate program: the stream is only 0xc0000000 (2 runs) | **hang**, PDS PC 0 |
+| a raw VDM word 0x00502000 (block type 0) before the terminate | fault at **0x01408000** (= 0x00502000 << 2), requestor b4 (VDM) |
+| raw VDM words 0x00000300, 0x00502000 | fault at 0 (0x300 << 2), requestor b4 |
+
+A type-0 VDM word is an address in 4-byte units that the VDM fetches (C), most likely a
+stream link (G). Nothing at the VDM side ends the pass. **Even a stream holding only the end
+word hangs** (C), so the end of the pass isn't decided by the stream's contents.
+
+**Parked here.** The recipe and the ruled-out list are in `docs/porting/cores/sgx530.md`
+("The TA stream"). The next direction, when picked up, is the TA kick itself: compare it
+against our own SGX545 microkernel's, since even an empty stream doesn't complete.
