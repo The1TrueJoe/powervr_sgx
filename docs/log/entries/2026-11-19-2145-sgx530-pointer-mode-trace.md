@@ -437,3 +437,22 @@ pending event that stops the pass. The TA runs its stream to the terminate and n
 TA finished, whatever the stream holds. What hasn't been varied is the order and timing of
 the kick itself on this core: the TA soft reset (0x80 b3), the free-list and DPM loads, the
 invalidate, and the `TA_KICK` write.
+
+## 2026-11-20 01:03-01:06 UTC: the kick's order; parked
+
+Scratch microkernel images from the sgx530 branch's source (07af02bb), with build switches
+added to the scratch copy (not committed): `UK530_VAR` drops a step (`noreset`: no TA soft
+reset at a first kick; `nofl`: no TA free-list load; `nodpmload`: no DPM state/control load
+and OTPM clear; `noinv`: no TA-side `PDS_INV0` invalidates), `otpm1` writes 1 instead of 9
+to the OTPM clear, `kick2` writes `TA_KICK` twice, and `UK530_KICKVAL` writes 3, 5 or 9
+there. Unmodified, the build is byte-identical to `sgx530_inv23`. End-only fault-free stream:
+
+| variant | result |
+|---|---|
+| noreset, nofl, nodpmload, noinv, otpm1, kick2, kick 3, kick 5, kick 9 | the same no-fault hang: no event, no tail pointers, no wait timed out |
+
+None of the kick's steps or their order ends the pass, and leaving out the free list and DPM
+loads changes nothing either, consistent with the TA never reaching the DPM.
+
+**Parked.** `docs/porting/cores/sgx530.md` ("The TA stream" and "The kick itself") has the
+recipe, the ruled-out list and the tools.
