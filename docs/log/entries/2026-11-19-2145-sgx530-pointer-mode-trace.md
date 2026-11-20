@@ -395,7 +395,7 @@ which a write from the host can't change. Next options:
 - sweep the rest of the window's unnamed offsets (0x000-0x1fc, 0x400-0x5fc, 0x800-0xbfc,
   0xd00-0xfff) the same way.
 
-## 2026-11-20 00:52-01:10 UTC: the rest of the register window, microkernel writes, the draw
+## 2026-11-20 00:52-01:02 UTC: the rest of the register window, microkernel writes, the draw
 
 **(c) The read sweep of the rest of the SGX window**, the same guards (`probe_read` through
 the driver, 32 offsets a run, only while powered; the 2D FIFO pair 0xe10/0xe14 skipped in
@@ -430,7 +430,7 @@ the hang, and the hang is unchanged.
 program. The VDM goes past the draw and issues the terminate. 0x334/0x338 hold the last
 index block's address and count, not progress.
 
-## Where it stands (01:10 UTC)
+## Where it stands (01:02 UTC)
 
 Across the whole register window, no register shows a default the kick fails to set or a
 pending event that stops the pass. The TA runs its stream to the terminate and never raises
