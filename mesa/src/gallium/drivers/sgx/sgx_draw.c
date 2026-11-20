@@ -1057,9 +1057,10 @@ dep_states(struct sgx_context *ctx, const struct sgx_pipe_shader *so,
       if (so->dep_plane[j])
          w[2] +=
             so->dep_plane[j] * (uint32_t)sgx_tex_plane_stride(view->texture);
-      /* an F16 texel: the whole T3, as for a PDS sample's */
+      /* an F16 texel: the whole T3, as for a PDS sample's, but a volume's
+       * depth */
       if (so->dep_f16[j])
-         w[3] = 0x01028800u;
+         w[3] = 0x01028800u | (w[3] & SGX_TEX_T3_DEPTH);
       sgx_resource(view->texture)->use_seq = sgxws_next_seq(ctx->hw);
       *sampled |= 1ull << (bit + unit);
       SGX_DBG(
