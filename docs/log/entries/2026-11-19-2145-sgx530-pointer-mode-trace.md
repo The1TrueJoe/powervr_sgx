@@ -263,7 +263,7 @@ Next, black box with our own frames:
 - what the two pointed-to blocks hold: vary their contents (the record at o0 changed nothing
   so far, but o6 has never pointed at anything chosen).
 
-## 2026-11-20 00:20-00:32 UTC: no input word or terminate emit form ends the pass
+## 2026-11-20 00:20-00:25 UTC: no input word or terminate emit form ends the pass
 
 Same recipe. `SGXGEN_STATE_PTR_WORDS`, o6 = 0x0e001000 (mapped), 12 words:
 
@@ -288,7 +288,7 @@ to the MTE. No target, flag or n makes the TA register a terminate: `EVENT_STATU
 terminate) and b13 (TA finished), at the SGX545's positions on this core per sgx530.md,
 never appear.
 
-## Where it stands (00:32 UTC)
+## Where it stands (00:25 UTC)
 
 With our own frames, the SGX530's TA runs its whole stream fault-free and never ends. Every
 part varied has been ruled out as the thing that ends it:
