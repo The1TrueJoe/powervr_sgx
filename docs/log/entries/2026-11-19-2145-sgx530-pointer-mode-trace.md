@@ -357,3 +357,40 @@ So the kick programs every register the SGX545 needs, the stream runs, and the T
 ends. What's left is a register the SGX530's TA needs that the SGX545's kick never writes.
 Finding one by experiment means reading offsets our docs don't name, outside this work's
 rules, so it waits for the coordinator.
+
+## 2026-11-20 00:47-00:53 UTC: guarded read sweep of 0x200-0x3fc and 0x600-0x7fc
+
+Approved by the coordinator under the standing go for this board (any SGX register read or
+write; the named-registers rule is for the CE5300 boards). Read only, through the driver
+(`probe_read`, 32 offsets per run, read only while the GPU is powered), at idle before the
+kick and in the hang dump. Fault-free end-only stream. No wedge; every chunk read cleanly.
+
+Registers that are nonzero at idle or change by the hang, apart from those the kick writes
+(listed in the 00:39 entry):
+
+| offset | idle | hang | note |
+|---|---|---|---|
+| 0x228, 0x22c | 0x1ff | 0x1ff | not written by the kick. A host write before the kick (3, 0x3f, 0, 1) reads back 0x1ff at the hang: restored by the TA soft reset at the kick, or read only |
+| 0x334 | 0 | 0x01841000 | set during the TA (below) |
+| 0x348 | 1 | 1 | |
+| 0x614 | 0x2000 | 0x2000 | |
+| 0x644 | 0x3db8 | 0x3db8 | |
+| 0x738 | 1 | 1 | |
+
+Everything else in both ranges reads 0 at idle and at the hang.
+
+**0x334 / 0x338 follow the VDM's index blocks (C for the values, G for the meaning).** End only and the clear
+without its draw: 0x334 = 0x01841000 (the stream's base, 0x238), 0x338 = 0. With the draw:
+0x334 = 0x01841008 (the draw block's address, after the 2-word state update) and 0x338 = 3
+(the draw's index count). So with a draw the VDM reaches it and stops there. Without one
+these two keep their kick-time values, and nothing shows where the empty pass waits.
+
+## Where it stands (00:53 UTC)
+
+No register in the TA and DPM ranges shows a default the kick fails to set, apart from 0x228/0x22c,
+which a write from the host can't change. Next options:
+- write 0x228/0x22c (and 0x348, 0x738) from the microkernel after its TA soft reset (a
+  microkernel change);
+- with the draw, follow 0x334/0x338 to see whether any vertices are consumed;
+- sweep the rest of the window's unnamed offsets (0x000-0x1fc, 0x400-0x5fc, 0x800-0xbfc,
+  0xd00-0xfff) the same way.
