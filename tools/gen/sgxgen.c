@@ -797,6 +797,9 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 		memset(pr.p, 0, 16);
 		tr.p[0] = term_w[0];
 		tr.p[1] = term_w[1];
+		/* SGXGEN_TERM_W2=<w>: a third word in the terminate's record (a Rogue-style
+		 * terminate: header, TERMINATE0, TERMINATE1) */
+		tr.p[2] = env_u32("SGXGEN_TERM_W2");
 		pr.p[0] = pre_w[0];
 		pr.p[1] = pre_w[1];
 		term_w[0] = tr.va;
@@ -1677,9 +1680,23 @@ static uint32_t vdm_end(struct sgx_ctx *c)
 		/* SGXGEN_PRETERM_INFO=<form> (bring-up probe): its info word's low bits */
 		vdm(c, c->preterm_rows << 26 | (getenv("SGXGEN_PRETERM_INFO") ? env_u32("SGXGEN_PRETERM_INFO") : 0x2c201));
 	}
-	vdm(c, 0x60000000 | vdm_pds(c, c->terminate + add[2]));
-	vdm(c, c->term_rows << 26 | (i530 ? 0x2a201 : 0x2022401));
-	vdm(c, 0xc0000000);
+	/* SGXGEN_VDM_EXTRA=<w>,<w>,... (bring-up probe, SGX530): raw VDM words ahead of the
+	 * terminate (e.g. a block type the stream doesn't use otherwise) */
+	if (getenv("SGXGEN_VDM_EXTRA")) {
+		char *sp = getenv("SGXGEN_VDM_EXTRA"), *ep;
+
+		for (unsigned i = 0; i < 16 && *sp; i++, sp = *ep ? ep + 1 : ep)
+			vdm(c, (uint32_t)strtoul(sp, &ep, 0));
+	}
+	/* SGXGEN_END_NOTERM (bring-up probe, SGX530): no TA terminate program, only the
+	 * stream's end word; SGXGEN_TERM_INFO=<form>: the terminate's info-word low bits;
+	 * SGXGEN_VDM_ENDWORD=<w>: the end word (0xc0000000) */
+	if (!getenv("SGXGEN_END_NOTERM")) {
+		vdm(c, 0x60000000 | vdm_pds(c, c->terminate + add[2]));
+		vdm(c, c->term_rows << 26 | (getenv("SGXGEN_TERM_INFO") ? env_u32("SGXGEN_TERM_INFO") :
+					     i530 ? 0x2a201 : 0x2022401));
+	}
+	vdm(c, getenv("SGXGEN_VDM_ENDWORD") ? env_u32("SGXGEN_VDM_ENDWORD") : 0xc0000000);
 	return at;
 }
 
