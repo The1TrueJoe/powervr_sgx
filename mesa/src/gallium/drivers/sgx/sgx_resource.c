@@ -82,8 +82,9 @@ level_offset(struct pipe_resource *prsc, uint32_t stride, unsigned level)
    return off;
 }
 
-/* kmsro with a display device whose buffers the CPU reads (simpledrm copies
- * each frame out) */
+/* kmsro with a display device whose scanout buffers are its own dumb
+ * buffers, imported: simpledrm's (the CPU copies each frame out) or gma500's
+ * and the CE5300's (scanned out as they are) */
 static bool
 dumb_display(const struct sgx_screen *screen)
 {
@@ -180,11 +181,12 @@ sgx_resource_create(struct pipe_screen *pscreen,
       SGX_DBG(SYNC, "render target %ux%u %s at %#x\n", templ->width0,
               templ->height0, util_format_short_name(templ->format),
               res->bo.va);
-      /* kmsro with a display device whose buffers the CPU reads (simpledrm
-       * copies each frame out): ours until a KMS handle is asked for
-       * (sgx_resource_get_handle).  Every DRI3 back buffer is asked for as
-       * scanout and X only copies from it; a cached dumb buffer would be
-       * flushed around every render into it */
+      /* kmsro with a dumb-buffer display (dumb_display): ours until a KMS
+       * handle is asked for (sgx_resource_get_handle), then the display's,
+       * rendered into from then on.  Every DRI3 back buffer is asked for as
+       * scanout and X only copies from it; a dumb buffer would be flushed
+       * around every render into it (and be contiguous memory on the
+       * CE5300) */
       if (screen->ro && (templ->bind & PIPE_BIND_SCANOUT) && shareable(templ) &&
           dumb_display(screen)) {
          res->dumb_later = true;
