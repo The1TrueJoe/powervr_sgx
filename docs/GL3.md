@@ -106,8 +106,9 @@ What the gate doesn't check but ES 3.0 needs:
 - **ES 3.0 core features beyond the gate:**
   - 3D textures with `MAX_3D_TEXTURE_SIZE` ≥ 256: 256 with
     `SGX_DEBUG=tex3d` (TEX.md section 14, "Status"), one texel without;
-  - occlusion queries (`ANY_SAMPLES_PASSED`): the driver's are stubs that
-    return 0;
+  - occlusion queries (`ANY_SAMPLES_PASSED`): a store from every pixel
+    shaded, with `SGX_DEBUG=occlusion` ("Status"); ES 3.0 contexts also need
+    the cap for their state (dEQP's state reset asks for the query);
   - `MAX_SAMPLES` ≥ 4;
   - integer formats.
 
@@ -176,7 +177,7 @@ Formats wider than 32 bits, and more than one draw buffer, need either:
 | texture arrays (`EXT_texture_array`, 256 layers listed) | no layer field known in T0-T3 | one texture per layer at a layer stride; the shader adds `layer × stride` to the base address and samples with the dependent form, whose texture state comes from registers (ISA.md, "dependent: smp template"; hardware, open stack hwt_smp). Needs a compiler path (gl3-compiler). 1D arrays as 2D arrays of height 1 | TEX.md §5 (T2 = base); ISA.md (dependent smp with state in SA: hardware, A/B) | medium |
 | transform feedback (`EXT_transform_feedback`; ICD 4 × 4 separate, 64 interleaved) | no stream-out unit known | the vertex program stores its outputs with `st` at `vertex index × stride`; the driver unrolls strips, fans and indices on the CPU (it gathers them already) so the index is the output slot; counts and `PRIMITIVES_WRITTEN` are known on the CPU. Needs `st` to a driver address from a vertex program (**H4**). Fallback: gallium's `draw` module runs the vertex shader on the CPU and writes the buffers | ISA.md `ld`/`st` (corpus `st.l.d`); the ICD's small limits fit a store-based path | medium |
 | `NV_conditional_render` | — | `render_condition` waits on the query on the CPU and skips draws (the spec's NO_WAIT modes may draw) | needs occlusion queries | depends on queries |
-| occlusion queries (GL 1.5, `SAMPLES_PASSED`) | **listed** (ICD, DDK GL: `ARB_occlusion_query`); no capture, no register known | **H5**. No good fallback: a fragment program can't count without atomics; `ANY_SAMPLES_PASSED` could be a store of 1 under a translucent pass, which shades in order | listed only | low |
+| occlusion queries (GL 1.5, `SAMPLES_PASSED`) | **listed** (ICD, DDK GL: `ARB_occlusion_query`); no capture, no register known | **H5**. `ANY_SAMPLES_PASSED`: a store of 1 from every pixel shaded, in a translucent pass, which shades in order (`SGX_DEBUG=occlusion`, "Status"). A count needs atomics or a counter in the hardware: `SAMPLES_PASSED` gets 1 | hardware, open driver (the boolean) | high (the boolean); low (the count) |
 | `ARB_shader_texture_lod` | `smp .lod` and `.grad` forms exist | compiler | ISA.md smp (encoder; `tex_lod` corpus) | medium (compiler) |
 | `ARB_map_buffer_range`, `ARB_framebuffer_object` | — | gallium generic; FBO needs mixed attachment sizes, which the render target handles by its own size | — | high |
 | `MAX_SAMPLES` ≥ 4 (`EXT_framebuffer_multisample`) | **native 4×**: 2×2 samples a pixel, resolved by the PBE at the end of the tile (box filter). TE AA b31 + b30 (`e0000000`), PBE word 2 b30-31 = 1 (downscale), X macrotile boundaries 6/12/18 and 0x30 tiles a macrotile, TA flags 2 b25, region headers and tail pointers 3× and 4×, per-sample depth/stencil (4× the 1-sample buffer) stored through ZLS. The colour target, its pitch and the tile grid stay the pixels' | the TA tail, RT data, region arrays and ZLS words as STATE.md "Multisampling (4x)" lists them. Under powervr_sgx the kernel computes TE AA, MTILE and the region arrays: uAPI rev 3 adds a samples field (1 or 4, 0 = 1, behind a per-core cap bit) and the kernel's K-calc follows it (`CREATE_RT_DATASET` samples 1 or 4, `rt_max_samples` 4, depth/stencil extents scaled by the samples; KUnit matches every captured 1×/4× word at 720×480). A 4× render then needs, from the client, a per-sample depth/stencil buffer on every 4× render (`depth_addr` mapped for 4·pad_w·pad_h·4 bytes of depth, 4·pad_w·pad_h of stencil, and a nonzero `zls_control`; the kernel refuses a 4× render without them, so a target with no depth buffer gets an internal one, as the DDK's 0x6bd000 bytes at 720×480), PBE word 2 b30 for the resolve in the end-of-tile program, and the ZLS 3D flags (b7, b8). TE AA, the macrotiles, the region and tail-pointer sizes, RT +0x10/+0x14/+0x18 and the ZLS tile count are the kernel's. The driver's part, on rev 3's winsys: MSAA renderbuffers and FBOs, the resolve, the per-sample ZLS allocation, a replay of `ms4` and a smaller 4× surface (256×256) on hardware. 2 and 8 samples, MSAA FBOs and the per-sample ZLS layout are not captured | capture (`ms1`/`ms4`, `ms1d`/`ms4d`: 480 edge pixels at exactly 1/4, 2/4 and 3/4 coverage); STATE.md "Multisampling (4x)" (dev ba9c83a4) | high (window surfaces); medium (FBOs, resolve blits) |
@@ -263,10 +264,14 @@ style), unless it says capture. In order of how much each unblocks:
 - **H4, a store from a vertex program.** A vertex program `st`s its outputs to
   a driver buffer at `index × stride` (index from in0 via DOUTA). Read the
   buffer. Unblocks transform feedback.
-- **H5, occlusion queries.** No path is known. A DDK desktop-GL capture of
-  `glBeginQuery(GL_SAMPLES_PASSED)` would show it, but that DDK needs X (it's
-  GLX only). Otherwise, look for a counter in the render details' unknown
-  words after a render with a visibility test.
+- **H5, occlusion queries.** No counter is known. A DDK desktop-GL capture
+  of `glBeginQuery(GL_SAMPLES_PASSED)` would show it, but that DDK needs X
+  (it's GLX only). Otherwise, look for a counter in the render details'
+  unknown words after a render with a visibility test: the kernel writes
+  those words (`pvrsgx_render.c`; rd+0x6c..0xc8 are 0 and load the 3D
+  registers 0xa84-0xa9c, 0xb24-0xb2c and 0x820-0x868), so the test needs a
+  kernel knob or a microkernel build. Until then, the boolean is a store
+  from the fragment program (done, "Status").
 - **H6, multisampling.** Done as a capture: the DDK's ES2 renders 4× (see the
   table). Still open: an MSAA FBO and a resolve blit (`glBlitFramebuffer`),
   the per-sample ZLS layout (for multisample textures, which read samples
@@ -719,6 +724,40 @@ section 14; a CE5300 board, 2026-11-20):
 - A computed coordinate's LOD is wrong on some 2x2 quads, for 2D textures
   as for volumes (`sgx_tex3d`'s mip case through gl_FragCoord): not the
   volumes', and not looked at further here.
+
+**Occlusion queries** (`SGX_DEBUG=occlusion`, `ARB_occlusion_query2` and
+`EXT_occlusion_query_boolean`; a CE5300 board, 2026-11-20):
+
+- While a query counts, every draw's fragment program begins (or, past a
+  discard's or gl_FragDepth's feedback, its phase 1 begins) with
+  `st.a.d sa6, #0, #1 [skipinv]`, a store of 1 at sa6 + 4, the query's slot
+  (`SGXWS_VISIBLE_SA`, `sgxws_blend.visible`). `skipinv` keeps a 2x2 quad's
+  helper pixels out. Phase 1 runs only for the pixels that pass the
+  depth/stencil tests and the discard, so the slot is set iff a sample
+  passed. The draw is a translucent pass (pass type 1 for an opaque one),
+  shaded in submission order: a pixel a later draw covers has counted.
+- A slot a begin (4096 a context, taken in turn; one a frame in flight may
+  still write is waited for). A result waits for the last frame the query,
+  or an earlier one, was drawn in: results come in order.
+- `ANY_SAMPLES_PASSED` (and `_CONSERVATIVE`) is exact. `SAMPLES_PASSED` gets
+  1 for any number of samples (no counter, H5).
+- `mesa/tests/sgx_occlusion.c` (GLES2, EXT_occlusion_query_boolean): 17 of
+  17 (visible, none, clipped, failing the depth test, hidden by a later
+  draw, behind an earlier one, colour mask 0 with no depth writes, discard
+  of every pixel and of half, the stencil test, scissor, a sliver covering
+  no pixel centre, 200 queries in a frame, polling for the result).
+- dEQP-GLES3 `functional.occlusion_query` (62): 62 pass, with the ES 3.0
+  pieces that are elsewhere (2D arrays, transform feedback) merged in for
+  the run.
+- piglit (the 26 occlusion and conditional-render tests, desktop GL):
+  `arb_occlusion_query2` `api` and `render`, `occlusion_query_order`,
+  `occlusion_query_meta_no_fragments` and `GetQueryCounterBits` go from
+  skip to pass. `occlusion-query-discard`, `occlusion_query_meta_fragments`
+  and `occlusion_query_meta_save` check counts and go from skip to fail (1
+  for any). `occlusion_query` goes from pass to fail: without the cap
+  `GL_QUERY_COUNTER_BITS` is 0, and the test then doesn't check the counts.
+  `occlusion_query_conform@GetObjivAval_multi2` fails with the cap and
+  without. `nv_conditional_render` stays off.
 
 Provoking vertex first waits for flat shading, which the driver doesn't do
 yet (DOUTI b25-26, STATE.md §3).

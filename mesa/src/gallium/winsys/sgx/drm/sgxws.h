@@ -186,7 +186,11 @@ struct sgxws_blend {
    /* the alpha side's products trade r0 and r1, so its subtract runs the
     * other way from the colour's (SUBTRACT against REVERSE_SUBTRACT) */
    uint8_t atrade;
+   /* every pixel shaded (past a discard's feedback) stores 1 at
+    * sa[SGXWS_VISIBLE_SA] + 4: occlusion queries */
+   uint8_t visible;
 };
+#define SGXWS_VISIBLE_SA 6
 
 /* a constant-colour blend's factors, in glBlendFunc's order */
 enum sgxws_bfactor {
