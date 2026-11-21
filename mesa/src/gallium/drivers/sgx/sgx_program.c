@@ -22,6 +22,7 @@
 
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_format_convert.h"
 #include "nir/tgsi_to_nir.h"
 #include "util/format/u_format.h"
 #include "util/os_time.h"
@@ -919,8 +920,11 @@ lower_srgb_filter(nir_builder *b, nir_instr *instr, void *data)
       nir_def *c =
          nir_fadd(b, i0, nir_imm_vec2(b, (k & 1) + 0.5f, (k >> 1) + 0.5f));
 
+      /* the coordinate before the tap that reads it */
+      if (sz)
+         c = nir_fdiv(b, c, sz);
       nir_builder_instr_insert(b, &tap->instr);
-      nir_src_rewrite(&tap->src[ci].src, sz ? nir_fdiv(b, c, sz) : c);
+      nir_src_rewrite(&tap->src[ci].src, c);
       t[k] = &tap->def;
    }
    unsigned n = tex->def.num_components;
@@ -1017,10 +1021,9 @@ pack_word(nir_builder *b, nir_def *v, unsigned wm, unsigned kind)
 
 /* The program as the compiler takes it still has its outputs as variables
  * (sgx_lower lowers I/O itself): output 0 is brought down to one store of
- * the variable at the end, and that store becomes one of the packed word,
- * the variable a uint (the compiler's rt_packed: one word, mask 1). */
-static bool
-pack_int_outputs(nir_shader *nir, unsigned kind)
+ * the variable at the end, which is returned (NULL: none) */
+static nir_variable *
+colour_output(nir_shader *nir)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_variable *out = NULL;
@@ -1038,6 +1041,17 @@ pack_int_outputs(nir_shader *nir, unsigned kind)
           var->data.location == FRAG_RESULT_DATA0)
          out = var;
    }
+   return out;
+}
+
+/* Output 0's store becomes one of the packed word, the variable a uint (the
+ * compiler's rt_packed: one word, mask 1). */
+static bool
+pack_int_outputs(nir_shader *nir, unsigned kind)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_variable *out = colour_output(nir);
+
    if (!out || !glsl_type_is_32bit(glsl_without_array(out->type)))
       return false;
 
@@ -1066,6 +1080,181 @@ pack_int_outputs(nir_shader *nir, unsigned kind)
    }
    if (progress) {
       out->type = glsl_uint_type();
+      NIR_PASS(_, nir, nir_opt_dce);
+   }
+   return progress;
+}
+
+/* channel c of a blend factor f (pipe_blendfactor) for source s, the tile's
+ * colour d and the blend colour k, all in linear */
+static nir_def *
+blend_factor(nir_builder *b, unsigned f, nir_def *s, nir_def *d, nir_def *k,
+             unsigned c)
+{
+   nir_def *v;
+
+   switch (util_blendfactor_without_invert(f)) {
+   case PIPE_BLENDFACTOR_SRC_COLOR:
+      v = nir_channel(b, s, c);
+      break;
+   case PIPE_BLENDFACTOR_SRC_ALPHA:
+      v = nir_channel(b, s, 3);
+      break;
+   case PIPE_BLENDFACTOR_DST_ALPHA:
+      v = nir_channel(b, d, 3);
+      break;
+   case PIPE_BLENDFACTOR_DST_COLOR:
+      v = nir_channel(b, d, c);
+      break;
+   case PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE:
+      v = c == 3 ? nir_imm_float(b, 1.0f)
+                 : nir_fmin(b, nir_channel(b, s, 3),
+                            nir_fsub_imm(b, 1.0f, nir_channel(b, d, 3)));
+      break;
+   case PIPE_BLENDFACTOR_CONST_COLOR:
+      v = nir_channel(b, k, c);
+      break;
+   case PIPE_BLENDFACTOR_CONST_ALPHA:
+      v = nir_channel(b, k, 3);
+      break;
+   default: /* ONE, and ZERO inverted (no dual source: none is exposed) */
+      v = nir_imm_float(b, 1.0f);
+      break;
+   }
+   return util_blendfactor_is_inverted(f) ? nir_fsub_imm(b, 1.0f, v) : v;
+}
+
+static nir_def *
+blend_func(nir_builder *b, unsigned func, nir_def *s, nir_def *fs, nir_def *d,
+           nir_def *fd)
+{
+   switch (func) {
+   case PIPE_BLEND_SUBTRACT:
+      return nir_fsub(b, nir_fmul(b, s, fs), nir_fmul(b, d, fd));
+   case PIPE_BLEND_REVERSE_SUBTRACT:
+      return nir_fsub(b, nir_fmul(b, d, fd), nir_fmul(b, s, fs));
+   case PIPE_BLEND_MIN:
+      return nir_fmin(b, s, d);
+   case PIPE_BLEND_MAX:
+      return nir_fmax(b, s, d);
+   default:
+      return nir_fadd(b, nir_fmul(b, s, fs), nir_fmul(b, d, fd));
+   }
+}
+
+/* An sRGB colour buffer (EXT_sRGB, EXT_framebuffer_sRGB; the PBE writes the
+ * word it gets, docs/GL3.md): output 0's colour encoded from linear before it
+ * goes out.  Blended (rt_srgb 2), the blend is done here instead of by the
+ * sop2 epilogue, which would mix encoded bytes: the tile's word (o0, a load
+ * of the output: the compiler's rt_packed) decoded, blended in linear with
+ * the clamped colour, encoded and packed B, G, R, A again. */
+static bool
+lower_srgb_output(nir_shader *nir, const struct sgx_pipe_shader *so)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_variable *out = colour_output(nir);
+   bool blend = so->rt_srgb == 2;
+
+   if (!out || !glsl_type_is_32bit(glsl_without_array(out->type)) ||
+       glsl_get_base_type(glsl_without_array(out->type)) != GLSL_TYPE_FLOAT)
+      return false;
+
+   nir_builder b = nir_builder_create(impl);
+   bool progress = false;
+
+   nir_foreach_block (block, impl) {
+      nir_foreach_instr_safe (instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *st = nir_instr_as_intrinsic(instr);
+
+         if (st->intrinsic != nir_intrinsic_store_deref ||
+             nir_deref_instr_get_variable(nir_src_as_deref(st->src[0])) != out)
+            continue;
+         b.cursor = nir_before_instr(instr);
+         nir_def *v = st->src[1].ssa;
+         unsigned n = v->num_components, wm = nir_intrinsic_write_mask(st);
+         nir_def *ch[4];
+
+         for (unsigned c = 0; c < 4; c++)
+            ch[c] = c < n ? nir_fsat(&b, nir_channel(&b, v, c))
+                          : nir_imm_float(&b, c == 3 ? 1.0f : 0.0f);
+         if (!blend) {
+            /* the colour's channels, R, G, B encoded, as the store had them */
+            nir_def *rgb =
+               nir_format_linear_to_srgb(&b, nir_vec(&b, ch, 3));
+
+            for (unsigned c = 0; c < MIN2(n, 3); c++)
+               ch[c] = nir_channel(&b, rgb, c);
+            nir_store_deref(&b, nir_build_deref_var(&b, out),
+                            nir_vec(&b, ch, n), wm);
+            nir_instr_remove(instr);
+            progress = true;
+            continue;
+         }
+         nir_def *s = nir_vec(&b, ch, 4);
+         out->type = glsl_uint_type();
+         /* the tile's word as the compiler reads it (o0): a load_output
+          * itself, as a load of the variable would read the temporary
+          * nir_lower_io_vars_to_temporaries makes of it, undefined here */
+         nir_intrinsic_instr *lo =
+            nir_intrinsic_instr_create(b.shader, nir_intrinsic_load_output);
+         nir_io_semantics sem = {0};
+
+         lo->num_components = 1;
+         lo->src[0] = nir_src_for_ssa(nir_imm_int(&b, 0));
+         sem.location = out->data.location;
+         sem.num_slots = 1;
+         nir_intrinsic_set_io_semantics(lo, sem);
+         nir_def_init(&lo->instr, &lo->def, 1, 32);
+         nir_builder_instr_insert(&b, &lo->instr);
+         nir_def *tile = &lo->def;
+         static const unsigned shift[4] = {16, 8, 0, 24}; /* r, g, b, a */
+         nir_def *dc[4];
+
+         for (unsigned c = 0; c < 4; c++)
+            dc[c] = nir_fmul_imm(
+               &b,
+               nir_u2f32(&b, nir_iand_imm(&b, nir_ushr_imm(&b, tile, shift[c]),
+                                          0xff)),
+               1.0f / 255.0f);
+         nir_def *dl = nir_format_srgb_to_linear(&b, nir_vec(&b, dc, 3));
+         nir_def *d = nir_vec4(&b, nir_channel(&b, dl, 0),
+                               nir_channel(&b, dl, 1), nir_channel(&b, dl, 2),
+                               dc[3]);
+         nir_def *k = nir_imm_vec4(&b, so->rt_blend_color[0],
+                                   so->rt_blend_color[1], so->rt_blend_color[2],
+                                   so->rt_blend_color[3]);
+         const struct pipe_rt_blend_state *rb = &so->rt_blend;
+         nir_def *r[4];
+
+         for (unsigned c = 0; c < 4; c++) {
+            bool a = c == 3;
+            unsigned func = a ? rb->alpha_func : rb->rgb_func;
+            unsigned fsrc = a ? rb->alpha_src_factor : rb->rgb_src_factor;
+            unsigned fdst = a ? rb->alpha_dst_factor : rb->rgb_dst_factor;
+
+            r[c] = nir_fsat(&b, blend_func(&b, func, nir_channel(&b, s, c),
+                                           blend_factor(&b, fsrc, s, d, k, c),
+                                           nir_channel(&b, d, c),
+                                           blend_factor(&b, fdst, s, d, k, c)));
+         }
+         nir_def *rgb = nir_format_linear_to_srgb(&b, nir_vec(&b, r, 3));
+         nir_def *enc = nir_vec4(&b, nir_channel(&b, rgb, 0),
+                                 nir_channel(&b, rgb, 1),
+                                 nir_channel(&b, rgb, 2), r[3]);
+         static const unsigned bits[4] = {8, 8, 8, 8};
+         nir_def *word =
+            pack_word(&b, nir_format_float_to_unorm(&b, enc, bits), 0xf, 1);
+
+         nir_store_deref(&b, nir_build_deref_var(&b, out), word, 0x1);
+         nir_instr_remove(instr);
+         progress = true;
+      }
+   }
+   if (progress) {
+      if (blend)
+         out->type = glsl_uint_type();
       NIR_PASS(_, nir, nir_opt_dce);
    }
    return progress;
@@ -1340,6 +1529,16 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
          opts.rt_packed = 1;
       if (sgx_drv_debug & SGX_DEBUG_NIR) {
          fprintf(stderr, "sgx: after pack_int_outputs (kind %u):\n", kind);
+         nir_print_shader(nir, stderr);
+      }
+   }
+   /* an sRGB colour buffer: output 0 encoded, or blended and packed */
+   if (!vertex && so->rt_srgb) {
+      so->reads_tile = lower_srgb_output(nir, so) && so->rt_srgb == 2;
+      if (so->reads_tile)
+         opts.rt_packed = 1;
+      if (sgx_drv_debug & SGX_DEBUG_NIR) {
+         fprintf(stderr, "sgx: after lower_srgb_output (%u):\n", so->rt_srgb);
          nir_print_shader(nir, stderr);
       }
    }
@@ -2074,7 +2273,9 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
 {
    struct sgx_pipe_shader **slot;
    struct tex_key k;
-   uint8_t rt_int = 0;
+   uint8_t rt_int = 0, rt_srgb = 0;
+   struct pipe_rt_blend_state rt_blend;
+   float rt_blend_color[4] = {0};
    /* MRT: a variant a colour buffer (remap_outputs) */
    uint8_t rt_target =
       ctx->framebuffer.nr_cbufs > 1 ? ctx->rt_index + 1 : 0;
@@ -2088,13 +2289,51 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
                   ? 3 + ctx->rt_plane /* a plane: channel rt_plane */
                : sgx_tex_raw32(sgx_cbuf(ctx)->format) ? 2
                                                                  : 1;
+   /* an sRGB colour buffer: encoded, and blended in the program
+    * (lower_srgb_output), with the blend the variant's */
+   memset(&rt_blend, 0, sizeof(rt_blend));
+   if (sgx_cbuf(ctx)->texture && util_format_is_srgb(sgx_cbuf(ctx)->format)) {
+      unsigned br = sgx_blend_rt(ctx->blend, ctx->rt_index);
+
+      rt_srgb = 1;
+      if (ctx->blend && ctx->blend->base.rt[br].blend_enable) {
+         const struct pipe_rt_blend_state *rb = &ctx->blend->base.rt[br];
+         unsigned f[4] = {rb->rgb_src_factor, rb->rgb_dst_factor,
+                          rb->alpha_src_factor, rb->alpha_dst_factor};
+
+         rt_srgb = 2;
+         rt_blend.blend_enable = 1;
+         rt_blend.rgb_func = rb->rgb_func;
+         rt_blend.rgb_src_factor = rb->rgb_src_factor;
+         rt_blend.rgb_dst_factor = rb->rgb_dst_factor;
+         rt_blend.alpha_func = rb->alpha_func;
+         rt_blend.alpha_src_factor = rb->alpha_src_factor;
+         rt_blend.alpha_dst_factor = rb->alpha_dst_factor;
+         /* the blend colour, clamped (a fixed-point target), only when read */
+         for (unsigned i = 0; i < 4; i++) {
+            unsigned u = util_blendfactor_without_invert(f[i]);
+
+            if (u == PIPE_BLENDFACTOR_CONST_COLOR ||
+                u == PIPE_BLENDFACTOR_CONST_ALPHA) {
+               for (unsigned c = 0; c < 4; c++)
+                  rt_blend_color[c] =
+                     CLAMP(ctx->blend_color.color[c], 0.0f, 1.0f);
+            }
+         }
+      }
+   }
    if (!tex_key_of(fs->nir, ctx->views, ctx->samplers, &k) && !rt_int &&
-       !rt_target)
+       !rt_target && !rt_srgb)
       return fs;
    for (unsigned i = 0; i < ARRAY_SIZE(fs->variants_srgb); i++) {
       if (fs->variants_srgb[i] && tex_key_is(fs->variants_srgb[i], &k) &&
           fs->variants_srgb[i]->rt_int == rt_int &&
-          fs->variants_srgb[i]->rt_target == rt_target)
+          fs->variants_srgb[i]->rt_target == rt_target &&
+          fs->variants_srgb[i]->rt_srgb == rt_srgb &&
+          !memcmp(&fs->variants_srgb[i]->rt_blend, &rt_blend,
+                  sizeof(rt_blend)) &&
+          !memcmp(fs->variants_srgb[i]->rt_blend_color, rt_blend_color,
+                  sizeof(rt_blend_color)))
          return fs->variants_srgb[i];
    }
    /* the oldest goes */
@@ -2108,6 +2347,9 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
    tex_key_set(*slot, &k);
    (*slot)->rt_int = rt_int;
    (*slot)->rt_target = rt_target;
+   (*slot)->rt_srgb = rt_srgb;
+   memcpy(&(*slot)->rt_blend, &rt_blend, sizeof(rt_blend));
+   memcpy((*slot)->rt_blend_color, rt_blend_color, sizeof(rt_blend_color));
    if (!compile_shader(ctx, *slot, fs->nir, NULL, k.srgb, k.srgb_filter, k.swz,
                        k.not_bgra, NULL, false, k.depth, k.compare) ||
        !(*slot)->code) {
