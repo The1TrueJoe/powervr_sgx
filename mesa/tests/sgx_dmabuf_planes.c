@@ -15,7 +15,18 @@
  *  2. the UV plane alone (GR88 sampled as (U, V, 0, 1))
  *  3. Y and UV in one fragment shader on two units, as mpv's GPU output
  *     samples a VA-API frame
- * NEAREST, every texel compared. DESKTOP_GL=1 does the same in a desktop GL
+ * NEAREST, every texel compared. Then what GL may do to an imported plane
+ * besides sampling it, each checked on the dma-buf itself (a CPU mapping,
+ * every byte against a shadow copy):
+ *  4. glReadPixels of an FBO with the UV plane attached: U and V, not Y
+ *  5. glTexSubImage2D into the UV plane: the box written, and nothing else
+ *  6. a draw into an FBO with the Y plane attached: the UV plane untouched
+ *     (R8 renders, at 4 bytes a pixel it would run into UV), and one into
+ *     the UV plane: the Y plane untouched
+ *  7. glBlitFramebuffer from an RGBA texture into the UV plane (where the
+ *     context has it): the box written, and nothing else
+ * Each of 5 to 7 starts from the pattern written again.
+ * DESKTOP_GL=1 does the same in a desktop GL
  * context (mpv's default on this driver).
  *
  *   EGL_PLATFORM=surfaceless sgx_dmabuf_planes [width height]   (1920 1080)
@@ -173,6 +184,93 @@ static void want_yuv(int x, int y, uint8_t *e)
    e[0] = Yp(x, y), e[1] = Up(x / 2, y / 2), e[2] = Vp(x / 2, y / 2);
 }
 
+static uint8_t Qp(int x, int y) { return (uint8_t)(x * 17 + y * 29 + 3); }
+
+/* the dma-buf compared with the shadow copy of what it should hold: over
+ * [lo, hi) bytes, or all of it.  Prints the first difference. */
+static int check_buf(const char *name, int dfd, const uint8_t *want, size_t size,
+                     size_t lo, size_t hi)
+{
+   uint8_t *m = mmap(NULL, size, PROT_READ, MAP_SHARED, dfd, 0);
+   struct dma_buf_sync sync = {DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
+   size_t bad = 0, first = 0;
+
+   if (m == MAP_FAILED) {
+      perror("mmap of the dma-buf");
+      exit(2);
+   }
+   ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync);
+   for (size_t i = lo; i < hi; i++)
+      if (m[i] != want[i] && !bad++)
+         first = i;
+   printf("%s: %s, %zu of %zu bytes differ", name, bad ? "FAIL" : "OK", bad, hi - lo);
+   if (bad)
+      printf(" (first at byte %zu: %02x, want %02x)", first, m[first], want[first]);
+   printf("\n");
+   sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+   ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync);
+   munmap(m, size);
+   return bad != 0;
+}
+
+/* the dma-buf rewritten from the shadow copy, as a decoder hands a frame */
+static void fill_buf(int dfd, const uint8_t *want, size_t size)
+{
+   uint8_t *m = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, dfd, 0);
+   struct dma_buf_sync sync = {DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE};
+
+   if (m == MAP_FAILED) {
+      perror("mmap of the dma-buf");
+      exit(2);
+   }
+   ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync);
+   memcpy(m, want, size);
+   sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
+   ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync);
+   munmap(m, size);
+}
+
+/* an FBO with tex (W x H) as its colour buffer, bound; 0 if incomplete */
+static GLuint plane_fbo(GLuint tex)
+{
+   GLuint fb;
+
+   glGenFramebuffers(1, &fb);
+   glBindFramebuffer(GL_FRAMEBUFFER, fb);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
+      return fb;
+   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+   glDeleteFramebuffers(1, &fb);
+   return 0;
+}
+
+/* a full-viewport magenta quad into the plane tex (w x h) through an FBO,
+ * then the bytes [lo, hi) of the dma-buf checked against the shadow copy */
+static int draw_into(const char *name, GLuint tex, int w, int h, int dfd,
+                     const uint8_t *want, size_t size, size_t lo, size_t hi)
+{
+   static const float quad[] = {-1, -1, 1, -1, -1, 1, 1, 1};
+   GLuint fb = plane_fbo(tex);
+   char what[128];
+
+   if (fb) {
+      GLuint pr = prog("void main(){ gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); }");
+
+      glViewport(0, 0, w, h);
+      glUseProgram(pr);
+      glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad);
+      glEnableVertexAttribArray(0);
+      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+      glFinish();
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      glDeleteFramebuffers(1, &fb);
+   }
+   snprintf(what, sizeof(what), "%s%s", name, fb ? "" : " (FBO incomplete, no draw)");
+   return check_buf(what, dfd, want, size, lo, hi);
+}
+
+
 int main(int argc, char **argv)
 {
    int W = argc > 2 ? atoi(argv[1]) : 1920, H = argc > 2 ? atoi(argv[2]) : 1080;
@@ -207,15 +305,17 @@ int main(int argc, char **argv)
    }
    struct dma_buf_sync sync = {DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE};
    ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync);
-   memset(m, 0x55, size);
+   uint8_t *ref = malloc(size); /* what the dma-buf should hold */
+   memset(ref, 0x55, size);
    for (int y = 0; y < H; y++)
       for (int x = 0; x < W; x++)
-         m[y * pitch + x] = Yp(x, y);
+         ref[y * pitch + x] = Yp(x, y);
    for (int y = 0; y < H / 2; y++)
       for (int x = 0; x < W / 2; x++) {
-         m[uv_off + y * pitch + 2 * x] = Up(x, y);
-         m[uv_off + y * pitch + 2 * x + 1] = Vp(x, y);
+         ref[uv_off + y * pitch + 2 * x] = Up(x, y);
+         ref[uv_off + y * pitch + 2 * x + 1] = Vp(x, y);
       }
+   memcpy(m, ref, size);
    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
    ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync);
    munmap(m, size);
@@ -311,6 +411,115 @@ int main(int argc, char **argv)
       fails += !!report("3 Y and UV in one shader", px, W, H, 3, want_yuv);
       free(px);
    }
+   if (tex[1]) {
+      int w = W / 2, h = H / 2;
+      GLuint fb = plane_fbo(tex[1]);
+
+      /* 4. a CPU read of the UV plane */
+      if (fb) {
+         uint8_t *px = malloc((size_t)w * h * 4);
+
+         glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+         fails += !!report("4 glReadPixels of the UV plane", px, w, h, 2, want_uv);
+         free(px);
+         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+         glDeleteFramebuffers(1, &fb);
+      } else
+         printf("4 glReadPixels of the UV plane: no FBO on it (incomplete), skipped\n");
+
+      /* 5. a texture upload into the UV plane: a 16x8 box at (8, 4) */
+      fill_buf(dfd, ref, size);
+      enum { BX = 8, BY = 4, BW = 16, BH = 8 };
+      uint8_t sub[BW * BH * 2];
+      for (int y = 0; y < BH; y++)
+         for (int x = 0; x < BW; x++) {
+            sub[(y * BW + x) * 2] = Qp(x, y);
+            sub[(y * BW + x) * 2 + 1] = (uint8_t)~Qp(x, y);
+            ref[uv_off + (BY + y) * pitch + 2 * (BX + x)] = Qp(x, y);
+            ref[uv_off + (BY + y) * pitch + 2 * (BX + x) + 1] = (uint8_t)~Qp(x, y);
+         }
+      glActiveTexture(GL_TEXTURE0);
+      glBindTexture(GL_TEXTURE_2D, tex[1]);
+      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+      while (glGetError())
+         ;
+      glTexSubImage2D(GL_TEXTURE_2D, 0, BX, BY, BW, BH, 0x8227 /* GL_RG */,
+                      GL_UNSIGNED_BYTE, sub);
+      GLenum e = glGetError();
+      glFinish();
+      if (e) {
+         printf("5 glTexSubImage2D into the UV plane: 0x%x, skipped\n", e);
+         /* nothing written: the shadow copy goes back */
+         for (int y = 0; y < BH; y++)
+            for (int x = 0; x < 2 * BW; x++)
+               ref[uv_off + (BY + y) * pitch + 2 * BX + x] =
+                  x & 1 ? Vp(BX + x / 2, BY + y) : Up(BX + x / 2, BY + y);
+      } else
+         fails += check_buf("5 glTexSubImage2D into the UV plane, whole dma-buf", dfd,
+                            ref, size, 0, size);
+
+      /* 6. draws into the planes: whatever each does to its own plane, the
+       *    other one stays */
+      fill_buf(dfd, ref, size);
+      if (tex[0])
+         fails += draw_into("6 a draw into the Y plane, the UV plane", tex[0], W, H, dfd,
+                            ref, size, uv_off, size);
+      fill_buf(dfd, ref, size);
+      fails += draw_into("6 a draw into the UV plane, the Y plane", tex[1], w, h, dfd, ref,
+                         size, 0, uv_off);
+   }
+   /* 7. a blit into the UV plane: a 16x8 box at (24, 12) */
+   typedef void (*blit_fn)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint,
+                           GLbitfield, GLenum);
+   /* GL 3.0 or ES 3.0: an ES 2.0 context resolves the name but refuses it */
+   blit_fn blit = desk || strstr((const char *)glGetString(GL_VERSION), "ES 3")
+                     ? (blit_fn)eglGetProcAddress("glBlitFramebuffer")
+                     : NULL;
+   if (tex[1])
+      fill_buf(dfd, ref, size);
+   if (tex[1] && blit) {
+      enum { BX = 24, BY = 12, BW = 16, BH = 8 };
+      uint8_t src[BW * BH * 4];
+      GLuint st, sfb, dfb;
+
+      for (int y = 0; y < BH; y++)
+         for (int x = 0; x < BW; x++) {
+            uint8_t *p = src + (y * BW + x) * 4;
+
+            p[0] = Qp(x, y) ^ 0x5a, p[1] = Qp(y, x), p[2] = 0, p[3] = 255;
+            ref[uv_off + (BY + y) * pitch + 2 * (BX + x)] = p[0];
+            ref[uv_off + (BY + y) * pitch + 2 * (BX + x) + 1] = p[1];
+         }
+      glActiveTexture(GL_TEXTURE6);
+      glGenTextures(1, &st);
+      glBindTexture(GL_TEXTURE_2D, st);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, BW, BH, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+      glGenFramebuffers(1, &sfb);
+      glBindFramebuffer(GL_FRAMEBUFFER, sfb);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, st, 0);
+      dfb = plane_fbo(tex[1]);
+      if (dfb) {
+         glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */, sfb);
+         glBindFramebuffer(0x8CA9 /* GL_DRAW_FRAMEBUFFER */, dfb);
+         while (glGetError())
+            ;
+         blit(0, 0, BW, BH, BX, BY, BX + BW, BY + BH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+         GLenum e = glGetError();
+         glFinish();
+         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+         if (e)
+            printf("7 glBlitFramebuffer into the UV plane: 0x%x\n", e), fails++;
+         else
+            fails += check_buf("7 glBlitFramebuffer into the UV plane, whole dma-buf", dfd,
+                               ref, size, 0, size);
+         glDeleteFramebuffers(1, &dfb);
+      } else
+         printf("7 glBlitFramebuffer into the UV plane: no FBO on it, skipped\n");
+      glDeleteFramebuffers(1, &sfb);
+      glDeleteTextures(1, &st);
+   } else if (tex[1])
+      printf("7 glBlitFramebuffer into the UV plane: not in this context, skipped\n");
+   free(ref);
    printf("glGetError 0x%x\nresult: %d failed\n", glGetError(), fails);
    return fails ? 1 : 0;
 }
