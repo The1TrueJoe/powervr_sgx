@@ -66,6 +66,12 @@ struct sgx_resource {
    uint32_t rendered; /* a texture's levels rendered into since data was last
                          brought up to date */
    uint32_t pitch;    /* pixels per row of a render target (a multiple of 32) */
+   /* An imported 8- or 16-bit plane (a video decoder's NV12 as R8 + GR88,
+    * EGL_EXT_image_dma_buf_import): sampled where it is, strided, as L8 or
+    * LA88 (plane_format), plane_offset bytes into the dma-buf; pitch is
+    * then the row in 32-bit words.  0 for every other resource. */
+   uint8_t plane_format;
+   uint32_t plane_offset;
 
    /* A texture written while a render may still sample it: the write goes to
     * a spare copy, which takes over (the DDK's ghosting).  A frame that
@@ -116,7 +122,8 @@ sgx_resource_sampleable(const struct sgx_resource *res)
    if (res->texture)
       return true;
    return res->bo.va && res->pitch && res->base.last_level == 0 &&
-          (res->base.format == PIPE_FORMAT_B8G8R8A8_UNORM ||
+          (res->plane_format ||
+           res->base.format == PIPE_FORMAT_B8G8R8A8_UNORM ||
            res->base.format == PIPE_FORMAT_B8G8R8X8_UNORM ||
            res->base.format == PIPE_FORMAT_R8G8B8A8_UNORM ||
            res->base.format == PIPE_FORMAT_R8G8B8X8_UNORM);

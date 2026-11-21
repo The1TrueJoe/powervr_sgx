@@ -276,8 +276,8 @@ lower_txs_int(nir_builder *b, nir_tex_instr *tex)
    return true;
 }
 
-/* A 3D texture is one texel (max_texture_3d_levels = 1: the volume layout
- * isn't the driver's yet, TEX.md section 14), kept as a 1x1 2D texture
+/* Without SGX_DEBUG=tex3d a 3D texture is one texel (max_texture_3d_levels
+ * = 1), kept as a 1x1 2D texture
  * (sgx_resource), which every (s, t, r) reads whatever the wrap and filter:
  * its samples become 2D ones at (s, t). Sizes and level counts keep the
  * volume's (lower_txs). */
@@ -1424,8 +1424,9 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
       if (srgb_filter)
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_srgb_filter,
                   nir_metadata_control_flow, &srgb_filter);
-      NIR_PASS(_, nir, nir_shader_instructions_pass, lower_tex_3d,
-               nir_metadata_control_flow, NULL);
+      if (!(sgx_drv_debug & SGX_DEBUG_TEX3D))
+         NIR_PASS(_, nir, nir_shader_instructions_pass, lower_tex_3d,
+                  nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_lower_tex, &tex);
    }
    /* textureGrad, the Offset variants and texelFetch as smp can do them;
@@ -1855,9 +1856,10 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
                };
             }
             /* returned F16, two registers (opts.f16_samples): the DDK's T3
-             * for a sample its program does math on, as a whole word */
+             * for a sample its program does math on, as a whole word but a
+             * volume's depth */
             if (out.iters[i].f16) {
-               so->prog.douti_t3_clr[last_sample] = ~0u;
+               so->prog.douti_t3_clr[last_sample] = ~SGX_TEX_T3_DEPTH;
                so->prog.douti_t3_set[last_sample] = 0x01028800u;
             }
             continue;
@@ -2113,7 +2115,9 @@ tex_key_of(const nir_shader *nir, struct pipe_sampler_view *const *views,
               v->u.tex.first_level == v->u.tex.last_level))
             k->srgb_filter |= 1u << unit;
       }
-      if (!sgx_tex_bgra(v->format))
+      unsigned plane = sgx_tex_plane_format(v->texture);
+
+      if (!sgx_tex_bgra(v->format) || plane)
          k->not_bgra |= 1u << unit;
       /* one F32 word a texel (tex_f32): depth, and R32 (raw); RG32 and
        * RGBA32 a read a plane (tex_r32x2 / x4) */
@@ -2145,6 +2149,21 @@ tex_key_of(const nir_shader *nir, struct pipe_sampler_view *const *views,
          for (unsigned c = 0; c < 4; c++)
             if (sw[c] == PIPE_SWIZZLE_W)
                sw[c] = PIPE_SWIZZLE_1;
+      }
+      /* An imported video plane comes back as L8 (L, L, L, 1) or LA88
+       * (L, L, L, A): GL's R8 is (r, 0, 0, 1) and RG8 (r, g, 0, 1), g being
+       * the second byte, A */
+      if (plane) {
+         static const uint8_t r8[4] = {PIPE_SWIZZLE_X, PIPE_SWIZZLE_0,
+                                       PIPE_SWIZZLE_0, PIPE_SWIZZLE_1};
+         static const uint8_t rg8[4] = {PIPE_SWIZZLE_X, PIPE_SWIZZLE_W,
+                                        PIPE_SWIZZLE_0, PIPE_SWIZZLE_1};
+         const uint8_t *m =
+            plane == SGX_TEXSTATE_FORMAT_L8 ? r8 : rg8;
+
+         for (unsigned c = 0; c < 4; c++)
+            if (sw[c] <= PIPE_SWIZZLE_W)
+               sw[c] = m[sw[c]];
       }
       /* XYZW: none, 0 */
       if (sw[0] != PIPE_SWIZZLE_X || sw[1] != PIPE_SWIZZLE_Y ||

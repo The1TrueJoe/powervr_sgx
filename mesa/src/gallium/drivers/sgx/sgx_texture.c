@@ -175,7 +175,10 @@ sgx_tex_bpp(enum pipe_format format)
 bool
 sgx_tex_twiddled(const struct pipe_resource *prsc, unsigned w, unsigned h)
 {
-   if (!util_is_power_of_two_nonzero(w) || !util_is_power_of_two_nonzero(h))
+   /* (a volume's slice is converted as a linear one, then scattered into
+    * the volume's order: encode_volume_slice) */
+   if (!util_is_power_of_two_nonzero(w) || !util_is_power_of_two_nonzero(h) ||
+       sgx_tex_volume(prsc))
       return false;
    return !(prsc->target == PIPE_TEXTURE_2D &&
             (prsc->bind & PIPE_BIND_RENDER_TARGET) && prsc->height0 > 1 &&
@@ -237,9 +240,101 @@ sgx_tex_cube0_size(const struct pipe_resource *prsc)
    return prsc->array_size * face_stride_levels(prsc, 1);
 }
 
+/*
+ * A volume: a 3D texture of more than one slice (SGX_DEBUG=tex3d; without it
+ * a 3D texture is one texel, laid out as a 2D one).  T1 layout 1, T3's low
+ * bits the depth - 1, T0 b0-2 wrap R (TEX.md section 14, hwt_vol4/5).  A
+ * level is cubes of side t = min(w, h, d, 16), each side rounded up to a
+ * power of two, in Morton order with y first (index bits y0 x0 z0 y1 x1 z1
+ * ...); the cubes follow one another x first, then y, then z.  A
+ * power-of-two level is w * h * d texels and the next level follows it,
+ * which is the chain the sampler mipmaps through.  The sampler puts an NPOT
+ * level's successor w * h * d texels on too, inside its rounded-up cubes:
+ * NPOT levels are stored apart instead, each sampled alone.
+ */
+bool
+sgx_tex_volume(const struct pipe_resource *prsc)
+{
+   return prsc->target == PIPE_TEXTURE_3D && prsc->depth0 > 1;
+}
+
+static bool
+vol_pot(const struct pipe_resource *prsc)
+{
+   return util_is_power_of_two_nonzero(prsc->width0) &&
+          util_is_power_of_two_nonzero(prsc->height0) &&
+          util_is_power_of_two_nonzero(prsc->depth0);
+}
+
+static unsigned
+vol_side(unsigned w, unsigned h, unsigned d)
+{
+   return MIN2(util_next_power_of_two(MIN3(w, h, d)), 16);
+}
+
+/* a w x h x d level's texels, its cubes whole */
+static size_t
+vol_span(unsigned w, unsigned h, unsigned d)
+{
+   unsigned t = vol_side(w, h, d);
+
+   return (size_t)DIV_ROUND_UP(w, t) * DIV_ROUND_UP(h, t) *
+          DIV_ROUND_UP(d, t) * t * t * t;
+}
+
+/* each x, y and z's part of a texel's index in a w x h x d level */
+static void
+vol_tables(unsigned w, unsigned h, unsigned d, uint32_t *tx, uint32_t *ty,
+           uint32_t *tz)
+{
+   unsigned t = vol_side(w, h, d), n = util_logbase2(t);
+   uint32_t cube = t * t * t;
+   const uint32_t step[3] = {cube, DIV_ROUND_UP(w, t) * cube,
+                             DIV_ROUND_UP(w, t) * DIV_ROUND_UP(h, t) * cube};
+   const unsigned size[3] = {w, h, d};
+   const unsigned slot[3] = {1, 0, 2}; /* x, y, z: Morton bit 3b + slot */
+   uint32_t *tab[3] = {tx, ty, tz};
+
+   for (unsigned a = 0; a < 3; a++)
+      for (unsigned v = 0; v < size[a]; v++) {
+         uint32_t m = 0;
+
+         for (unsigned b = 0; b < n; b++)
+            m |= (v >> b & 1) << (3 * b + slot[a]);
+         tab[a][v] = m + (v >> n) * step[a];
+      }
+}
+
+static size_t
+vol_offset(const struct pipe_resource *prsc, unsigned level)
+{
+   unsigned bpp = sgx_tex_bpp(prsc->format);
+   size_t off = 0;
+
+   for (unsigned l = 0; l < level; l++)
+      off += vol_span(u_minify(prsc->width0, l), u_minify(prsc->height0, l),
+                      u_minify(prsc->depth0, l)) *
+             bpp;
+   return off;
+}
+
+/* The levels on the device: a power-of-two volume's whole chain, as the
+ * TPU takes the level count from the size (a mipmapped one with fewer
+ * levels reads past them, as fill_tail's 2D case, into zeroes here) */
+static unsigned
+vol_levels(const struct pipe_resource *prsc)
+{
+   return vol_pot(prsc) ? util_logbase2(MAX3(prsc->width0, prsc->height0,
+                                             prsc->depth0)) +
+                             1
+                        : prsc->last_level + 1;
+}
+
 size_t
 sgx_tex_offset(const struct pipe_resource *prsc, unsigned level, unsigned layer)
 {
+   if (sgx_tex_volume(prsc))
+      return vol_offset(prsc, level);
    return layer * face_stride(prsc) + chain_offset(prsc, level);
 }
 
@@ -271,6 +366,8 @@ sgx_tex_plane_stride(const struct pipe_resource *prsc)
 size_t
 sgx_tex_size(const struct pipe_resource *prsc)
 {
+   if (sgx_tex_volume(prsc))
+      return vol_offset(prsc, vol_levels(prsc));
    if (sgx_tex_raw32(prsc->format) > 1)
       return sgx_tex_raw32(prsc->format) * sgx_tex_plane_stride(prsc);
    return prsc->array_size > 1 ? prsc->array_size * face_stride(prsc)
@@ -436,6 +533,47 @@ encode_box(struct sgx_resource *res, unsigned level, unsigned layer,
                dst, x0, y0, x1, y1);
 }
 
+/* Slice z of a volume's level, the box x0..x1, y0..y1: converted from the CPU
+ * copy as a linear slice is (encode_rect), then each texel put at its index
+ * (vol_tables) */
+static void
+encode_volume_slice(struct sgx_resource *res, unsigned level, unsigned z,
+                    unsigned x0, unsigned y0, unsigned x1, unsigned y1)
+{
+   const struct pipe_resource *prsc = &res->base;
+   unsigned w = u_minify(prsc->width0, level),
+            h = u_minify(prsc->height0, level),
+            d = u_minify(prsc->depth0, level);
+   unsigned bpp = sgx_tex_bpp(prsc->format);
+   size_t pitch = (size_t)align(w, 8) * bpp;
+   uint32_t tx[256], ty[256], tz[256];
+   uint8_t *tmp, *dst;
+
+   x1 = MIN2(x1, w);
+   y1 = MIN2(y1, h);
+   if (z >= d || x0 >= x1 || y0 >= y1 || MAX3(w, h, d) > ARRAY_SIZE(tx))
+      return;
+   tmp = malloc(pitch * h);
+   if (!tmp)
+      return;
+   encode_box(res, level, z, tmp, x0, y0, x1, y1);
+   vol_tables(w, h, d, tx, ty, tz);
+   dst = (uint8_t *)res->bo.map + vol_offset(prsc, level);
+   for (unsigned y = y0; y < y1; y++) {
+      const uint8_t *s = tmp + y * pitch;
+      uint32_t i = ty[y] + tz[z];
+
+      if (bpp == 4) {
+         for (unsigned x = x0; x < x1; x++)
+            memcpy(dst + (size_t)(i + tx[x]) * 4, s + (size_t)x * 4, 4);
+      } else {
+         for (unsigned x = x0; x < x1; x++)
+            memcpy(dst + (size_t)(i + tx[x]) * bpp, s + (size_t)x * bpp, bpp);
+      }
+   }
+   free(tmp);
+}
+
 /* The device levels past tail_from: each a 2x2 box filter of the one before,
  * from tail_from's CPU copy. */
 static void
@@ -499,6 +637,10 @@ void
 sgx_tex_encode_box(struct sgx_resource *res, unsigned level, unsigned layer,
                    unsigned x0, unsigned y0, unsigned x1, unsigned y1)
 {
+   if (sgx_tex_volume(&res->base)) {
+      encode_volume_slice(res, level, layer, x0, y0, x1, y1);
+      return;
+   }
    /* past tail_from the device holds the filtered tail instead */
    if (level > res->tail_from && res->base.target == PIPE_TEXTURE_2D)
       return;
@@ -549,7 +691,11 @@ sgx_tex_uses_cube0(const struct pipe_sampler_view *view,
 void
 sgx_tex_encode_level(struct sgx_resource *res, unsigned level)
 {
-   for (unsigned layer = 0; layer < res->base.array_size; layer++)
+   unsigned n = sgx_tex_volume(&res->base)
+                   ? u_minify(res->base.depth0, level)
+                   : res->base.array_size;
+
+   for (unsigned layer = 0; layer < n; layer++)
       sgx_tex_encode_box(res, level, layer, 0, 0, ~0u, ~0u);
 }
 
@@ -573,8 +719,10 @@ sgx_tex_decode_box(struct sgx_resource *res, unsigned level, unsigned layer,
 
    x1 = MIN2(x1, w);
    y1 = MIN2(y1, h);
-   /* (nothing renders into a depth texture: the CPU copy is current) */
-   if (x0 >= x1 || y0 >= y1 || sgx_tex_depth(prsc->format))
+   /* (nothing renders into a depth texture or a volume: the CPU copy is
+    * current) */
+   if (x0 >= x1 || y0 >= y1 || sgx_tex_depth(prsc->format) ||
+       sgx_tex_volume(prsc))
       return;
    if (sgx_tex_raw32(prsc->format)) {
       size_t pitch = (size_t)depth_pitch(dev_width(prsc->format, w)) * 4,
@@ -662,6 +810,14 @@ wrap(enum pipe_tex_wrap w)
    }
 }
 
+/* The texture format an imported video plane is sampled as (L8, LA88), or 0
+ * (sgx_resource.plane_format) */
+unsigned
+sgx_tex_plane_format(const struct pipe_resource *prsc)
+{
+   return prsc ? ((const struct sgx_resource *)prsc)->plane_format : 0;
+}
+
 void
 sgx_tex_words(const struct pipe_sampler_view *view,
               const struct pipe_sampler_state *sampler, uint32_t t[4])
@@ -676,13 +832,16 @@ sgx_tex_words(const struct pipe_sampler_view *view,
                       ? view->u.tex.first_level
                       : 0;
    unsigned w = u_minify(prsc->width0, base), h = u_minify(prsc->height0, base);
+   bool volume = sgx_tex_volume(prsc);
    /* a linear (NPOT) texture's levels aren't a chain the sampler knows (the
     * DDK's GLES2 has no NPOT mipmaps), and sampling one with mipmapping
-    * locks the 3D (piglit fbo-generatemipmap-formats NPOT): its base level */
+    * locks the 3D (piglit fbo-generatemipmap-formats NPOT): its base level;
+    * an NPOT volume's levels are stored apart (sgx_tex_volume) */
    bool mips = sampler && sampler->min_mip_filter != PIPE_TEX_MIPFILTER_NONE &&
                view->u.tex.last_level > base &&
-               (prsc->target == PIPE_TEXTURE_CUBE || twiddled(w, h) ||
-                !sgx_screen(prsc->screen)->core->npot_mip_hangs);
+               (volume ? vol_pot(prsc)
+                       : prsc->target == PIPE_TEXTURE_CUBE || twiddled(w, h) ||
+                            !sgx_screen(prsc->screen)->core->npot_mip_hangs);
 
    sgx_pack(&t[0], TEXSTATE_WORD0, t0)
    {
@@ -691,6 +850,8 @@ sgx_tex_words(const struct pipe_sampler_view *view,
                       fmt == SGX_TEXSTATE_FORMAT_L8 ||
                       fmt == SGX_TEXSTATE_FORMAT_LA88;
       if (sampler) {
+         if (volume)
+            t0.wrap_r = wrap(sampler->wrap_r);
          t0.wrap_t = wrap(sampler->wrap_t);
          t0.wrap_s = wrap(sampler->wrap_s);
          t0.mip_linear =
@@ -703,6 +864,7 @@ sgx_tex_words(const struct pipe_sampler_view *view,
    sgx_pack(&t[1], TEXSTATE_WORD1, t1)
    {
       t1.layout = prsc->target == PIPE_TEXTURE_CUBE ? SGX_TEXSTATE_LAYOUT_CUBE
+                  : volume         ? SGX_TEXSTATE_LAYOUT_VOLUME
                   : twiddled(w, h) ? SGX_TEXSTATE_LAYOUT_TWIDDLED
                                    : SGX_TEXSTATE_LAYOUT_LINEAR;
       t1.format = fmt;
@@ -715,7 +877,7 @@ sgx_tex_words(const struct pipe_sampler_view *view,
       t2.address =
          SGX_DEV_ADDR(sgx_tex_uses_cube0(view, sampler) && res->cube0.va
                          ? res->cube0.va
-                         : res->bo.va + chain_offset(prsc, base));
+                         : res->bo.va + sgx_tex_offset(prsc, base, 0));
    }
    if (!res->texture) {
       /* A render target, read where it is: strided (T1 layout 6), the pitch
@@ -730,6 +892,8 @@ sgx_tex_words(const struct pipe_sampler_view *view,
       {
          t0.pitch_lo = p & 7;
          t0.pitch_hi = p >> 3;
+         /* an imported video plane is L8 or LA88 (plane_format) */
+         t0.unknown_30 = res->plane_format != 0;
          if (sampler) {
             t0.wrap_t = wrap(sampler->wrap_t);
             t0.wrap_s = wrap(sampler->wrap_s);
@@ -739,9 +903,15 @@ sgx_tex_words(const struct pipe_sampler_view *view,
       sgx_pack(&t[1], TEXSTATE_WORD1, t1)
       {
          t1.layout = SGX_TEXSTATE_LAYOUT_STRIDED;
-         t1.format = bgra ? 0x0c : 0x0d;
+         t1.format = res->plane_format ? res->plane_format : bgra ? 0x0c : 0x0d;
          t1.width = prsc->width0 - 1;
          t1.height = prsc->height0 - 1;
+      }
+      if (res->plane_format) {
+         /* an imported video plane (sgx_resource.plane_format): its bytes
+          * at plane_offset, the pitch as for any strided surface */
+         sgx_pack(&t[2], TEXSTATE_WORD2, t2)
+            t2.address = SGX_DEV_ADDR(res->bo.va + res->plane_offset);
       }
    }
    if (sgx_tex_word32(prsc->format)) {
@@ -769,6 +939,12 @@ sgx_tex_words(const struct pipe_sampler_view *view,
          t1.height = h - 1;
       }
    }
-   /* T3: the sample instruction's half; 00800800 for a single 2-D sample [D] */
-   sgx_pack(&t[3], TEXSTATE_WORD3, t3) t3.unknown_11 = true;
+   /* T3: the sample instruction's half; 00800800 for a single 2-D sample [D];
+    * a volume's depth - 1 in the low bits */
+   sgx_pack(&t[3], TEXSTATE_WORD3, t3)
+   {
+      t3.unknown_11 = true;
+      if (volume)
+         t3.depth = u_minify(prsc->depth0, base) - 1;
+   }
 }

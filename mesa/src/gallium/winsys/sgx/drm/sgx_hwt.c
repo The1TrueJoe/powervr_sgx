@@ -25,6 +25,7 @@
  *                       a line is its address
  *   texpat              optional: the same heap with dword i = 0x5a5a0000 | i,
  *                       so a texel read back names the dword it came from
+ *   texidx              optional: a 16 MiB heap with dword i = i (volumes)
  *   eot limm r0, #RT    optional: the frame's end-of-tile program instead of
  *   eot raw HI LO       the target's (docs/GL3.md, test H1), the same text;
  *                       RT and RT2 in it are the two render targets'
@@ -53,6 +54,7 @@
 #define MAX_INSTS 256
 #define BUF_DWORDS 64
 #define TEX_DWORDS 1024
+#define TEX_IDX_DWORDS (1u << 22)
 
 /* a line with BUF / TEX replaced by the address */
 static void
@@ -129,8 +131,13 @@ run(struct sgxws_ctx *c, struct sgxws_rt *rt, struct sgxws_target *t,
       memset(rt2->map, 0, (size_t)stride * h * 4);
    memset(buf->map, 0, BUF_DWORDS * 4);
    memcpy(buf->map, init, n_init * 4);
-   for (unsigned i = 0; i < TEX_DWORDS; i++)
-      tex->map[i] = has_texel == 2 ? 0x5a5a0000u | i : has_texel ? texel : 0;
+   if (has_texel == 3) {
+      for (unsigned i = 0; i < TEX_IDX_DWORDS; i++)
+         tex->map[i] = i;
+   } else {
+      for (unsigned i = 0; i < TEX_DWORDS; i++)
+         tex->map[i] = has_texel == 2 ? 0x5a5a0000u | i : has_texel ? texel : 0;
+   }
 
    sgxws_prog_builtin(c, SGXWS_VS_XY, &vs);
    /* the uniform-colour program's setup (its secondary loads sa9, which the
@@ -248,7 +255,7 @@ main(int argc, char **argv)
                       0x1000) ||
        sgxws_bo_alloc(dev, &buf, SGXWS_MEM_VERTEX, BUF_DWORDS * 4, 0x1000) ||
        /* sampling outside the texture heap hangs (sgx_core) */
-       sgxws_bo_alloc(dev, &tex, SGXWS_MEM_TEXTURE, TEX_DWORDS * 4, 0x1000))
+       sgxws_bo_alloc(dev, &tex, SGXWS_MEM_TEXTURE, TEX_IDX_DWORDS * 4, 0x1000))
       return 1;
    /* BGRA8888, strided (TEX.md sections 4, 11) */
    struct sgxws_target t = {.va = color.va, .stride = stride, .bo = &color,
@@ -271,6 +278,8 @@ main(int argc, char **argv)
          has_texel = 0;
       } else if (!strcmp(s, "texpat")) {
          has_texel = 2;
+      } else if (!strcmp(s, "texidx")) {
+         has_texel = 3;
       } else if (!strncmp(s, "tex ", 4)) {
          texel = strtoul(s + 4, NULL, 16);
          has_texel = 1;

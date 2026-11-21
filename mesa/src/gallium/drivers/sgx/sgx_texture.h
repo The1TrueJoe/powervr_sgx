@@ -17,11 +17,13 @@ struct sgx_resource;
 /* T1 format code for a sampled gallium format, or 0 (docs/TEX.md section 1) */
 unsigned sgx_tex_format(enum pipe_format format);
 unsigned sgx_tex_bpp(enum pipe_format format);
+unsigned sgx_tex_plane_format(const struct pipe_resource *prsc);
 bool sgx_tex_bgra(enum pipe_format format);
 bool sgx_tex_depth(enum pipe_format format);
 unsigned sgx_tex_raw32(enum pipe_format format);
 bool sgx_tex_word32(enum pipe_format format);
 unsigned sgx_tex_dev_last(const struct pipe_resource *prsc);
+bool sgx_tex_volume(const struct pipe_resource *prsc);
 bool sgx_tex_twiddled(const struct pipe_resource *prsc, unsigned w, unsigned h);
 void sgx_tex_set_tail(struct sgx_resource *res, unsigned l);
 
@@ -49,6 +51,9 @@ size_t sgx_tex_cube0_size(const struct pipe_resource *prsc);
 void sgx_tex_encode_cube0(struct sgx_resource *res);
 bool sgx_tex_uses_cube0(const struct pipe_sampler_view *view,
                         const struct pipe_sampler_state *sampler);
+
+/* T3's volume depth - 1 (TEX.md section 14), which a sample's own T3 keeps */
+#define SGX_TEX_T3_DEPTH 0x7ffu
 
 /* the four DOUTT words for a view and sampler (docs/STATE.md section 5) */
 void sgx_tex_words(const struct pipe_sampler_view *view,

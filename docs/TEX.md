@@ -858,69 +858,79 @@ native border mode, if the replays find one, replaces it.
   has it (docs/porting/cores/sgx530.md lists the 530's features against
   it). The DDK's desktop GL lists `EXT_texture3D`. The DDK's ES2 doesn't
   list `OES_texture_3D` (**capture**, `PROBE_EXTS=1`, 2026-11-11), so no ES2
-  capture can show a volume; the step 3 tests below are the evidence.
-- **The open driver has one-texel volumes only:** `caps->max_texture_3d_levels
-  = 1`, so GL_MAX_3D_TEXTURE_SIZE is 1. A 3D texture of one slice gets a
-  device copy laid out as a 2D texture's (`sgx_resource.c`), and the driver
-  turns its samples into 2D ones at (s, t) (`sgx_program.c` lower_tex_3d),
-  which read the one texel whatever the wrap, filter or r. That much is for
-  programs that make 1x1x1 textures and never sample a real volume: wined3d
-  makes them at start-up for its unbound units, and with 0 levels every
-  glTexImage3D failed (GTA Vice City under Wine, issue #5). Mesa advertises
-  GL 2.1 either way, since its version check doesn't look at 3D levels below
-  4.1. GL 1.2 makes volumes core, and the piglit tests that need bigger ones
-  still fail.
-- **The sample instruction.** `smp` dimension 2 is "3D". The vendor
-  assembler accepts it, and the DDK's compiler uses it for samplerCube (ISA.md,
-  hw 1c: **oracle**, corpus). A volume sample is likely dim 2 as well, with
-  the texture words telling volume from cube (**guess**). A plain
-  `textureCube(s, v)` is a non-dependent sample: the USP sample block gives
-  it coordinate dimension 3 (ISA.md, "USP texture-sample blocks": capture,
-  corpus). A plain `texture3D` is likely the same form (**guess**). Which
-  DOUTI bits carry the dimension isn't known: PDS.md lists only the 2-D
-  (0x200) and projected (0x400) bits.
-- **The texture words and the layout** (**hardware**: open-stack black-box
-  tests on a CE5300 board, 2026-11-11, `tools/isa/hwt_vol*.py`, a 4×4×D
-  RGBA8888 volume written by hand, a dependent `smp.3d` at (s, t, r)):
-  - **The depth is T3's low bits, as depth - 1.** 1 gives 2 slices, 2 gives
-    3 (r splits into thirds), 3 gives 4, and so on to 7 for 8; single bits
-    b3-b6 fit 9, 17, 33 and 65 slices. With 0, the value in every 2D word,
-    r isn't read. The field is at least b0-6 wide; b7-10 also move the
-    address and are likely the same field (**unconfirmed**).
-  - **T1 layout 1 with a depth is a twiddled volume**, Morton order with y
-    first: index bits y0, x0, z0, y1, x1, z1, then the remaining z bits (z2
-    at bit 6, z3 at bit 7 for 4×4×D). Checked at (2,0,0) = 16, (0,2,0) = 8,
-    (1,1,1) = 7, (3,3,3) = 63, (3,0,0) = 18, (0,3,0) = 9, (0,0,3) = 36, and
-    slices 0-7 of an 8-deep one. Sizes where x and y aren't 4 are untested.
-  - Layout 1 with depth 0 reads linear rows. Layouts 0 and 7 are 2D
-    twiddled and never read r; layout 4 is strided; layout 5 returns 0.
-  - Wrap R is still open. T0 b0-2, a 3-bit field just below wrap T (b3-5)
-    and wrap S (b6-8), is 0 in every 2D capture and is the candidate
-    (**guess**).
+  capture can show a volume; the black-box tests below are the evidence.
+- **The open driver** has volumes up to 256 on a side with `SGX_DEBUG=tex3d`
+  (`sgx_texture.c` `sgx_tex_volume`, `caps->max_texture_3d_levels` 9).
+  Without it a 3D texture is one texel, laid out as a 2D texture, and its
+  samples become 2D ones at (s, t) (`sgx_program.c` lower_tex_3d): enough
+  for programs that make 1x1x1 textures and never sample a real volume
+  (wined3d makes them at start-up for its unbound units; with 0 levels every
+  glTexImage3D failed, GTA Vice City under Wine, issue #5). A 3D texture one
+  slice deep is laid out as a 2D texture under the cap too, and `smp.3d` on
+  a 2D layout reads (s, t).
+- **The sample instruction.** `smp` dimension 2 is "3D", for volumes and
+  cube maps alike, the texture words telling them apart (ISA.md, hw 1c).
+  The compiler gives a `sampler3D` read dimension 3, dependent or not: a
+  plain `texture3D(s, v)` of a varying is a USP sample block with coordinate
+  dimension 3, as for a cube map (**hardware, open driver**: `sgx_tex3d`'s
+  `nondep` cases, below).
+- **The texture words** (**hardware**: open-stack black-box tests on a
+  CE5300 board, 2026-11-11 and 2026-11-20, `tools/isa/hwt_vol*.py`, RGBA8888
+  and RGB565 volumes in a heap whose dword i is i, a dependent `smp.3d` at
+  (s, t, r), `.lod` for the levels):
+  - **T1 layout 1** (`SGX_TEXSTATE_LAYOUT_VOLUME`) with the base level's
+    width and height. Layouts 0 and 7 are 2D twiddled and never read r;
+    layout 3 (linear) and layout 6 (strided) with a depth don't read a stack
+    of slices either (hwt_vol4 `lin*`): there is no linear volume.
+  - **The depth is T3's low bits, as depth - 1**: b0-7 at least, every
+    value to 255 (256 slices, hwt_vol4 `2x2x256`); b8-10 are likely the same
+    field (**unconfirmed**; `SGX_TEX_T3_DEPTH` keeps b0-10). 0, the value in
+    every 2D word, is one slice.
+  - **Wrap R is T0 b0-2**, with wrap S and T's codes: 0 repeat, 1 mirror, 2
+    clamp (hwt_vol4 `wrapr*`, r at slice 5.5 and -0.5 of 4).
+  - **LINEAR filters across r** as across s: half way between two slices
+    gives the mean of their bytes (hwt_vol4 `lin_r`).
+- **The layout** (hwt_vol4 `map_*`, 17 sizes from 1x1x64 to 128x128x128,
+  every coordinate bit and random texels; hwt_vol5 for NPOT and the levels):
+  - A level is **cubes of side t = min(w, h, d, 16)**, each side first
+    rounded up to a power of two. Inside a cube, Morton order with y first:
+    index bits y0, x0, z0, y1, x1, z1, ... The cubes follow one another x
+    first, then y, then z, as many on each axis as cover the level
+    (`DIV_ROUND_UP(side, t)`). A level one slice deep is plain rows (t = 1),
+    which is why layout 1 with depth 0 reads linear rows. It is the 2D
+    rule (section 1) with a third axis.
+  - **Levels follow one another with no padding** (`.lod`, 8x8x8, 4x4x16,
+    16x4x4, 32x32x2: level 1 at w * h * d texels, and so on down to 1x1x1).
+    A level's depth halves with it, to 1.
+  - **NPOT volumes** are addressed in their rounded-up cubes (12x4x6 is
+    cubes of 4, three across and two deep), with the coordinate scaled by
+    the real size: a texel centre reads its texel. But the sampler puts the
+    next level only w * h * d texels on (12x4x6: level 1 at 288, inside
+    level 0's cubes, which reach texel 351), so an NPOT volume's levels
+    overlap where the sampler mipmaps through them. The driver stores an
+    NPOT volume's levels apart, each in its cubes, and samples one level of
+    it (its view's base level, as it samples an NPOT 2D texture's on cores
+    whose NPOT mipmapping hangs).
+- **Rendering into a layer** isn't done: a slice isn't a 2D image the PBE
+  writes (`sgx_resource_target` refuses it; a draw into it is skipped).
+  Volumes otherwise go through the CPU copy (uploads, glCopyTexSubImage3D's
+  and blits' CPU paths, mipmap generation in software).
 
-**Tests** (Gaps, §14):
+**What the driver does:** a volume's device copy is its levels in the order
+above (`vol_tables`, `vol_span`, `vol_offset`; a power-of-two volume's
+whole chain, as the TPU takes the level count from the size); an upload
+converts the slice as a linear one would be (`encode_rect`), then puts each
+texel at its index (`encode_volume_slice`). The texture words: T1 layout 1,
+T3 depth - 1, T0 wrap R; an F16 return's T3 keeps the depth. The 8-, 16- and
+32-bit formats with a sampler code (RGBA8 and RGB565 tested), not the 32-bit
+word formats (depth, R32, the planar ones).
 
-1. `PROBE_EXTS=1`: whether the DDK's ES2 lists `OES_texture_3D`. Done: it
-   doesn't, so step 2 can't run and step 3 is the path.
-2. If it does, DDK captures sampling with `texture3D`:
-   - `PROBE_TEX3D=4 PROBE_TEXSIZE="4 4"`, RGBA8888, `PROBE_TEXPAT=1`;
-   - 8×8×8 with `PROBE_TEXLEVELS=4`;
-   - 8×8×2 and 2×2×8 (which axis the layout favors);
-   - an NPOT one, 6×5×3;
-   - wrap R repeat against clamp (`PROBE_TEXWRAP="0x2901 0x2901 0x812F"`).
-
-   Each gives the T words, the sample form and the texel layout.
-3. If it doesn't, black-box tests with the open stack: a dim-2 `smp` on a
-   texture whose T1 layout is 1, 4, 5 or 7, over a `PROBE_TEXPAT`-style
-   volume written to memory by hand. Read back which texel each (s, t, r)
-   returns, with T0 b0-2 and T3 varied one field at a time. Done for the
-   layout and the depth (above); wrap R, mipmaps and filtering across r are
-   still to run.
-
-**What the driver needs:** a PIPE_TEXTURE_3D upload in T1 layout 1, twiddled
-in the order above, with T3's low bits = depth - 1, and a dependent `smp.3d`.
-Wrap R, mipmapped volumes, NPOT depths and the non-dependent (DOUTI) form
-come from the remaining tests (Gaps, §14).
+**Tests** on a CE5300 board (2026-11-20; `mesa/tests/sgx_tex3d.c`, every
+texel read back through `texture3D`): 15 sizes from 4x4x4 to 256x256x256
+(5x7x3, 24x40x20 and 63x63x63 among them), the levels of two mipmapped
+volumes, wrap R in its three modes, LINEAR across r, a sub-box update,
+RGB565, and the sizes again through a varying (the PDS's sample): 2,203,819
+texels, all right.
 
 ## 15. Depth textures and shadow compare
 
@@ -1074,13 +1084,12 @@ until it is confirmed.
 
 ### 14. Volume textures
 
-- The non-dependent volume sample (a dimension-3 USP sample block, DOUTI
-  bits unknown) → an open-stack PDS test of a plain `texture3D`.
-- Wrap R in T0 b0-2 → the step 3 tests with T0 b0-2 swept and r outside
-  [0, 1].
-- Whether T3 b7-10 belong to the depth field; the twiddle order when x or y
-  isn't 4; NPOT depths; mipmapped volumes; LINEAR across r → further step 3
-  tests.
+- Rendering into a volume's layer (glFramebufferTextureLayer): render the
+  slice into a 2D scratch target and put it into the volume afterwards, or
+  find a PBE mode that writes the volume order.
+- An NPOT volume's mipmaps: the sampler's level offsets (w * h * d texels)
+  overlap the levels' cubes; a level-offset or layout field that changes
+  this isn't known.
 
 ### 15. Depth textures
 
