@@ -52,6 +52,27 @@ shareable(const struct pipe_resource *templ)
           templ->nr_samples <= 1;
 }
 
+/*
+ * A plane of a video frame the decoder wrote (NV12 imported as R8 and GR88):
+ * the TPU samples its bytes as they are, L8 and LA88 (docs/TEX.md "Texel
+ * formats"), strided.  The texture format it reads as, or 0.
+ */
+static unsigned
+import_plane(const struct pipe_resource *templ)
+{
+   if (templ->target != PIPE_TEXTURE_2D || templ->last_level ||
+       templ->array_size != 1 || templ->nr_samples > 1)
+      return 0;
+   switch (templ->format) {
+   case PIPE_FORMAT_R8_UNORM:
+      return SGX_TEXSTATE_FORMAT_L8;
+   case PIPE_FORMAT_R8G8_UNORM:
+      return SGX_TEXSTATE_FORMAT_LA88;
+   default:
+      return 0;
+   }
+}
+
 static size_t
 texture_size(struct pipe_resource *prsc, uint32_t stride)
 {
@@ -301,11 +322,16 @@ sgx_resource_from_handle(struct pipe_screen *pscreen,
    struct sgx_resource *res;
    int e;
 
-   if (whandle->type != WINSYS_HANDLE_TYPE_FD || !shareable(templ) ||
-       (templ->bind & PIPE_BIND_DEPTH_STENCIL) || whandle->offset ||
+   unsigned plane = import_plane(templ);
+
+   if (whandle->type != WINSYS_HANDLE_TYPE_FD ||
+       (!plane && !shareable(templ)) ||
+       (templ->bind & PIPE_BIND_DEPTH_STENCIL) ||
+       (whandle->offset && !plane) || whandle->offset % 4 ||
        (whandle->modifier != DRM_FORMAT_MOD_LINEAR &&
         whandle->modifier != DRM_FORMAT_MOD_INVALID) ||
-       whandle->stride % 128 || whandle->stride < templ->width0 * 4)
+       whandle->stride % 128 ||
+       whandle->stride < templ->width0 * util_format_get_blocksize(templ->format))
       return NULL;
    res = CALLOC_STRUCT(sgx_resource);
    if (!res)
@@ -316,10 +342,12 @@ sgx_resource_from_handle(struct pipe_screen *pscreen,
    res->stride = whandle->stride;
    res->pitch = whandle->stride / 4;
    res->shared = true;
+   res->plane_format = plane;
+   res->plane_offset = whandle->offset;
 
    simple_mtx_lock(&screen->lock);
    e = sgxws_bo_import(screen->dev, &res->bo, (int)whandle->handle,
-                       res->stride * templ->height0);
+                       whandle->offset + res->stride * templ->height0);
    if (!e)
       sgxws_bo_prepare_target(screen->dev, &res->bo);
    simple_mtx_unlock(&screen->lock);
@@ -1349,7 +1377,8 @@ sgx_resource_create_with_modifiers(struct pipe_screen *pscreen,
 /* LINEAR only for the colour formats a shared buffer is rendered in: RGBA
  * and BGRA of 8 bits a channel (shareable(), is_render_target).  Other
  * 4-byte formats (depth, R32F, RG16) would pass shareable() but are never
- * buffers to share. */
+ * buffers to share.  And the 8- and 16-bit planes of a video frame,
+ * imported only (import_plane). */
 static bool
 format_shareable(enum pipe_format format)
 {
@@ -1358,6 +1387,8 @@ format_shareable(enum pipe_format format)
    case PIPE_FORMAT_B8G8R8X8_UNORM:
    case PIPE_FORMAT_R8G8B8A8_UNORM:
    case PIPE_FORMAT_R8G8B8X8_UNORM:
+   case PIPE_FORMAT_R8_UNORM:
+   case PIPE_FORMAT_R8G8_UNORM:
       return true;
    default:
       return false;
