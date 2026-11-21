@@ -18,6 +18,8 @@
  *   linear LINEAR half way between two slices: the mean of their bytes
  *   sub    a glTexSubImage3DOES box, every texel after it
  *   rgb565 a 16-bit volume (RGB565), every texel
+ *   genmip glGenerateMipmap on a volume given only its level 0: every
+ *          texel of each level the mean of its 2x2x2 parent (+-1)
  *   nondep sizes again with the coordinate a varying the PDS samples from
  *          (the cases above compute it: dependent samples)
  *   vertex a vertex program's texture3DLod, a point a texel (SGX_DEBUG=vtf,
@@ -87,6 +89,7 @@ G(glEnableVertexAttribArray, PFNGLENABLEVERTEXATTRIBARRAYPROC);
 G(glDrawArrays, PFNGLDRAWARRAYSPROC);
 G(glTexImage3DOES, PFNGLTEXIMAGE3DOESPROC);
 G(glTexSubImage3DOES, PFNGLTEXSUBIMAGE3DOESPROC);
+G(glGenerateMipmap, PFNGLGENERATEMIPMAPPROC);
 
 #define FB 256
 
@@ -543,6 +546,89 @@ case_vertex(unsigned w, unsigned h, unsigned d)
    free(px);
 }
 
+static unsigned
+umin(unsigned a, unsigned b)
+{
+   return a < b ? a : b;
+}
+
+/* glGenerateMipmap from level 0 alone: level l's texel (x, y, z) is the mean
+ * of the 2x2x2 texels of level l - 1 it covers (fewer on a side already 1),
+ * within 1 for the rounding.  Power-of-two sides, drawn at the level's size
+ * through the varying program as case_mip. */
+static void
+case_genmip(unsigned w, unsigned h, unsigned d)
+{
+   unsigned levels = 1, m = w > h ? w : h;
+   char name[64];
+   int bad = 0;
+
+   m = m > d ? m : d;
+   while (m >> levels)
+      levels++;
+   GLuint t = make(w, h, d, 1, GL_NEAREST_MIPMAP_NEAREST);
+   glGenerateMipmap_(GL_TEXTURE_3D_OES);
+   snprintf(name, sizeof(name), "genmip %ux%ux%u", w, h, d);
+
+   uint8_t *e = volume(w, h, d, 0);
+   unsigned pw = w, ph = h, pd = d;
+
+   for (unsigned l = 0; l < levels && (w >> l) && (h >> l); l++) {
+      unsigned lw = w >> l, lh = h >> l, ld = d >> l ? d >> l : 1;
+
+      if (l) {
+         uint8_t *n = malloc((size_t)lw * lh * ld * 4);
+
+         for (unsigned z = 0; z < ld; z++)
+            for (unsigned y = 0; y < lh; y++)
+               for (unsigned x = 0; x < lw; x++)
+                  for (unsigned c = 0; c < 4; c++) {
+                     unsigned sum = 0, cnt = 0;
+
+                     for (unsigned k = 0; k < 8; k++) {
+                        unsigned sx = umin(2 * x + (k & 1), pw - 1);
+                        unsigned sy = umin(2 * y + (k >> 1 & 1), ph - 1);
+                        unsigned sz = pd > 1 ? 2 * z + (k >> 2) : 0;
+
+                        if ((pw == 1 && k & 1) || (ph == 1 && k & 2) ||
+                            (pd == 1 && k & 4))
+                           continue;
+                        sum += e[(((size_t)sz * ph + sy) * pw + sx) * 4 + c];
+                        cnt++;
+                     }
+                     n[(((size_t)z * lh + y) * lw + x) * 4 + c] =
+                        (sum + cnt / 2) / cnt;
+                  }
+         free(e);
+         e = n;
+         pw = lw, ph = lh, pd = ld;
+      }
+      for (unsigned z = 0; z < ld; z++) {
+         uint32_t *px = draw(lw, lh, (z + 0.5f) / ld);
+
+         for (unsigned i = 0; i < lw * lh; i++) {
+            const uint8_t *g = (const uint8_t *)&px[i],
+                          *x = &e[((size_t)z * lw * lh + i) * 4];
+
+            checked++;
+            for (unsigned c = 0; c < 4; c++)
+               if (abs((int)g[c] - (int)x[c]) > 1) {
+                  if (bad < 4)
+                     printf("  %s level %u (%u,%u,%u): got %08x want %08x\n",
+                            name, l, i % lw, i / lw, z, px[i],
+                            *(const uint32_t *)x);
+                  bad++;
+                  break;
+               }
+         }
+         free(px);
+      }
+   }
+   free(e);
+   result(name, bad);
+   glDeleteTextures_(1, &t);
+}
+
 static int
 want(int argc, char **argv, const char *c)
 {
@@ -638,6 +724,7 @@ main(int argc, char **argv)
    }
    GET(glTexImage3DOES);
    GET(glTexSubImage3DOES);
+   GET(glGenerateMipmap);
    glGetIntegerv_(GL_MAX_3D_TEXTURE_SIZE_OES, &max3d);
    printf("%s, GL_MAX_3D_TEXTURE_SIZE %d\n", glGetString_(GL_RENDERER), max3d);
    if (max3d < 256) {
@@ -672,6 +759,18 @@ main(int argc, char **argv)
       glUniform1i_(glGetUniformLocation_(prog[1], "tex"), 0);
       case_mip(16, 16, 16);
       case_mip(32, 16, 8);
+      glUseProgram_(prog[0]);
+      u_size = glGetUniformLocation_(prog[0], "size");
+      u_r = glGetUniformLocation_(prog[0], "r");
+   }
+   if (want(argc, argv, "genmip")) {
+      glUseProgram_(prog[1]);
+      u_size = -1;
+      u_r = glGetUniformLocation_(prog[1], "r");
+      glUniform1i_(glGetUniformLocation_(prog[1], "tex"), 0);
+      case_genmip(8, 8, 8);
+      case_genmip(16, 16, 4);
+      case_genmip(32, 16, 8);
       glUseProgram_(prog[0]);
       u_size = glGetUniformLocation_(prog[0], "size");
       u_r = glGetUniformLocation_(prog[0], "r");
