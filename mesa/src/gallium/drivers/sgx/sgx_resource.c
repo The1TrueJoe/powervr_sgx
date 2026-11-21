@@ -717,6 +717,10 @@ sgx_resource_target(struct sgx_screen *screen, struct sgx_resource *res,
 {
    memset(t, 0, sizeof(*t));
    t->bo = &res->bo;
+   /* an imported video plane is sampled only: a render would store at the
+    * dma-buf's start, not at plane_offset, over the other plane */
+   if (res->plane_format)
+      return false;
    /* a volume's slice isn't a 2D image the PBE can write (TEX.md section
     * 14): not yet a render target */
    if (sgx_tex_volume(&res->base))
@@ -1090,6 +1094,9 @@ sgx_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
                   : res->stride;
    base = res->bo.map && !res->texture ? (uint8_t *)res->bo.map
                                        : (uint8_t *)res->data;
+   /* an imported video plane starts plane_offset bytes into its dma-buf */
+   if (res->bo.map && !res->texture)
+      base += res->plane_offset;
    base += level_offset(prsc, res->stride, level);
    ptrans->stride = stride;
    ptrans->layer_stride =
