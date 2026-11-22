@@ -24,3 +24,5 @@ the author adds a `Signed-off-by:`.
 On hardware: `0001` is proven on an Atom N2600 (the auxiliary device appears,
 powervr_sgx binds and identifies the core). `0002` hung its first importer (X's front buffer, canteroman's kit v3.4): the PRIME helpers call pin with the reservation lock held and pin took it again. Its importers also couldn't mmap a dumb buffer, which has no fake offset until MAP_DUMB, so export creates one. Both fixed, not yet run on hardware. CI builds both
 (the `cedarview` and Debian package jobs).
+
+`0100` adds optional MSVDX H.264 decoding, disabled unless `msvdx=1`. See [docs/MSVDX.md](../../docs/MSVDX.md) for the interface and companion userspace. Firmware is obtained separately; no binary is included.
