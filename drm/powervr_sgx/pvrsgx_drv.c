@@ -249,6 +249,7 @@ static const struct drm_driver pvrsgx_drm_driver = {
 	.debugfs_init = pvrsgx_debugfs_init,
 #endif
 	.gem_create_object = pvrsgx_gem_create_object,
+	.gem_prime_import = pvrsgx_prime_import,
 	.gem_prime_import_sg_table = pvrsgx_prime_import_sg_table,
 
 	.name = PVRSGX_DRIVER_NAME,

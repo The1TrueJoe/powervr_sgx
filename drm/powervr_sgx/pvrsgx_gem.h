@@ -32,6 +32,8 @@ struct pvrsgx_bo {
 	atomic_t code_unmapping;
 	/** @import_map: An import's CPU mapping, from its exporter, for the cache flushes. */
 	struct iosys_map import_map;
+	/** @import_readonly: External read-only DMA-BUF, mapped DMA_TO_DEVICE. */
+	bool import_readonly;
 };
 
 static inline struct pvrsgx_bo *to_pvrsgx_bo(struct drm_gem_object *obj)

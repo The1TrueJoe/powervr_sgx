@@ -6,6 +6,7 @@
 
 #include <linux/types.h>
 
+struct dma_buf;
 struct dma_buf_attachment;
 struct drm_device;
 struct drm_file;
@@ -14,6 +15,7 @@ struct drm_powervr_sgx_obj_array;
 struct pvrsgx_job;
 struct sg_table;
 
+struct drm_gem_object *pvrsgx_prime_import(struct drm_device *drm, struct dma_buf *buffer);
 bool pvrsgx_prime_reachable(struct sg_table *sgt);
 struct drm_gem_object *pvrsgx_prime_import_sg_table(struct drm_device *drm,
 						    struct dma_buf_attachment *attach,

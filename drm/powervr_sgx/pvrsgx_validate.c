@@ -125,7 +125,7 @@ static s64 code_place_mapped(struct drm_gem_object *obj)
 
 u32 pvrsgx_validate_pte_flags(struct pvrsgx_bo *bo)
 {
-	return bo_is_code(bo) ? SGX_MMU_PTE_READONLY : 0;
+	return bo_is_code(bo) || bo->import_readonly ? SGX_MMU_PTE_READONLY : 0;
 }
 
 int pvrsgx_validate_job(struct pvrsgx_device *sdev, struct pvrsgx_job *job)

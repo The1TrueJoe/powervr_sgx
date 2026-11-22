@@ -40,6 +40,13 @@ static void pvrsgx_gem_free(struct drm_gem_object *obj)
 
 	if (drm_gem_is_imported(obj) && !iosys_map_is_null(&bo->import_map))
 		dma_buf_vunmap_unlocked(obj->import_attach->dmabuf, &bo->import_map);
+	if (bo->import_readonly) {
+		/* The generic shmem release detaches the import, but assumes that
+		 * its SG table was mapped bidirectionally. Unmap ours first.
+		 */
+		dma_buf_unmap_attachment_unlocked(obj->import_attach, bo->base.sgt, DMA_TO_DEVICE);
+		bo->base.sgt = NULL;
+	}
 	drm_gem_shmem_object_free(obj);
 }
 

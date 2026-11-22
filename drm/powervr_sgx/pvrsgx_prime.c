@@ -10,9 +10,12 @@
 
 #include <drm/drm_cache.h>
 #include <drm/drm_file.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_prime.h>
 #include <drm/drm_gem_shmem_helper.h>
 
 #include <linux/device.h>
+#include <linux/fs.h>
 #include <linux/dma-buf.h>
 #include <linux/ktime.h>
 #include <linux/overflow.h>
@@ -104,6 +107,10 @@ int pvrsgx_prime_ranges(struct drm_file *file, const struct drm_powervr_sgx_obj_
 		r->stride = in[i].stride;
 		r->rows = max(in[i].rows, 1u);
 		r->write = in[i].flags & DRM_POWERVR_SGX_CACHE_RANGE_FLAG_WRITE;
+		if (r->write && to_pvrsgx_bo(r->obj)->import_readonly) {
+			err = -EACCES;
+			break;
+		}
 	}
 out:
 	kvfree(in);
@@ -199,6 +206,46 @@ struct drm_gem_object *pvrsgx_prime_import_sg_table(struct drm_device *drm,
 	 */
 	import_flush(obj);
 	return obj;
+}
+
+/* The standard PRIME helper requests DMA_BIDIRECTIONAL. Honor immutable
+ * exporters without granting the GPU a write mapping. Self-import retains the
+ * existing GEM object and its original permissions, as in the generic helper.
+ */
+struct drm_gem_object *pvrsgx_prime_import(struct drm_device *drm, struct dma_buf *buffer)
+{
+	struct dma_buf_attachment *attach;
+	struct drm_gem_object *obj;
+	struct sg_table *sgt;
+	int ret;
+
+	if ((buffer->file->f_mode & FMODE_WRITE) ||
+	    drm_gem_is_prime_exported_dma_buf(drm, buffer))
+		return drm_gem_prime_import(drm, buffer);
+	attach = dma_buf_attach(buffer, drm_dev_dma_dev(drm));
+	if (IS_ERR(attach))
+		return ERR_CAST(attach);
+	get_dma_buf(buffer);
+	sgt = dma_buf_map_attachment_unlocked(attach, DMA_TO_DEVICE);
+	if (IS_ERR(sgt)) {
+		ret = PTR_ERR(sgt);
+		goto detach;
+	}
+	obj = pvrsgx_prime_import_sg_table(drm, attach, sgt);
+	if (IS_ERR(obj)) {
+		ret = PTR_ERR(obj);
+		goto unmap;
+	}
+	obj->import_attach = attach;
+	obj->resv = buffer->resv;
+	to_pvrsgx_bo(obj)->import_readonly = true;
+	return obj;
+unmap:
+	dma_buf_unmap_attachment_unlocked(attach, sgt, DMA_TO_DEVICE);
+detach:
+	dma_buf_detach(buffer, attach);
+	dma_buf_put(buffer);
+	return ERR_PTR(ret);
 }
 
 void pvrsgx_prime_put(struct pvrsgx_job *job)
