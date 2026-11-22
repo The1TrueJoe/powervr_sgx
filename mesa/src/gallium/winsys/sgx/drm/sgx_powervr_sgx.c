@@ -662,7 +662,15 @@ psgx_bo_import(struct sgxws_dev *d, struct sgxws_bo *bo, int fd, uint32_t size)
    impl->refs = 1;
    impl->base.cpu_dirty = true; /* the CPU's lines before it was ours */
    impl->dmabuf_fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
-   impl->map = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+   /* Immutable decoder exports can only be sampled. Keep their CPU map
+    * read-only as well; the kernel applies read-only GPU PTEs on import. */
+   int mode = fcntl(fd, F_GETFL);
+   if (mode < 0) {
+      e = -errno;
+      goto fail;
+   }
+   int prot = PROT_READ | ((mode & O_ACCMODE) == O_RDONLY ? 0 : PROT_WRITE);
+   impl->map = mmap(NULL, bytes, prot, MAP_SHARED, fd, 0);
    if (impl->map == MAP_FAILED) {
       e = -errno;
       mesa_loge("sgx: mmap of an imported dma-buf failed: %d", e);
