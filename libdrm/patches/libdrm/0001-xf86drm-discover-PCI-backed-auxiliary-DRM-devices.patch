@@ -1,0 +1,140 @@
+From d4eb14a9b56b05f2f229a08474230e0136b826e8 Mon Sep 17 00:00:00 2001
+From: Viktor Semykin <thesame.ml@gmail.com>
+Date: Fri, 20 Nov 2026 11:48:12 -0300
+Subject: [PATCH libdrm 1/2] xf86drm: discover PCI-backed auxiliary DRM devices
+
+A render driver can bind to an auxiliary child of a PCI display device.
+Preserve the real PCI bus information and device IDs so existing Mesa
+PCI driver selection works. Keep nodes from different auxiliary children
+and the display parent separate when folding devices with the same PCI
+address.
+
+Resolve the canonical auxiliary device path for equality after comparing
+PCI addresses. Return unequal when a node or its sysfs metadata
+disappears rather than folding it into a different device. This adds no
+public bus type or ABI fields.
+
+Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
+---
+ xf86drm.c | 68 +++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 66 insertions(+), 2 deletions(-)
+
+diff --git a/xf86drm.c b/xf86drm.c
+index 07dec49f4e281028db9e635c2b21779b899f3d93..30753fe26525fe80d9294a3040bf40b969c1dfd4 100644
+--- a/xf86drm.c
++++ b/xf86drm.c
+@@ -3560,6 +3560,8 @@ sysfs_uevent_get(const char *path, const char *fmt, ...)
+ 
+ /* Little white lie to avoid major rework of the existing code */
+ #define DRM_BUS_VIRTIO 0x10
++/* Internal only: auxiliary devices inherit their PCI parent metadata. */
++#define DRM_BUS_AUXILIARY 0x11
+ 
+ #ifdef __linux__
+ static int get_subsystem_type(const char *device_path)
+@@ -3574,6 +3576,7 @@ static int get_subsystem_type(const char *device_path)
+         { "/pci", DRM_BUS_PCI },
+         { "/usb", DRM_BUS_USB },
+         { "/platform", DRM_BUS_PLATFORM },
++        { "/auxiliary", DRM_BUS_AUXILIARY },
+         { "/spi", DRM_BUS_PLATFORM },
+         { "/host1x", DRM_BUS_HOST1X },
+         { "/virtio", DRM_BUS_VIRTIO },
+@@ -3609,6 +3612,19 @@ static int drmParseSubsystemType(int maj, int min)
+     snprintf(path, sizeof(path), "/sys/dev/char/%d:%d/device", maj, min);
+ 
+     subsystem_type = get_subsystem_type(path);
++    if (subsystem_type == DRM_BUS_AUXILIARY) {
++        char *end;
++
++        if (!realpath(path, real_path))
++            return -errno;
++        end = strrchr(real_path, '/');
++        if (!end)
++            return -EINVAL;
++        *end = '\0';
++        /* Non-PCI auxiliary parents need their own metadata handling. */
++        return get_subsystem_type(real_path) == DRM_BUS_PCI ?
++               DRM_BUS_PCI : -ENODEV;
++    }
+     /* Try to get the parent (underlying) device type */
+     if (subsystem_type == DRM_BUS_VIRTIO) {
+         /* Assume virtio-pci on error */
+@@ -3641,7 +3657,8 @@ get_pci_path(int maj, int min, char *pci_path)
+     }
+ 
+     term = strrchr(pci_path, '/');
+-    if (term && strncmp(term, "/virtio", 7) == 0)
++    if (term && (strncmp(term, "/virtio", 7) == 0 ||
++                 get_subsystem_type(pci_path) == DRM_BUS_AUXILIARY))
+         *term = 0;
+ }
+ #endif
+@@ -3760,17 +3777,64 @@ static int drmParsePciBusInfo(int maj, int min, drmPciBusInfoPtr info)
+ #endif
+ }
+ 
++#ifdef __linux__
++/* Return 1 and the auxiliary device path, 0 for another topology, or a
++ * negative errno if a node disappeared. Do not fold a disappearing node
++ * into its PCI parent or into another auxiliary child.
++ */
++static int drmGetAuxiliaryDevicePath(drmDevicePtr dev, char *out)
++{
++    struct stat st;
++    char path[PATH_MAX + 1];
++    int i, subsystem;
++
++    for (i = 0; dev->nodes && i < DRM_NODE_MAX; i++) {
++        if (!(dev->available_nodes & (1 << i)) || !dev->nodes[i])
++            continue;
++        if (stat(dev->nodes[i], &st))
++            return -errno;
++        if (!S_ISCHR(st.st_mode))
++            return -EINVAL;
++        snprintf(path, sizeof(path), "/sys/dev/char/%u:%u/device",
++                 major(st.st_rdev), minor(st.st_rdev));
++        if (!realpath(path, out))
++            return -errno;
++        subsystem = get_subsystem_type(out);
++        if (subsystem < 0)
++            return subsystem;
++        return subsystem == DRM_BUS_AUXILIARY;
++    }
++    return 0;
++}
++#endif
++
+ drm_public int drmDevicesEqual(drmDevicePtr a, drmDevicePtr b)
+ {
+     if (a == NULL || b == NULL)
+         return 0;
+ 
++    if (a == b)
++        return 1;
++
+     if (a->bustype != b->bustype)
+         return 0;
+ 
+     switch (a->bustype) {
+     case DRM_BUS_PCI:
+-        return memcmp(a->businfo.pci, b->businfo.pci, sizeof(drmPciBusInfo)) == 0;
++        if (memcmp(a->businfo.pci, b->businfo.pci, sizeof(drmPciBusInfo)) != 0)
++            return 0;
++#ifdef __linux__
++        {
++            char path_a[PATH_MAX + 1], path_b[PATH_MAX + 1];
++            int aux_a = drmGetAuxiliaryDevicePath(a, path_a);
++            int aux_b = drmGetAuxiliaryDevicePath(b, path_b);
++
++            if (aux_a || aux_b)
++                return aux_a == 1 && aux_b == 1 &&
++                       strcmp(path_a, path_b) == 0;
++        }
++#endif
++        return 1;
+ 
+     case DRM_BUS_USB:
+         return memcmp(a->businfo.usb, b->businfo.usb, sizeof(drmUsbBusInfo)) == 0;
+
+base-commit: 33fab8cbca7f7581e955a675597d14412702edc4

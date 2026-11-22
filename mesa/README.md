@@ -262,3 +262,9 @@ What the first runs found, all fixed in the driver:
 3. The i386 process talks to the x86_64 kernel through the compat bridge, as
    the DDK did; `libpvr` builds for i386 (`MAP_32BIT` is x86_64 only).
 4. Release images ship ours; the DDK stays installable for A/B only.
+
+## Auxiliary DRM device discovery
+
+The optional [libdrm compatibility integration](../libdrm/README.md) lets desktop
+clients discover the Cedarview SGX auxiliary render child with its real PCI
+metadata. It builds an isolated library and leaves the system package intact.

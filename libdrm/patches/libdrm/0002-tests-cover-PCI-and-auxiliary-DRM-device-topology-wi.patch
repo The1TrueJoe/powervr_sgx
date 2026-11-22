@@ -1,0 +1,236 @@
+From 4d680340e42769a15a7b8af58f2ab20b92611493 Mon Sep 17 00:00:00 2001
+From: Viktor Semykin <thesame.ml@gmail.com>
+Date: Fri, 20 Nov 2026 11:48:12 -0300
+Subject: [PATCH libdrm 2/2] tests: cover PCI and auxiliary DRM device topology
+ with umockdev
+
+Exercise fd, dev_t, enumeration, legacy APIs and PCI revision metadata
+without DRM hardware or root. Cover display/auxiliary separation,
+sibling children, primary/render grouping, ordinary PCI, virtio,
+disappearing sysfs nodes and rejection of non-PCI auxiliary parents.
+Build this Linux test when umockdev and its wrapper are available.
+
+Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
+---
+ tests/device-topology.c | 186 ++++++++++++++++++++++++++++++++++++++++
+ tests/meson.build       |  17 ++++
+ 2 files changed, 203 insertions(+)
+ create mode 100644 tests/device-topology.c
+
+diff --git a/tests/device-topology.c b/tests/device-topology.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb45e3f82dd9540a17ccf462024d01befd01ef09
+--- /dev/null
++++ b/tests/device-topology.c
+@@ -0,0 +1,186 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 Viktor Semykin */
++#include <errno.h>
++#include <fcntl.h>
++#include <glib.h>
++#include <glib/gstdio.h>
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
++#include <unistd.h>
++#include <umockdev.h>
++#include <xf86drm.h>
++
++static void add_node(UMockdevTestbed *tb, const char *parent,
++                     const char *name, unsigned int minor)
++{
++    char *number = g_strdup_printf("226:%u", minor);
++    char *devname = g_strdup_printf("/dev/dri/%s", name);
++    char *root = umockdev_testbed_get_root_dir(tb);
++    char *drm = g_strconcat(root, parent, "/drm", NULL);
++    char *node;
++    char *file = g_strconcat(root, devname, NULL);
++    char *directory = g_path_get_dirname(file);
++
++    g_assert_cmpint(g_mkdir_with_parents(drm, 0755), ==, 0);
++    node = umockdev_testbed_add_device(tb, "drm", name, parent,
++                                      "dev", number, NULL,
++                                      "DEVNAME", devname, NULL);
++    g_assert_nonnull(node);
++    g_assert_cmpint(g_mkdir_with_parents(directory, 0755), ==, 0);
++    g_assert_true(g_file_set_contents(file, "", 0, NULL));
++    umockdev_testbed_set_attribute_link(tb, node, "device", "..");
++    g_free(directory);
++    g_free(file);
++    g_free(node);
++    g_free(drm);
++    g_free(root);
++    g_free(devname);
++    g_free(number);
++}
++
++static char *add_pci(UMockdevTestbed *tb, const char *name)
++{
++    return umockdev_testbed_add_device(tb, "pci", name, NULL,
++                                       "vendor", "0x8086",
++                                       "device", "0x0be2",
++                                       "subsystem_vendor", "0x144d",
++                                       "subsystem_device", "0xc072",
++                                       "revision", "0x0b", NULL,
++                                       "PCI_SLOT_NAME", name, NULL);
++}
++
++static drmDevicePtr get_device(const char *node)
++{
++    drmDevicePtr from_fd = NULL, from_id = NULL, legacy = NULL;
++    struct stat st;
++    int fd = open(node, O_RDWR | O_CLOEXEC);
++
++    g_assert_cmpint(fd, >=, 0);
++    g_assert_cmpint(fstat(fd, &st), ==, 0);
++    g_assert_cmpint(drmGetDevice2(fd, DRM_DEVICE_GET_PCI_REVISION, &from_fd), ==, 0);
++    g_assert_cmpint(drmGetDeviceFromDevId(st.st_rdev, 0, &from_id), ==, 0);
++    g_assert_cmpint(drmGetDevice(fd, &legacy), ==, 0);
++    g_assert_true(drmDevicesEqual(from_fd, from_id));
++    g_assert_true(drmDevicesEqual(from_fd, legacy));
++    g_assert_cmpint(from_fd->bustype, ==, DRM_BUS_PCI);
++    g_assert_cmphex(from_fd->deviceinfo.pci->vendor_id, ==, 0x8086);
++    g_assert_cmphex(from_fd->deviceinfo.pci->device_id, ==, 0x0be2);
++    g_assert_cmphex(from_fd->deviceinfo.pci->subvendor_id, ==, 0x144d);
++    g_assert_cmphex(from_fd->deviceinfo.pci->subdevice_id, ==, 0xc072);
++    g_assert_cmphex(from_fd->deviceinfo.pci->revision_id, ==, 0x0b);
++    drmFreeDevice(&from_id);
++    drmFreeDevice(&legacy);
++    close(fd);
++    return from_fd;
++}
++
++static void test_pci_auxiliary(void)
++{
++    UMockdevTestbed *tb = umockdev_testbed_new();
++    char *pci = add_pci(tb, "0000:00:02.0");
++    char *other = add_pci(tb, "0000:01:00.0");
++    char *aux1 = umockdev_testbed_add_device(tb, "auxiliary", "gpu.0", pci, NULL, NULL);
++    char *aux2 = umockdev_testbed_add_device(tb, "auxiliary", "gpu.1", pci, NULL, NULL);
++    drmDevicePtr display, render, primary, sibling, ordinary;
++    drmDevicePtr devices[8] = { NULL };
++    int count;
++
++    add_node(tb, pci, "card0", 0);
++    add_node(tb, aux1, "card1", 1);
++    add_node(tb, aux1, "renderD128", 128);
++    add_node(tb, aux2, "renderD129", 129);
++    add_node(tb, other, "card2", 2);
++    add_node(tb, other, "renderD130", 130);
++
++    display = get_device("/dev/dri/card0");
++    primary = get_device("/dev/dri/card1");
++    render = get_device("/dev/dri/renderD128");
++    sibling = get_device("/dev/dri/renderD129");
++    ordinary = get_device("/dev/dri/card2");
++    {
++        drmDevicePtr ordinary_render = get_device("/dev/dri/renderD130");
++        g_assert_true(drmDevicesEqual(ordinary, ordinary_render));
++        drmFreeDevice(&ordinary_render);
++    }
++    g_assert_cmpint(display->available_nodes, ==, 1 << DRM_NODE_PRIMARY);
++    g_assert_cmpint(render->available_nodes, ==,
++                    (1 << DRM_NODE_PRIMARY) | (1 << DRM_NODE_RENDER));
++    g_assert_cmpint(render->businfo.pci->dev, ==, 2);
++    g_assert_false(drmDevicesEqual(display, render));
++    g_assert_true(drmDevicesEqual(primary, render));
++    g_assert_false(drmDevicesEqual(sibling, render));
++    g_assert_false(drmDevicesEqual(ordinary, render));
++    g_assert_true(drmDevicesEqual(render, render));
++    g_assert_false(drmDevicesEqual(NULL, render));
++    g_assert_cmpint(drmGetDevices2(0, NULL, 0), ==, 4);
++    count = drmGetDevices2(0, devices, G_N_ELEMENTS(devices));
++    g_assert_cmpint(count, ==, 4);
++    drmFreeDevices(devices, count);
++    count = drmGetDevices(devices, G_N_ELEMENTS(devices));
++    g_assert_cmpint(count, ==, 4);
++    drmFreeDevices(devices, count);
++    /* A node that vanishes cannot be grouped with a surviving parent. */
++    {
++        char *root = umockdev_testbed_get_root_dir(tb);
++        char *node = g_strconcat(root, "/sys/dev/char/226:1", NULL);
++        g_assert_cmpint(g_remove(node), ==, 0);
++        g_assert_false(drmDevicesEqual(primary, render));
++        g_assert_false(drmDevicesEqual(display, render));
++        g_free(node);
++        g_free(root);
++    }
++    drmFreeDevice(&display);
++    drmFreeDevice(&primary);
++    drmFreeDevice(&render);
++    drmFreeDevice(&sibling);
++    drmFreeDevice(&ordinary);
++    g_free(aux1);
++    g_free(aux2);
++    g_free(pci);
++    g_free(other);
++    g_object_unref(tb);
++}
++
++static void test_non_pci_auxiliary(void)
++{
++    UMockdevTestbed *tb = umockdev_testbed_new();
++    char *platform = umockdev_testbed_add_device(tb, "platform", "display", NULL, NULL, NULL);
++    char *aux = umockdev_testbed_add_device(tb, "auxiliary", "gpu.0", platform, NULL, NULL);
++    drmDevicePtr device = NULL;
++    int fd;
++
++    add_node(tb, aux, "renderD128", 128);
++    fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
++    g_assert_cmpint(fd, >=, 0);
++    g_assert_cmpint(drmGetDevice2(fd, 0, &device), <, 0);
++    g_assert_null(device);
++    close(fd);
++    g_free(aux);
++    g_free(platform);
++    g_object_unref(tb);
++}
++
++static void test_pci_virtio(void)
++{
++    UMockdevTestbed *tb = umockdev_testbed_new();
++    char *pci = add_pci(tb, "0000:00:02.0");
++    char *virtio = umockdev_testbed_add_device(tb, "virtio", "virtio0", pci, NULL, NULL);
++    drmDevicePtr device;
++
++    add_node(tb, virtio, "card0", 0);
++    device = get_device("/dev/dri/card0");
++    g_assert_cmpint(device->businfo.pci->dev, ==, 2);
++    drmFreeDevice(&device);
++    g_free(virtio);
++    g_free(pci);
++    g_object_unref(tb);
++}
++
++int main(int argc, char **argv)
++{
++    g_test_init(&argc, &argv, NULL);
++    g_test_add_func("/device/pci-auxiliary", test_pci_auxiliary);
++    g_test_add_func("/device/non-pci-auxiliary", test_non_pci_auxiliary);
++    g_test_add_func("/device/pci-virtio", test_pci_virtio);
++    return g_test_run();
++}
+diff --git a/tests/meson.build b/tests/meson.build
+index ac9e66b01ed324cbb0568b98877118679fd14e63..d13c4d819729807ff2a8a1404a73dc62828d6ba9 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -72,3 +72,20 @@ drmdevice = executable(
+ test('hash', hash)
+ test('drmsl', drmsl)
+ test('drmdevice', drmdevice)
++
++# Exercise Linux sysfs discovery without DRM hardware or root privileges.
++if host_machine.system() == 'linux'
++  umockdev = dependency('umockdev-1.0', required : false)
++  umockdev_wrapper = find_program('umockdev-wrapper', required : false)
++  if umockdev.found() and umockdev_wrapper.found()
++    device_topology = executable(
++      'device-topology',
++      files('device-topology.c'),
++      include_directories : [inc_root, inc_drm],
++      dependencies : umockdev,
++      link_with : libdrm,
++      c_args : libdrm_c_args,
++    )
++    test('device-topology', umockdev_wrapper, args : [device_topology])
++  endif
++endif

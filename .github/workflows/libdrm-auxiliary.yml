@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: MIT
+name: Libdrm auxiliary discovery
+permissions:
+  contents: read
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['libdrm/**', '.github/workflows/libdrm-auxiliary.yml']
+  push:
+    paths: ['libdrm/**', '.github/workflows/libdrm-auxiliary.yml']
+jobs:
+  cpu:
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    timeout-minutes: 15
+    steps:
+      - name: Install build and mock-device dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git xz-utils patch build-essential meson ninja-build pkg-config libumockdev-dev umockdev
+      - uses: actions/checkout@v4
+      - name: Build the isolated library
+        run: sh libdrm/tools/build-libdrm-auxiliary.sh
+      - name: Require and run topology coverage; stage installation
+        run: |
+          set -eu
+          obj=$(find libdrm/build -path '*/build/build.ninja' -print)
+          test "$(printf '%s\n' "$obj" | wc -l)" -eq 1
+          obj=${obj%/build.ninja}
+          meson test -C "$obj" --list | grep device-topology
+          meson test -C "$obj" --print-errorlogs
+          DESTDIR="$PWD/build/libdrm-package" meson install -C "$obj" --no-rebuild
