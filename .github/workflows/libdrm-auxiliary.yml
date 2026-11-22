@@ -17,8 +17,15 @@ jobs:
       - name: Install build and mock-device dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git xz-utils patch build-essential meson ninja-build pkg-config libumockdev-dev umockdev
+          apt-get install -y --no-install-recommends ca-certificates curl git xz-utils patch build-essential meson ninja-build pkg-config valac libglib2.0-dev libudev-dev libpcap-dev
       - uses: actions/checkout@v4
+      - name: Build a mock-device library with fstat interception
+        run: |
+          sh libdrm/tools/build-test-umockdev.sh
+          prefix="$PWD/libdrm/build/umockdev-test/install"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
       - name: Build the isolated library
         run: sh libdrm/tools/build-libdrm-auxiliary.sh
       - name: Require and run topology coverage; stage installation

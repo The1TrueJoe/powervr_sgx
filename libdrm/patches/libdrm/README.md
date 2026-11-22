@@ -9,7 +9,9 @@ Linux umockdev tests covering discovery, grouping and disappearance without
 DRM hardware or root.
 
 Apply with `git am` from the libdrm checkout, then build normally with Meson.
-Install `libumockdev-dev` and `umockdev` on Debian to enable the topology test.
+The topology test requires umockdev >= 0.19.9 for fstat interception.
+Debian 13 ships 0.19.1; build a local test dependency with
+`tools/build-test-umockdev.sh` and select its bin, lib and pkgconfig directories.
 Run `meson test -C BUILD --print-errorlogs`; check that `device-topology` runs.
 
 For the private Debian installation, use `tools/build-libdrm-auxiliary.sh`

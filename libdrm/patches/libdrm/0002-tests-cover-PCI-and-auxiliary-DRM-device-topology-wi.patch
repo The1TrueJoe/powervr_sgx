@@ -8,7 +8,8 @@ Exercise fd, dev_t, enumeration, legacy APIs and PCI revision metadata
 without DRM hardware or root. Cover display/auxiliary separation,
 sibling children, primary/render grouping, ordinary PCI, virtio,
 disappearing sysfs nodes and rejection of non-PCI auxiliary parents.
-Build this Linux test when umockdev and its wrapper are available.
+Build this Linux test with umockdev 0.19.9 or newer and its wrapper.
+Older releases do not intercept fstat() on the mock device descriptors.
 
 Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
 ---
@@ -220,7 +221,7 @@ index ac9e66b01ed324cbb0568b98877118679fd14e63..d13c4d819729807ff2a8a1404a73dc62
 +
 +# Exercise Linux sysfs discovery without DRM hardware or root privileges.
 +if host_machine.system() == 'linux'
-+  umockdev = dependency('umockdev-1.0', required : false)
++  umockdev = dependency('umockdev-1.0', version : '>= 0.19.9', required : false)
 +  umockdev_wrapper = find_program('umockdev-wrapper', required : false)
 +  if umockdev.found() and umockdev_wrapper.found()
 +    device_topology = executable(

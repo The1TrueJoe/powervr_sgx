@@ -44,8 +44,12 @@ and GPU clients to avoid tile tearing and frame reordering.
 
 ## Tests and maintenance
 
-Install `libumockdev-dev` and `umockdev` before configuring to build the optional
-Linux topology test. Run `meson test -C BUILD --print-errorlogs` and confirm that
+The optional topology test requires umockdev >= 0.19.9, which intercepts
+fstat on mock device descriptors. Debian 13 ships an older release. CI uses
+`libdrm/tools/build-test-umockdev.sh` to build the pinned test dependency locally
+with valac, libglib2.0-dev, libudev-dev and libpcap-dev. Select its install/bin
+in PATH, install/lib in LD_LIBRARY_PATH and install/lib/pkgconfig in
+PKG_CONFIG_PATH before configuring libdrm. No system libraries are replaced. Run `meson test -C BUILD --print-errorlogs` and confirm that
 `device-topology` runs. CI also stages installation without touching the system.
 Tests cover fd/dev_t discovery, enumeration, PCI revision, ordinary PCI and
 virtio devices, sibling auxiliary children, node grouping, disappearing sysfs
