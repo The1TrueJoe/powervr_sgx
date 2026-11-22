@@ -87,3 +87,10 @@ write it, boot it, attach the results file to the issue.
 
 Contributions are welcome, including support for other PowerVR SGX cores. Start with
 [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/porting/](docs/porting/README.md).
+
+## Cedarview H.264 decoding
+
+The optional [VAAPI driver and broker](video/README.md) use the separately
+proposed gma500 MSVDX host. They support CPU-copy playback; direct import
+additionally needs the SGX read-only import and player compatibility changes.
+Firmware is supplied separately and the private kernel interface is opt-in.

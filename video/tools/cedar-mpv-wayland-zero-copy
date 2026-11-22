@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Requires read-only SGX PRIME/Mesa import support and the mpv GR channel fix.
+# Set CEDAR_SGX_PREFIX for an isolated Mesa build; otherwise use /opt/sgx.
+prefix=${CEDAR_SGX_PREFIX:-/opt/sgx}
+export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBGL_DRIVERS_PATH="$prefix/lib/dri"
+export GBM_BACKENDS_PATH="$prefix/lib/gbm"
+export __EGL_VENDOR_LIBRARY_FILENAMES="$prefix/share/glvnd/egl_vendor.d/50_mesa.json"
+export SGX_DEBUG=${SGX_DEBUG:+$SGX_DEBUG,}serial
+exec cedar-with-libdrm cedar-vaapi /opt/cedar-mpv/bin/mpv --no-config \
+    --hwdec=vaapi --hwdec-software-fallback=no --vaapi-device=/dev/dri/card0 \
+    --vo=gpu --gpu-api=opengl --gpu-context=wayland --opengl-es=yes \
+    --audio-channels=stereo --mute=yes --vd-queue-enable=yes \
+    --vd-queue-max-samples=8 --vd-queue-max-bytes=32MiB --vd-queue-max-secs=0.5 "$@"

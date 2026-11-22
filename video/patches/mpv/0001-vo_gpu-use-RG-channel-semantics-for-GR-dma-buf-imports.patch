@@ -1,0 +1,50 @@
+From ea310b34601e362fb9527790cbf574adba9f40a0 Mon Sep 17 00:00:00 2001
+From: Viktor Semykin <thesame.ml@gmail.com>
+Date: Sat, 21 Nov 2026 23:02:19 -0300
+Subject: [PATCH] vo_gpu: use RG channel semantics for GR dma-buf imports
+
+On GL2 and GLES2 the upload format table may select a luminance-alpha format for NV12 chroma. EGL imports DRM GR88 as red/green, so using that upload metadata makes the renderer read V from constant alpha and produces a red cast.
+
+Give imported textures their own format metadata and clear luminance_alpha for GR88 and GR1616 imports. Preserve the existing metadata for CPU uploads. This applies to separate layers and synthetic layers from composed NV12/P010 alike.
+
+Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
+---
+ video/out/hwdec/dmabuf_interop_gl.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/video/out/hwdec/dmabuf_interop_gl.c b/video/out/hwdec/dmabuf_interop_gl.c
+index 6adddb7..26fdc8e 100644
+--- a/video/out/hwdec/dmabuf_interop_gl.c
++++ b/video/out/hwdec/dmabuf_interop_gl.c
+@@ -56,6 +56,7 @@ struct vaapi_gl_mapper_priv {
+     EGLImageKHR images[AV_DRM_MAX_PLANES];
+ 
+     const struct ra_format *planes[AV_DRM_MAX_PLANES];
++    struct ra_format imported_formats[AV_DRM_MAX_PLANES];
+ 
+     EGLImageKHR (EGLAPIENTRY *CreateImageKHR)(EGLDisplay, EGLContext,
+                                               EGLenum, EGLClientBuffer,
+@@ -148,7 +149,8 @@ static bool vaapi_gl_mapper_init(struct ra_hwdec_mapper *mapper,
+ 
+     // remember format to allow texture recreation
+     for (int n = 0; n < desc->num_planes; n++) {
+-        p->planes[n] = desc->planes[n];
++        p->imported_formats[n] = *desc->planes[n];
++        p->planes[n] = &p->imported_formats[n];
+     }
+     if (p->EGLImageTargetTexture2DOES) {
+         // created only once
+@@ -287,6 +289,13 @@ static bool vaapi_gl_map(struct ra_hwdec_mapper *mapper,
+             int attribs[48] = {EGL_NONE};
+             int num_attribs = 0;
+ 
++            // EGL imports GR formats as red/green even when the upload
++            // format table selected legacy luminance/alpha on GL2/GLES2.
++            // Keep this correction local to the imported texture: CPU
++            // uploads using GL_LUMINANCE_ALPHA must still sample .ra.
++            if (format[j] == DRM_FORMAT_GR88 || format[j] == DRM_FORMAT_GR1616)
++                p->imported_formats[n].luminance_alpha = false;
++
+             ADD_ATTRIB(EGL_LINUX_DRM_FOURCC_EXT, format[j]);
+             ADD_ATTRIB(EGL_WIDTH,  p_mapper->tex[n]->params.w);
+             ADD_ATTRIB(EGL_HEIGHT, p_mapper->tex[n]->params.h);

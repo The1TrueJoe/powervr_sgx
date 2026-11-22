@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Native Wayland, hardware decoding, CPU conversion/shared-memory presentation.
+# This deliberately avoids the unqualified native EGL/llvmpipe fallback.
+exec cedar-vaapi mpv --no-config --mute=yes --audio-channels=stereo \
+    --hwdec=vaapi-copy --hwdec-software-fallback=no \
+    --vaapi-device=/dev/dri/card0 --vo=wlshm "$@"

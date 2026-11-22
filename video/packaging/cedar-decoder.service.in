@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Cedarview MSVDX decoder broker
+ConditionPathExists=/dev/cedar-msvdx-test
+After=systemd-modules-load.service
+
+[Service]
+RuntimeDirectory=cedar-decoder
+RuntimeDirectoryMode=0711
+ExecStart=/opt/cedar-msvdx/cedar-decoder-broker --socket /run/cedar-decoder/decoder.sock --uid @UID@
+
+[Install]
+WantedBy=multi-user.target

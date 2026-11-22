@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+export LIBVA_DRIVER_NAME=cedar
+export LIBVA_DRIVERS_PATH=/opt/cedar-msvdx
+export CEDAR_DECODER_SOCKET=/run/cedar-decoder/decoder.sock
+export CEDAR_VA_DMABUF=1
+exec "$@"
