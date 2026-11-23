@@ -248,6 +248,26 @@ struct sgx_context {
    unsigned rt_plane, recording_plane;
    bool rt_later_pass;
    /* MRT, a pass a colour buffer: the one this pass draws or clears into */
+   /* sgx_fs_for's and sgx_vs_for's last answers, good while the counter
+    * for what each reads holds: fs_gen (fragment views and samplers, the
+    * framebuffer, the blend state and colour), vs_gen (vertex views and
+    * samplers); both go up when any variant ends.  A draw looked them up
+    * again, texture key and all (Quake 3 and GoldSrc draw hundreds a frame;
+    * the vertex shader's rarely changes between them). */
+   uint32_t fs_gen, vs_gen;
+   struct {
+      uint32_t gen;
+      const void *fs;
+      unsigned rt_index, rt_plane;
+      void *out;
+   } fs_memo;
+   struct {
+      uint32_t gen;
+      const void *vs, *fs;
+      uint8_t vtx_fmt[16];
+      bool points;
+      void *out;
+   } vs_memo;
    unsigned rt_index;
    /* one past the highest view bound to the fragment and vertex stages */
    unsigned n_views, n_vs_views;

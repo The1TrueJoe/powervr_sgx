@@ -274,6 +274,7 @@ static void
 sgx_bind_blend_state(struct pipe_context *pctx, void *hwcso)
 {
    sgx_context(pctx)->blend = hwcso;
+   sgx_context(pctx)->fs_gen++;
 }
 
 static void *
@@ -375,6 +376,7 @@ sgx_set_framebuffer_state(struct pipe_context *pctx,
    struct sgx_context *ctx = sgx_context(pctx);
 
    util_copy_framebuffer_state(&ctx->framebuffer, fb);
+   ctx->fs_gen++;
    /* depth only: a colour buffer of the context's own to render into
     * (begin_frame), at least the framebuffer's size, with the depth buffer's
     * samples.  Made here, not in begin_frame, which runs with the screen
@@ -431,6 +433,7 @@ sgx_set_blend_color(struct pipe_context *pctx,
                     const struct pipe_blend_color *color)
 {
    sgx_context(pctx)->blend_color = *color;
+   sgx_context(pctx)->fs_gen++;
 }
 
 static void
@@ -480,6 +483,10 @@ sgx_bind_sampler_states(struct pipe_context *pctx, mesa_shader_stage shader,
 
    if (!s)
       return;
+   if (shader == MESA_SHADER_FRAGMENT)
+      ctx->fs_gen++;
+   else
+      ctx->vs_gen++;
    for (unsigned i = 0; i < nr && start + i < PIPE_MAX_SAMPLERS; i++)
       s[start + i] = hwcso ? hwcso[i] : NULL;
 }
@@ -521,6 +528,10 @@ sgx_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
 
    if (!v)
       return;
+   if (shader == MESA_SHADER_FRAGMENT)
+      ctx->fs_gen++;
+   else
+      ctx->vs_gen++;
    for (unsigned i = 0; i < nr + unbind_num_trailing_slots; i++) {
       unsigned s = start + i;
 
