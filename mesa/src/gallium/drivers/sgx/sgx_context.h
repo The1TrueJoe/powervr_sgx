@@ -205,6 +205,23 @@ struct sgx_blend {
 
 struct vcache_chunk;
 
+/* a sampler state, with an id no other one gets (sgx_view's cache) */
+struct sgx_sampler {
+   struct pipe_sampler_state base;
+   uint32_t id;
+};
+
+/* a sampler view, with the texture state words (sgx_tex_words) the last
+ * draw that sampled it made: the same while the sampler and the texture's
+ * addresses are.  A draw made them again for every unit (Quake 3 switches
+ * textures between nearly all of its draws, among a few hundred views). */
+struct sgx_view {
+   struct pipe_sampler_view base;
+   uint32_t words_sampler, words_va, words_cube0_va;
+   bool words_valid;
+   uint32_t words[4];
+};
+
 struct sgx_context {
    struct pipe_context base;
 

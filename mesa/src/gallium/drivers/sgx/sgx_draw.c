@@ -2199,8 +2199,21 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
                     unit - 1);
             return;
          }
-         sgx_tex_words(view, ctx->samplers[unit - 1], tex[unit - 1]);
-         sgx_resource(view->texture)->use_seq = sgxws_next_seq(ctx->hw);
+         struct sgx_view *sv = (struct sgx_view *)view;
+         struct sgx_resource *tr = sgx_resource(view->texture);
+         const struct pipe_sampler_state *smp = ctx->samplers[unit - 1];
+         uint32_t sid = smp ? ((const struct sgx_sampler *)smp)->id : 0;
+
+         if (!sv->words_valid || sv->words_sampler != sid ||
+             sv->words_va != tr->bo.va || sv->words_cube0_va != tr->cube0.va) {
+            sgx_tex_words(view, smp, sv->words);
+            sv->words_sampler = sid;
+            sv->words_va = tr->bo.va;
+            sv->words_cube0_va = tr->cube0.va;
+            sv->words_valid = true;
+         }
+         memcpy(tex[unit - 1], sv->words, sizeof(sv->words));
+         tr->use_seq = sgxws_next_seq(ctx->hw);
          sampled |= 1u << (unit - 1);
          SGX_DBG(DRAW,
                  "  sample (PDS) %u: unit %u %s %ux%u target %u levels %u-%u, %s, state %08x %08x %08x %08x\n",

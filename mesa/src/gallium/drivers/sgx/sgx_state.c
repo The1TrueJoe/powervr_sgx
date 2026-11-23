@@ -464,10 +464,13 @@ static void *
 sgx_create_sampler_state(struct pipe_context *pctx,
                          const struct pipe_sampler_state *cso)
 {
-   struct pipe_sampler_state *so = CALLOC_STRUCT(pipe_sampler_state);
+   static uint32_t next_id;
+   struct sgx_sampler *so = CALLOC_STRUCT(sgx_sampler);
 
-   if (so)
-      *so = *cso;
+   if (so) {
+      so->base = *cso;
+      so->id = p_atomic_inc_return(&next_id);
+   }
    return so;
 }
 
@@ -495,7 +498,8 @@ static struct pipe_sampler_view *
 sgx_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                         const struct pipe_sampler_view *cso)
 {
-   struct pipe_sampler_view *so = CALLOC_STRUCT(pipe_sampler_view);
+   struct sgx_view *v = CALLOC_STRUCT(sgx_view);
+   struct pipe_sampler_view *so = v ? &v->base : NULL;
 
    if (!so)
       return NULL;
