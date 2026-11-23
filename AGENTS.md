@@ -95,7 +95,8 @@ Follow `docs/CLEANROOM.md`. Shipping code is written from `docs/`. Before code r
 
 | Consumer | Needs | Our status |
 |---|---|---|
-| Wayland compositors (wlroots, Weston, Mutter), Xorg modesetting with glamor | KMS + GBM + dma-buf + render node + fences, GLES 2.0 | Works |
+| Xorg modesetting with glamor | KMS + GBM + dma-buf + render node + fences, GLES 2.0 | Works |
+| Wayland compositors (wlroots, Weston, Mutter) | The same | Should work; not tested yet |
 | Qt 6 / LXQt | GLES 2.0 | Works |
 | GTK4 GPU renderers | GL 3.3 or GLES 3.0 | Needs GLES 3.0 |
 | Firefox WebRender, Chromium GPU | GLES 3.0 or GL 3.2 | Needs GLES 3.0 |
