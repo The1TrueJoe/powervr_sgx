@@ -22,6 +22,7 @@
 
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
+#include "compiler/nir/nir_builtin_builder.h"
 #include "compiler/nir/nir_format_convert.h"
 #include "nir/tgsi_to_nir.h"
 #include "util/format/u_format.h"
@@ -1387,12 +1388,13 @@ tex_units(nir_tex_instr *tex)
    return first < 32 ? BITFIELD_RANGE(first, MIN2(n, 32 - first)) : 0;
 }
 
-/* an implicit-LOD 2D sample the program makes itself */
+/* an implicit-LOD 2D or cube sample the program makes itself */
 static bool
 dep_lod_sample(nir_tex_instr *tex)
 {
    return (tex->op == nir_texop_tex || tex->op == nir_texop_txb) &&
-          tex->sampler_dim == GLSL_SAMPLER_DIM_2D &&
+          (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
+           (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE && !tex->is_array)) &&
           nir_tex_instr_src_index(tex, nir_tex_src_coord) >= 0 &&
           nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0 &&
           nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) < 0 &&
@@ -1427,9 +1429,20 @@ dep_lod_units(nir_shader *nir)
  * helpers hold the coordinate, dFdx of it is the same everywhere).  With
  * the gradients from fdsx / fdsy (coarse: every pixel of the quad gets the
  * same) it matches the PDS sample: the sample becomes a txd, which smp
- * takes as it is (LOD mode 3, hwt_grad).  A bias scales the
- * gradients by 2^bias.  Not in divergent flow, where derivatives are
- * undefined; only on the units in data (dep_mip). */
+ * takes as it is (LOD mode 3, hwt_grad).  A bias scales the gradients by
+ * 2^bias.  Not in divergent flow, where derivatives are undefined; only on
+ * the units in data (dep_mip).
+ *
+ * A cube sample does the same (measured: textureCube(s, d * one) takes
+ * level 0 in the quads on the diagonal, mesa/tests/sgx_cubelod.c), but smp
+ * takes no cube gradients (ISA.md, hwt_cubegrad: the 3D form returns the
+ * last level, the 2D one reads the direction's x and y derivatives
+ * unprojected).  So its LOD is computed here and the sample becomes a txl:
+ * log2 of the longer derivative of the direction times the face's width
+ * over 2|ma|, the face's major axis.  That leaves out the change of ma
+ * across the quad, which nir_lower_tex's exact cube gradients keep; it
+ * takes half their instructions (25 against 50 for a textureCube), and
+ * dEQP-GLES2's 557 cube cases give the same result with either. */
 static bool
 lower_dep_lod(nir_builder *b, nir_tex_instr *tex, void *data)
 {
@@ -1440,7 +1453,15 @@ lower_dep_lod(nir_builder *b, nir_tex_instr *tex, void *data)
       return false;
    b->cursor = nir_before_instr(&tex->instr);
    int ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
-   nir_def *coord = nir_trim_vector(b, tex->src[ci].src.ssa, 2);
+   bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
+   nir_def *coord = nir_trim_vector(b, tex->src[ci].src.ssa, cube ? 3 : 2);
+
+   /* (a cube's maths in 32 bits: a mediump direction's would mix 16-bit
+    * constants into 32-bit instructions) */
+   if (cube && coord->bit_size != 32) {
+      coord = nir_f2f32(b, coord);
+      nir_src_rewrite(&tex->src[ci].src, coord);
+   }
    nir_def *dx = nir_ddx_coarse(b, coord), *dy = nir_ddy_coarse(b, coord);
    int bi = nir_tex_instr_src_index(tex, nir_tex_src_bias);
 
@@ -1450,6 +1471,29 @@ lower_dep_lod(nir_builder *b, nir_tex_instr *tex, void *data)
       dx = nir_fmul(b, dx, s);
       dy = nir_fmul(b, dy, s);
       nir_tex_instr_remove_src(tex, bi);
+   }
+   if (cube) {
+      nir_def *a = nir_fabs(b, coord);
+      nir_def *ma = nir_fmax(b, nir_fmax(b, nir_channel(b, a, 0),
+                                         nir_channel(b, a, 1)),
+                             nir_channel(b, a, 2));
+      /* level 0's width: the draw's float constant when the unit is known
+       * (txs's would go through an integer and back) */
+      nir_def *size =
+         tex->texture_index < SGX_K_TEXSIZE_UNITS &&
+               nir_tex_instr_src_index(tex, nir_tex_src_texture_deref) < 0
+            ? nir_load_uniform(b, 1, 32, nir_imm_int(b, 0),
+                               .base = SGX_K_TEXSIZE + 2 * tex->texture_index,
+                               .range = 1, .dest_type = nir_type_float32)
+            : nir_i2f32(b, nir_channel(b, nir_get_texture_size(b, tex), 0));
+      nir_def *rho = nir_fmax(b, nir_fdot(b, dx, dx), nir_fdot(b, dy, dy));
+      nir_def *k = nir_fmul(b, size, nir_frcp(b, nir_fmul_imm(b, ma, 2.0)));
+      nir_def *lod = nir_fmul_imm(
+         b, nir_flog2(b, nir_fmul(b, rho, nir_fmul(b, k, k))), 0.5);
+
+      tex->op = nir_texop_txl;
+      nir_tex_instr_add_src(tex, nir_tex_src_lod, lod);
+      return true;
    }
    tex->op = nir_texop_txd;
    nir_tex_instr_add_src(tex, nir_tex_src_ddx, dx);
