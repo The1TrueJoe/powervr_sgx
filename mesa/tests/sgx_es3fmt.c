@@ -17,6 +17,9 @@
  *  7. RGB10_A2 sampled
  *  8. RGBA8_SNORM, R8_SNORM: -1..1, LINEAR by the TPU
  *  9. RGBA32F with mipmaps, NEAREST_MIPMAP_NEAREST, textureLod level 1
+ * 10. REPEAT and MIRRORED_REPEAT on RGBA16F, RGBA32F and R32F (stored as F32
+ *     words, read strided), sampled over [-0.5, 1.5]: NEAREST and LINEAR,
+ *     every pixel against a CPU reference; RGBA8 as the control
  *
  *   MESA_GLES_VERSION_OVERRIDE=3.0 SGX_DEBUG=glsl130 DISPLAY=:0 sgx_es3fmt
  *
@@ -25,6 +28,7 @@
  * <root>/usr/lib/i386-linux-gnu/libGLESv2.so.2 -lm
  */
 #include <math.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +38,7 @@
 
 #define W 64
 #define H 64
+#define T10 16
 
 static int fails;
 
@@ -145,6 +150,38 @@ half(float f)
    if (ne >= 31)
       return s | 0x7c00;
    return s | ne << 10 | (m + 0x1000) >> 13;
+}
+
+/* section 10's wrap of texel index i, and its texel (x / 15, y / 15, 0.25, 1) */
+static int
+wrap10(int i, GLenum m)
+{
+   if (m == GL_REPEAT)
+      return ((i % T10) + T10) % T10;
+   int k = ((i % (2 * T10)) + 2 * T10) % (2 * T10);
+   return k < T10 ? k : 2 * T10 - 1 - k;
+}
+
+static float
+texel10(int x, int y, int c)
+{
+   return c == 0 ? x / (T10 - 1.0f) : c == 1 ? y / (T10 - 1.0f) : c == 2 ? 0.25f : 1.0f;
+}
+
+/* the reference texel at (u, v), NEAREST or LINEAR, channel c */
+static float
+ref10(double u, double v, GLenum m, bool linear, int c)
+{
+   if (!linear)
+      return texel10(wrap10((int)floor(u * T10), m), wrap10((int)floor(v * T10), m), c);
+   double x = u * T10 - 0.5, y = v * T10 - 0.5;
+   int x0 = (int)floor(x), y0 = (int)floor(y);
+   double fx = x - x0, fy = y - y0;
+   float a = texel10(wrap10(x0, m), wrap10(y0, m), c),
+         b = texel10(wrap10(x0 + 1, m), wrap10(y0, m), c),
+         d = texel10(wrap10(x0, m), wrap10(y0 + 1, m), c),
+         e = texel10(wrap10(x0 + 1, m), wrap10(y0 + 1, m), c);
+   return (float)((a * (1 - fx) + b * fx) * (1 - fy) + (d * (1 - fx) + e * fx) * fy);
 }
 
 int
@@ -430,6 +467,71 @@ main(void)
       printf("9 RGBA32F mipmapped, textureLod level 1: got %u %u %u %u, level 1"
              " is 159 96 128 159 (informative: one level, F32 planes strided)\n",
              q[0], q[1], q[2], q[3]);
+   }
+
+   /* 10 */
+   {
+      static float f4[T10 * T10 * 4], f1[T10 * T10];
+      static unsigned char b4[T10 * T10 * 4];
+      static unsigned char px[W * H * 4];
+
+      for (int y = 0; y < T10; y++)
+         for (int x = 0; x < T10; x++)
+            for (int c = 0; c < 4; c++) {
+               f4[4 * (y * T10 + x) + c] = texel10(x, y, c);
+               b4[4 * (y * T10 + x) + c] =
+                  (unsigned char)lrintf(texel10(x, y, c) * 255.0f);
+               if (!c)
+                  f1[y * T10 + x] = texel10(x, y, 0);
+            }
+      GLuint p = prog("#version 300 es\nprecision highp float;\n"
+                      "uniform highp sampler2D s;\nin vec2 uv;\nout vec4 o;\n"
+                      "void main() { o = texture(s, uv * 2.0 - 0.5); }\n");
+      static const struct {
+         const char *name;
+         GLenum ifmt, fmt, type;
+         const void *data;
+         int comps;
+      } f[] = {
+         {"RGBA8 (control)", GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, b4, 2},
+         {"RGBA16F", GL_RGBA16F, GL_RGBA, GL_FLOAT, f4, 2},
+         {"RGBA32F", GL_RGBA32F, GL_RGBA, GL_FLOAT, f4, 2},
+         {"R32F", GL_R32F, GL_RED, GL_FLOAT, f1, 1},
+      };
+      static const GLenum mode[] = {GL_REPEAT, GL_MIRRORED_REPEAT};
+
+      for (unsigned i = 0; i < sizeof(f) / sizeof(f[0]); i++)
+         for (int lin = 0; lin < 2; lin++)
+            for (int m = 0; m < 2; m++) {
+               GLuint tx = tex2d(f[i].ifmt, T10, T10, f[i].fmt, f[i].type,
+                                 f[i].data, lin ? GL_LINEAR : GL_NEAREST);
+               int bad = 0, fx = -1, fy = -1;
+
+               glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, mode[m]);
+               glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, mode[m]);
+               draw(p, tx, NULL);
+               glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+               for (int y = 0; y < H; y++)
+                  for (int x = 0; x < W; x++) {
+                     double u = ((x + 0.5) / W) * 2.0 - 0.5,
+                            v = ((y + 0.5) / H) * 2.0 - 0.5;
+                     int ok = 1;
+
+                     for (int c = 0; c < f[i].comps; c++) {
+                        int want = (int)lrint(ref10(u, v, mode[m], lin, c) * 255.0);
+                        if (abs(px[4 * (y * W + x) + c] - want) > t + 1)
+                           ok = 0;
+                     }
+                     if (!ok && !bad++)
+                        fx = x, fy = y;
+                  }
+               printf("10 %-15s %-7s %-15s %4d of %d pixels wrong (first %d,%d): %s\n",
+                      f[i].name, lin ? "LINEAR" : "NEAREST",
+                      m ? "MIRRORED_REPEAT" : "REPEAT", bad, W * H, fx, fy,
+                      bad ? "FAIL" : "OK");
+               fails += bad != 0;
+               glDeleteTextures(1, &tx);
+            }
    }
 
    GLenum e = glGetError();

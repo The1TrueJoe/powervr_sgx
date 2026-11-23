@@ -1028,9 +1028,11 @@ sgx_tex_words(const struct pipe_sampler_view *view,
       {
          t0.pitch_lo = p & 7;
          t0.pitch_hi = p >> 3;
+         /* clamped: a fragment program wraps the coordinate itself
+          * (sgx_program.c lower_word32_wrap), the TPU doesn't here */
          if (sampler) {
-            t0.wrap_t = wrap(sampler->wrap_t);
-            t0.wrap_s = wrap(sampler->wrap_s);
+            t0.wrap_t = wrap(PIPE_TEX_WRAP_CLAMP_TO_EDGE);
+            t0.wrap_s = wrap(PIPE_TEX_WRAP_CLAMP_TO_EDGE);
          }
       }
       sgx_pack(&t[1], TEXSTATE_WORD1, t1)
