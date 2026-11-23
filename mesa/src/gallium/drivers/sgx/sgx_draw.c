@@ -12,6 +12,7 @@
 
 #include "compiler/nir/nir.h"
 #include "util/format/u_format.h"
+#include "util/format_srgb.h"
 #include "util/half_float.h"
 #include "util/hash_table.h"
 #include "util/list.h"
@@ -419,6 +420,11 @@ clear_one(struct pipe_context *pctx, unsigned buffers,
       if (sgx_cbuf(ctx)->texture &&
           !util_format_has_alpha(sgx_cbuf(ctx)->format))
          rgba[3] = 1.0f;
+      /* an sRGB buffer: the clear colour encoded, as a draw's is */
+      if (sgx_cbuf(ctx)->texture && util_format_is_srgb(sgx_cbuf(ctx)->format))
+         for (unsigned c = 0; c < 3; c++)
+            rgba[c] =
+               util_format_linear_to_srgb_float(CLAMP(rgba[c], 0.0f, 1.0f));
       if (rg_whole) {
          if (!(tm & PIPE_MASK_G))
             rgba[1] = 0.0f;
@@ -2015,8 +2021,10 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       bool int_rt = util_format_is_pure_integer(cf);
 
       /* an integer target isn't blended (GL); its packed word is masked by
-       * byte, an R32 word being all of R */
-      if (ctx->blend && ctx->blend->enable[br] && !int_rt)
+       * byte, an R32 word being all of R.  An sRGB one is blended by the
+       * program, in linear (lower_srgb_output) */
+      if (ctx->blend && ctx->blend->enable[br] && !int_rt &&
+          !util_format_is_srgb(cf))
          epi = ctx->blend->hw[br][has_alpha];
       if (int_rt && sgx_tex_raw32(cf))
          mask = word_mask(ctx, mask);
@@ -2115,11 +2123,15 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
             SKIP("no blend variant of the fragment program");
       }
       /* pass type: a blend 1; discard 4, or 2 with a blend; a depthf
-       * (gl_FragDepth) 5 (ISA.md, H10) */
-      st.pass_type = fs->depth_pa >= 0       ? 5
-                     : fs->discard_pa >= 0   ? (blend && blend->blend ? 2 : 4)
-                     : blend && blend->blend ? 1
-                                             : 0;
+       * (gl_FragDepth) 5 (ISA.md, H10).  A program that reads the tile
+       * (an sRGB blend) is a blend: o0 holds the tile's colour only in a
+       * translucent pass */
+      bool blends = (blend && blend->blend) || fs->reads_tile;
+
+      st.pass_type = fs->depth_pa >= 0     ? 5
+                     : fs->discard_pa >= 0 ? (blends ? 2 : 4)
+                     : blends              ? 1
+                                           : 0;
       /* counted in submission order, as a translucent object is shaded */
       if (query_va && !st.pass_type)
          st.pass_type = 1;
