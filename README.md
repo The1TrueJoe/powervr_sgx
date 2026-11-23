@@ -24,9 +24,7 @@ On the SGX545:
 - **Desktops:** Xorg with glamor, Xfce and Firefox, all on the GPU.
   When one program hangs the GPU, the driver recovers it and the desktop keeps running.
 - **Coming:** OpenGL ES 3.0, then OpenGL 3.1 ([docs/GL3.md](https://github.com/The1TrueJoe/powervr_sgx/blob/dev/docs/GL3.md)), and hardware
-  H.264 video decoding on Cedarview, being contributed in
-  [#37](https://github.com/The1TrueJoe/powervr_sgx/pull/37) to
-  [#40](https://github.com/The1TrueJoe/powervr_sgx/pull/40).
+  H.264 video decoding on Cedarview.
 
 ## Results
 
