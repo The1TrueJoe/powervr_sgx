@@ -5,6 +5,7 @@
 
 #include <linux/pm_runtime.h>
 
+#include "pvrsgx_ccb.h"
 #include "pvrsgx_device.h"
 #include "pvrsgx_drv.h"
 #include "pvrsgx_fw.h"
@@ -113,6 +114,10 @@ static int pvrsgx_runtime_suspend(struct device *dev)
 	/* Lost too: after a failed start the clocks are still on (fw_stop's second branch). */
 	mutex_lock(&sdev->reset_lock);
 	pvrsgx_fw_stop(sdev);
+	/* Power-off resets the BIF: no cached walk can reach retired mappings.
+	 * Drain waiters here rather than waiting for unrelated future GPU work.
+	 */
+	pvrsgx_ccb_inval_reap(sdev, true);
 	mutex_unlock(&sdev->reset_lock);
 	return 0;
 }
@@ -179,3 +184,7 @@ const struct dev_pm_ops pvrsgx_pm_ops = {
 	SYSTEM_SLEEP_PM_OPS(pvrsgx_suspend, pvrsgx_resume)
 	RUNTIME_PM_OPS(pvrsgx_runtime_suspend, pvrsgx_runtime_resume, NULL)
 };
+
+#if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_KUNIT_TEST)
+#include "tests/pvrsgx_pm_test.c"
+#endif
