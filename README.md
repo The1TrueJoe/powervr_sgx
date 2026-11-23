@@ -14,7 +14,7 @@ firmware or userspace.
 |---|---|---|
 | SGX545 | Intel Cedarview: Atom N2600, N2800, D2500, D2550, D2700 | **Supported.** Debian 13 packages, tested by users on their own machines |
 | SGX545 | Intel Atom CE5300 / CE5310 | **Supported.** The development boards |
-| SGX545 | Intel Clover Trail: Atom Z2760 | **Works** for a contributor on an HP ElitePad 900; manual setup ([notes](docs/porting/cores/clovertrail.md)) |
+| SGX545 | Intel Clover Trail: Atom Z2760 | **Works** for a contributor on an HP ElitePad 900; manual setup ([notes](https://github.com/The1TrueJoe/powervr_sgx/blob/dev/docs/porting/cores/clovertrail.md)) |
 | SGX530 | TI OMAP3 (OMAP3430, OMAP3630, DM3730), AM335x, AM3517 | **In bring-up:** the kernel driver powers the GPU and reads its ID; no frames yet |
 | SGX535, SGX540, SGX543, SGX544, SGX554 | Intel Poulsbo, TI OMAP4/5, Allwinner A31/A83T, and others | Wanted: see [Contributing](#contributing) |
 
@@ -23,7 +23,7 @@ On the SGX545:
 - **OpenGL 2.1 and OpenGL ES 2.0**, with EGL, GBM, GLX and DRI3, in 64-bit and 32-bit programs.
 - **Desktops:** Xorg with glamor, Xfce and Firefox, all on the GPU.
   When one program hangs the GPU, the driver recovers it and the desktop keeps running.
-- **Coming:** OpenGL ES 3.0, then OpenGL 3.1 ([docs/GL3.md](docs/GL3.md)), and hardware
+- **Coming:** OpenGL ES 3.0, then OpenGL 3.1 ([docs/GL3.md](https://github.com/The1TrueJoe/powervr_sgx/blob/dev/docs/GL3.md)), and hardware
   H.264 video decoding on Cedarview, being contributed in
   [#37](https://github.com/The1TrueJoe/powervr_sgx/pull/37) to
   [#40](https://github.com/The1TrueJoe/powervr_sgx/pull/40).
