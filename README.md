@@ -21,7 +21,7 @@ firmware or userspace.
 On the SGX545:
 
 - **OpenGL 2.1 and OpenGL ES 2.0**, with EGL, GBM, GLX and DRI3, in 64-bit and 32-bit programs.
-- **Desktops:** Xorg with glamor, Xfce and Firefox, all on the GPU.
+- **Desktops:** Xorg with glamor and Xfce, on the GPU.
   When one program hangs the GPU, the driver recovers it and the desktop keeps running.
 - **Coming:** OpenGL ES 3.0, then OpenGL 3.1 ([docs/GL3.md](https://github.com/The1TrueJoe/powervr_sgx/blob/dev/docs/GL3.md)), and hardware
   H.264 video decoding on Cedarview.
@@ -41,13 +41,22 @@ Minecraft also runs in its world for 15 minutes without a single GPU recovery.
 
 ### Games
 
-| Game | Notes |
+On Atom N2600 netbooks:
+
+| Game | Result |
 |---|---|
-| Minecraft 1.7.10 | About 13 FPS standing on a CE5300 board |
-| OpenArena | About 44 FPS in the `opengl1` timedemo on an Atom N2600. The `opengl2` renderer runs too, at about 7 to 12 FPS |
-| Doom 3 | Runs well |
-| Counter-Strike 1.6 | Through the 32-bit Mesa package |
-| QuakeSpasm, SuperTuxKart, Geometry Dash, the Super Mario 64 PC port | Run |
+| Doom 3 (dhewm3) | About 30 FPS, and smoother than Intel's Windows driver on the same netbook |
+| ioquake3, `opengl1` renderer | 60 to 65 FPS, held by vsync |
+| OpenArena, `opengl1` renderer | About 45 FPS in the timedemo |
+| Counter-Strike 1.6 | 37 to 40 FPS on de_dust2 |
+| Quake (QuakeSpasm) | 37 to 40 FPS |
+| Yamagi Quake II | 40 to 70 FPS |
+| Geometry Dash (Wine) | 58 to 60 FPS |
+| Super Mario 64 PC port | A steady 30 FPS, the game's own cap, at 1024x600 |
+| Minecraft 1.12.2 | 25 to 30 FPS |
+| Minecraft 1.16.5 with OptiFine | Runs |
+| SuperTuxKart | 15 to 20 FPS |
+| Call of Duty (Wine), PCSX-R with its OpenGL plugin | Run |
 
 Something wrong in a game? [Open an issue](https://github.com/The1TrueJoe/powervr_sgx/issues)
 with what you ran and what you saw.
@@ -72,7 +81,10 @@ write it, boot your Cedarview computer from it, and attach the results file to
 
 - Some Cedarview panels stay dark with `gma500`, Debian's kernel as well as ours. The test
   stick records why.
-- Half-Life: Source shows a black screen.
+- Half-Life: Source and Portal show a black screen, and GTA Vice City doesn't render yet.
+- PPSSPP, DuckStation, and GPU acceleration in Firefox and Chrome need OpenGL ES 3.0 or
+  OpenGL 3, which are in progress. Minecraft 1.17 and newer need OpenGL 3.2, which isn't
+  planned.
 - The full list is in [docs/MAIN-MERGE.md](docs/MAIN-MERGE.md#known-issues-to-state-with-the-merge).
 
 ## Contributing
