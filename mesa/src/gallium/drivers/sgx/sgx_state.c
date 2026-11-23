@@ -274,6 +274,7 @@ static void
 sgx_bind_blend_state(struct pipe_context *pctx, void *hwcso)
 {
    sgx_context(pctx)->blend = hwcso;
+   sgx_context(pctx)->fs_gen++;
 }
 
 static void *
@@ -375,6 +376,7 @@ sgx_set_framebuffer_state(struct pipe_context *pctx,
    struct sgx_context *ctx = sgx_context(pctx);
 
    util_copy_framebuffer_state(&ctx->framebuffer, fb);
+   ctx->fs_gen++;
    /* depth only: a colour buffer of the context's own to render into
     * (begin_frame), at least the framebuffer's size, with the depth buffer's
     * samples.  Made here, not in begin_frame, which runs with the screen
@@ -431,6 +433,7 @@ sgx_set_blend_color(struct pipe_context *pctx,
                     const struct pipe_blend_color *color)
 {
    sgx_context(pctx)->blend_color = *color;
+   sgx_context(pctx)->fs_gen++;
 }
 
 static void
@@ -461,10 +464,13 @@ static void *
 sgx_create_sampler_state(struct pipe_context *pctx,
                          const struct pipe_sampler_state *cso)
 {
-   struct pipe_sampler_state *so = CALLOC_STRUCT(pipe_sampler_state);
+   static uint32_t next_id;
+   struct sgx_sampler *so = CALLOC_STRUCT(sgx_sampler);
 
-   if (so)
-      *so = *cso;
+   if (so) {
+      so->base = *cso;
+      so->id = p_atomic_inc_return(&next_id);
+   }
    return so;
 }
 
@@ -480,6 +486,10 @@ sgx_bind_sampler_states(struct pipe_context *pctx, mesa_shader_stage shader,
 
    if (!s)
       return;
+   if (shader == MESA_SHADER_FRAGMENT)
+      ctx->fs_gen++;
+   else
+      ctx->vs_gen++;
    for (unsigned i = 0; i < nr && start + i < PIPE_MAX_SAMPLERS; i++)
       s[start + i] = hwcso ? hwcso[i] : NULL;
 }
@@ -488,7 +498,8 @@ static struct pipe_sampler_view *
 sgx_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                         const struct pipe_sampler_view *cso)
 {
-   struct pipe_sampler_view *so = CALLOC_STRUCT(pipe_sampler_view);
+   struct sgx_view *v = CALLOC_STRUCT(sgx_view);
+   struct pipe_sampler_view *so = v ? &v->base : NULL;
 
    if (!so)
       return NULL;
@@ -521,12 +532,24 @@ sgx_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
 
    if (!v)
       return;
+   if (shader == MESA_SHADER_FRAGMENT)
+      ctx->fs_gen++;
+   else
+      ctx->vs_gen++;
    for (unsigned i = 0; i < nr + unbind_num_trailing_slots; i++) {
       unsigned s = start + i;
 
       if (s < PIPE_MAX_SHADER_SAMPLER_VIEWS)
          pipe_sampler_view_reference(&v[s], i < nr && views ? views[i] : NULL);
    }
+   /* one past the highest bound (what a draw looks through) */
+   unsigned *n = shader == MESA_SHADER_FRAGMENT ? &ctx->n_views : &ctx->n_vs_views;
+   unsigned top = MIN2(MAX2(*n, start + nr + unbind_num_trailing_slots),
+                       PIPE_MAX_SHADER_SAMPLER_VIEWS);
+
+   while (top && !v[top - 1])
+      top--;
+   *n = top;
 }
 
 static void
@@ -1019,6 +1042,100 @@ sgx_blit_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
    return true;
 }
 
+/* A blit of boxes more than a layer deep on the CPU: a volume's mip level
+ * from the one before (util_gen_mipmap's glGenerateMipmap, two slices into
+ * one) and an array's layers.  Nearest, or LINEAR in each axis the blit
+ * scales (in z too: a 3D level's eight taps); not mirrored. */
+static bool
+sgx_blit_cpu_box(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   const struct pipe_box *sb = &info->src.box, *db = &info->dst.box;
+   enum pipe_format sf = info->src.format, df = info->dst.format;
+   struct pipe_transfer *st, *dt;
+   uint8_t *src, *dst;
+   int sw = sb->width, sh = sb->height, sd = sb->depth, dw = db->width,
+       dh = db->height, dd = db->depth;
+
+   /* every channel of a texel is written: a partial colour mask isn't
+    * honoured here, so such a blit is refused */
+   if (info->mask != PIPE_MASK_RGBA)
+      return false;
+   if (info->scissor_enable || info->render_condition_enable ||
+       info->alpha_blend || info->num_window_rectangles || sw <= 0 ||
+       sh <= 0 || sd <= 0 || dw <= 0 || dh <= 0 || dd <= 0 ||
+       util_format_is_depth_or_stencil(sf) ||
+       util_format_is_pure_integer(sf) ||
+       !util_format_unpack_description(sf)->unpack_rgba ||
+       !util_format_pack_description(df)->pack_rgba_float)
+      return false;
+   src = pctx->texture_map(pctx, info->src.resource, info->src.level,
+                           PIPE_MAP_READ, sb, &st);
+   if (!src)
+      return false;
+   dst = pctx->texture_map(pctx, info->dst.resource, info->dst.level,
+                           PIPE_MAP_WRITE, db, &dt);
+   if (!dst) {
+      pipe_texture_unmap(pctx, st);
+      return false;
+   }
+   unsigned sbpp = util_format_get_blocksize(sf);
+   bool lin = info->filter == PIPE_TEX_FILTER_LINEAR;
+   bool lx = lin && sw != dw, ly = lin && sh != dh, lz = lin && sd != dd;
+   float *row = malloc(sizeof(float) * 4 * dw);
+
+   for (int z = 0; z < dd && row; z++) {
+      for (int y = 0; y < dh; y++) {
+         for (int x = 0; x < dw; x++) {
+            float f[3] = {(x + 0.5f) * sw / dw - 0.5f,
+                          (y + 0.5f) * sh / dh - 0.5f,
+                          (z + 0.5f) * sd / dd - 0.5f};
+            const int n[3] = {sw, sh, sd};
+            const bool l[3] = {lx, ly, lz};
+            int i0[3], i1[3];
+            float a[3], c[4] = {0};
+
+            for (int k = 0; k < 3; k++) {
+               if (l[k]) {
+                  i0[k] = CLAMP((int)floorf(f[k]), 0, n[k] - 1);
+                  i1[k] = MIN2(i0[k] + 1, n[k] - 1);
+                  a[k] = CLAMP(f[k] - floorf(f[k]), 0.0f, 1.0f);
+                  if (f[k] < 0)
+                     a[k] = 0;
+               } else {
+                  i0[k] = i1[k] = CLAMP((int)floorf(f[k] + 0.5f), 0, n[k] - 1);
+                  a[k] = 0;
+               }
+            }
+            for (int t = 0; t < 8; t++) {
+               float w = 1, v[4];
+               int p[3];
+
+               for (int k = 0; k < 3; k++) {
+                  bool hi = t >> k & 1;
+                  w *= hi ? a[k] : 1 - a[k];
+                  p[k] = hi ? i1[k] : i0[k];
+               }
+               if (w == 0)
+                  continue;
+               util_format_unpack_rgba(sf, v,
+                                       src + p[2] * st->layer_stride +
+                                          p[1] * st->stride + p[0] * sbpp,
+                                       1);
+               for (int i = 0; i < 4; i++)
+                  c[i] += w * v[i];
+            }
+            memcpy(&row[4 * x], c, sizeof(c));
+         }
+         util_format_pack_rgba(df, dst + z * dt->layer_stride + y * dt->stride,
+                               row, dw);
+      }
+   }
+   free(row);
+   pipe_texture_unmap(pctx, st);
+   pipe_texture_unmap(pctx, dt);
+   return !!row;
+}
+
 static void
 sgx_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
@@ -1064,6 +1181,11 @@ sgx_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
               info->src.box.height, util_format_short_name(info->dst.format),
               info->dst.box.width, info->dst.box.height,
               sgx_resource(info->dst.resource)->texture);
+      return;
+   }
+   if ((info->src.box.depth != 1 || info->dst.box.depth != 1) &&
+       sgx_blit_cpu_box(pctx, info)) {
+      ctx->stats.blit_cpu++;
       return;
    }
    fprintf(stderr, "sgx: blit %s -> %s not supported yet\n",

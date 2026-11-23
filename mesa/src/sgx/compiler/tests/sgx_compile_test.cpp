@@ -988,6 +988,88 @@ TEST_F(sgx_compile_test, fragment_mediump_fmad16)
    EXPECT_NE(disasm().find("fmad16"), std::string::npos) << disasm();
 }
 
+/* normalize(v) of a mediump vector with f16: |v|^2 overflows F16 once |v|
+ * passes 256 (ioquake3's ES renderer drew far surfaces white), so the dot
+ * product and its rsq stay f32 (1 / |v| goes back to F16) */
+TEST_F(sgx_compile_test, fragment_mediump_normalize_dot_f32)
+{
+   start(MESA_SHADER_FRAGMENT);
+   nir_variable *a =
+      var(nir_var_shader_in, glsl_vec_type(3), "a", VARYING_SLOT_VAR0);
+   nir_variable *col = var(nir_var_shader_out, glsl_vec4_type(), "gl_FragColor",
+                           FRAG_RESULT_COLOR);
+   a->data.precision = col->data.precision = GLSL_PRECISION_MEDIUM;
+   nir_def *x = nir_load_var(&b, a);
+   /* (GLSL's normalize, as the front end lowers it) */
+   nir_def *n = nir_fmul(&b, x, nir_frsq(&b, nir_fdot3(&b, x, x)));
+   nir_store_var(&b, col,
+                 nir_vec4(&b, nir_channel(&b, n, 0), nir_channel(&b, n, 1),
+                          nir_channel(&b, n, 2), nir_imm_float(&b, 1.0)),
+                 0xf);
+
+   ASSERT_TRUE(compile(true)) << out.log;
+   expect_decodes();
+   unsigned rsq = 0, dot = 0;
+   nir_foreach_function_impl (impl, b.shader) {
+      nir_foreach_block (blk, impl) {
+         nir_foreach_instr (instr, blk) {
+            if (instr->type != nir_instr_type_alu)
+               continue;
+            nir_alu_instr *alu = nir_instr_as_alu(instr);
+            if (alu->op == nir_op_frsq) {
+               rsq++;
+               EXPECT_EQ(alu->def.bit_size, 32u);
+            } else if (alu->op == nir_op_fdot3) {
+               dot++;
+               EXPECT_EQ(alu->def.bit_size, 32u);
+            }
+         }
+      }
+   }
+   EXPECT_EQ(rsq, 1u);
+   EXPECT_EQ(dot, 1u);
+}
+
+/* the same in the 16-bit NIR Mesa's front end hands over (fp16 cap):
+ * rsq16(fdot3_16(v, v)) is rebuilt as the f32 root of an f32 dot product */
+TEST_F(sgx_compile_test, fragment_16bit_normalize_dot_f32)
+{
+   start(MESA_SHADER_FRAGMENT);
+   nir_variable *a =
+      var(nir_var_shader_in, glsl_vec_type(3), "a", VARYING_SLOT_VAR0);
+   nir_variable *col = var(nir_var_shader_out, glsl_vec4_type(), "gl_FragColor",
+                           FRAG_RESULT_COLOR);
+   a->data.precision = col->data.precision = GLSL_PRECISION_MEDIUM;
+   nir_def *x = nir_f2f16(&b, nir_load_var(&b, a));
+   nir_def *n = nir_fmul(&b, x, nir_frsq(&b, nir_fdot3(&b, x, x)));
+   nir_def *n32 = nir_f2f32(&b, n);
+   nir_store_var(&b, col,
+                 nir_vec4(&b, nir_channel(&b, n32, 0), nir_channel(&b, n32, 1),
+                          nir_channel(&b, n32, 2), nir_imm_float(&b, 1.0)),
+                 0xf);
+
+   ASSERT_TRUE(compile(true)) << out.log;
+   expect_decodes();
+   unsigned rsq = 0;
+   nir_foreach_function_impl (impl, b.shader) {
+      nir_foreach_block (blk, impl) {
+         nir_foreach_instr (instr, blk) {
+            if (instr->type != nir_instr_type_alu)
+               continue;
+            nir_alu_instr *alu = nir_instr_as_alu(instr);
+            if (alu->op != nir_op_frsq)
+               continue;
+            rsq++;
+            EXPECT_EQ(alu->def.bit_size, 32u);
+            nir_instr *src = nir_def_instr(alu->src[0].src.ssa);
+            ASSERT_EQ(src->type, nir_instr_type_alu);
+            EXPECT_EQ(nir_instr_as_alu(src)->def.bit_size, 32u);
+         }
+      }
+   }
+   EXPECT_EQ(rsq, 1u);
+}
+
 /* lowp: a colour from lowp uniforms only is computed in C10 (the colour
  * classes) */
 TEST_F(sgx_compile_test, fragment_lowp_colour_in_c10)

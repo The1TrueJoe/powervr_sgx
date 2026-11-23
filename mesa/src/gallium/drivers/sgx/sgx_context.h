@@ -153,11 +153,24 @@ struct sgx_pipe_shader {
    /* MRT: 1 + the colour buffer this variant draws into, its DATA output
     * made output 0 (remap_outputs); 0 a single buffer */
    uint8_t rt_target;
+   /* colour buffer 0 is sRGB (lower_srgb_output): 0 not, 1 the colour
+    * encoded, 2 blended first, in linear, with the tile's colour decoded (as
+    * rt_blend and rt_blend_color say; the compiler's rt_packed), the sop2
+    * epilogue left out.  reads_tile: it does read the tile (pass type) */
+   uint8_t rt_srgb;
+   bool reads_tile;
+   struct pipe_rt_blend_state rt_blend; /* colormask 0: the epilogue's */
+   float rt_blend_color[4];             /* 0 unless a factor reads it */
    /* units bound to an RGBA32 / RG32 texture, read a plane at a time (the
     * compiler's tex_r32x4 / tex_r32x2) */
    uint32_t r32x4, r32x2;
    /* shadow samples: each unit's compare function (lower_shadow) */
    uint8_t compare[PIPE_MAX_SAMPLERS];
+   /* fragment: the units an implicit-LOD sample reads dependently
+    * (dep_lod_units, the base shader's), and of those the ones bound to a
+    * mipmapped view and sampler: this variant's samples there take their
+    * LOD from the coordinate's derivatives (lower_dep_lod) */
+   uint32_t dep_lod_units, dep_mip;
    struct sgx_pipe_shader *variants_srgb[8];
    unsigned next_variant_srgb;
 };
@@ -191,6 +204,23 @@ struct sgx_blend {
 #define SGX_MAX_RTS 8
 
 struct vcache_chunk;
+
+/* a sampler state, with an id no other one gets (sgx_view's cache) */
+struct sgx_sampler {
+   struct pipe_sampler_state base;
+   uint32_t id;
+};
+
+/* a sampler view, with the texture state words (sgx_tex_words) the last
+ * draw that sampled it made: the same while the sampler and the texture's
+ * addresses are.  A draw made them again for every unit (Quake 3 switches
+ * textures between nearly all of its draws, among a few hundred views). */
+struct sgx_view {
+   struct pipe_sampler_view base;
+   uint32_t words_sampler, words_va, words_cube0_va;
+   bool words_valid;
+   uint32_t words[4];
+};
 
 struct sgx_context {
    struct pipe_context base;
@@ -235,7 +265,29 @@ struct sgx_context {
    unsigned rt_plane, recording_plane;
    bool rt_later_pass;
    /* MRT, a pass a colour buffer: the one this pass draws or clears into */
+   /* sgx_fs_for's and sgx_vs_for's last answers, good while the counter
+    * for what each reads holds: fs_gen (fragment views and samplers, the
+    * framebuffer, the blend state and colour), vs_gen (vertex views and
+    * samplers); both go up when any variant ends.  A draw looked them up
+    * again, texture key and all (Quake 3 and GoldSrc draw hundreds a frame;
+    * the vertex shader's rarely changes between them). */
+   uint32_t fs_gen, vs_gen;
+   struct {
+      uint32_t gen;
+      const void *fs;
+      unsigned rt_index, rt_plane;
+      void *out;
+   } fs_memo;
+   struct {
+      uint32_t gen;
+      const void *vs, *fs;
+      uint8_t vtx_fmt[16];
+      bool points;
+      void *out;
+   } vs_memo;
    unsigned rt_index;
+   /* one past the highest view bound to the fragment and vertex stages */
+   unsigned n_views, n_vs_views;
 
    struct pipe_framebuffer_state framebuffer;
    struct pipe_viewport_state viewport;
