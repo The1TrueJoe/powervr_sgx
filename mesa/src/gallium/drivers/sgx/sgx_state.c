@@ -1033,7 +1033,9 @@ sgx_blit_cpu_box(struct pipe_context *pctx, const struct pipe_blit_info *info)
    int sw = sb->width, sh = sb->height, sd = sb->depth, dw = db->width,
        dh = db->height, dd = db->depth;
 
-   if (info->mask != PIPE_MASK_RGBA && (info->mask & ~PIPE_MASK_RGBA))
+   /* every channel of a texel is written: a partial colour mask isn't
+    * honoured here, so such a blit is refused */
+   if (info->mask != PIPE_MASK_RGBA)
       return false;
    if (info->scissor_enable || info->render_condition_enable ||
        info->alpha_blend || info->num_window_rectangles || sw <= 0 ||
