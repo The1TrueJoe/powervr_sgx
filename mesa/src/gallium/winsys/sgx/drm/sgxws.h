@@ -32,6 +32,7 @@ struct sgxws_bo_impl; /* the winsys's side of a buffer */
 
 /* one device allocation, mapped */
 struct sgxws_bo {
+   bool read_only;             /* imported storage must not be written */
    uint32_t va;                /* GPU address */
    uint32_t *map;              /* CPU mapping */
    struct sgxws_bo_impl *impl; /* NULL: not allocated */

@@ -357,6 +357,7 @@ sgx_resource_from_handle(struct pipe_screen *pscreen,
       FREE(res);
       return NULL;
    }
+   res->base.read_only = res->bo.read_only;
    /* kmsro: a handle of it on the display device, for renderonly_get_handle */
    if (screen->ro)
       res->scanout = renderonly_create_gpu_import_for_resource(
@@ -977,6 +978,9 @@ sgx_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
    struct pipe_transfer *ptrans;
    uint8_t *base;
    uint32_t stride;
+
+   if (prsc->read_only && (usage & PIPE_MAP_WRITE))
+      return NULL;
 
    /* A render target the frame being recorded writes: the CPU sees it once
     * the render is done.  Everything else is either CPU memory or idle (the

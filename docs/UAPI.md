@@ -140,6 +140,34 @@ damage on the jobs that draw into it, usually a few KB. An entry for an object t
 an import (our own objects are write-combined, and a dma-buf of this device imports as the
 original object) is checked and flushes nothing.
 
+### Read-only external DMA-BUF imports
+
+The generic PRIME import helper maps attachments bidirectionally. An immutable
+video decoder may export an `O_RDONLY` DMA-BUF supporting only `DMA_TO_DEVICE`:
+the GPU samples its image and must not overwrite decoder references. External
+read-only imports therefore use a matching read-only DMA attachment and the
+existing MMU PTE `READONLY` protection (documented above). Their job cache
+ranges cannot request writes. The importer retains the exporter-provided vmap
+for cache maintenance, unmaps with the original DMA direction on retirement,
+and takes no writable userspace mapping. Writable imports and self-imports keep
+the generic PRIME path. No ioctl or VM_BIND flag is added.
+
+Source evidence: Linux `drm_gem_prime_import_dev` and `drm_prime_gem_destroy`
+use `DMA_BIDIRECTIONAL`; DMA-BUF access mode is in `dma_buf.file.f_mode`.
+Hardware evidence: on Cedarview Atom N2800, the cedar-video exporter rejects
+bidirectional DMA and all writable CPU mappings. Read-only import and
+retirement pass for 16x16 through 1920x1088. Imported 1920x1080 R8/GR88 planes
+sample bit-exactly in GLES2 and GL2.1; direct Wayland mpv runs with no decoder
+CPU downloads. Writable imports remain covered by the normal compositor path.
+
+
+Mesa records the import permission on the BO and Gallium resource. GL texture
+upload/copy updates reject immutable storage with `GL_INVALID_OPERATION`. Such
+storage makes a framebuffer attachment incomplete, so draw/clear report
+`GL_INVALID_FRAMEBUFFER_OPERATION` without submitting GPU writes. Driver write
+maps are refused as a second line of defense. Sampling and readback remain
+available.
+
 **Sync is explicit** (D6, M5): a job's fences are its `sync_ops`, and nothing is added to a
 shared object's reservation. Implicit sync with other drivers goes through the dma-buf:
 `DMA_BUF_IOCTL_EXPORT_SYNC_FILE` for what a job must wait for, and the job's out-fence
@@ -1159,23 +1187,3 @@ Facts the design needs that `docs/` doesn't have.
 | G25 | Cedarview: `EUR_CR_CORE_REVISION` for 10131, errata, heap layout, microkernel differences; documented errata for 1014 | quirks, M4 | STATE.md, NOTES.md |
 | G26 | Closed by revision 3: Mesa fills the header's structs and needs no generator. Was: stream tooling in Mesa (from D2). csbgen parses `<stream>` but emits nothing for it; Rogue writes its streams by hand in the XML's order. Our writer comes from `gen_stream.py`, and the XML carries validation attributes csbgen ignores. Whether Mesa takes `gen_stream.py` beside csbgen (or a `<stream>` emitter in csbgen), and the attributes in its XML, is the Mesa maintainers' call. The kernel's tables are generated from that file and committed; kernel reviewers may want the source in the kernel tree instead | M3 winsys, M5 | `AGENTS.md` 3.7, DRIVER-UPSTREAM.md |
 | G27 | Cross-field rules (from D2). Rules that join fields (section 3.4's depth and stencil requirements and ZLS offset limit, section 3.5's tile order) are hand-written in the kernel's per-command check, not generated. They are the one part of the validation with two copies, section 3 and `pvrsgx_cmd_checks.c`, so a rule added to one can be missed in the other | validators | UAPI.md 3, `uapi/cmd/` |
-
-### Read-only external DMA-BUF imports
-
-The generic PRIME import helper maps attachments bidirectionally. An immutable
-video decoder may export an `O_RDONLY` DMA-BUF supporting only `DMA_TO_DEVICE`:
-the GPU samples its image and must not overwrite decoder references. External
-read-only imports therefore use a matching read-only DMA attachment and the
-existing MMU PTE `READONLY` protection (documented above). Their job cache
-ranges cannot request writes. The importer retains the exporter-provided vmap
-for cache maintenance, unmaps with the original DMA direction on retirement,
-and takes no writable userspace mapping. Writable imports and self-imports keep
-the generic PRIME path. No ioctl or VM_BIND flag is added.
-
-Source evidence: Linux `drm_gem_prime_import_dev` and `drm_prime_gem_destroy`
-use `DMA_BIDIRECTIONAL`; DMA-BUF access mode is in `dma_buf.file.f_mode`.
-Hardware evidence: on Cedarview Atom N2800, the cedar-video exporter rejects
-bidirectional DMA and all writable CPU mappings. Read-only import and
-retirement pass for 16x16 through 1920x1088. Imported 1920x1080 R8/GR88 planes
-sample bit-exactly in GLES2 and GL2.1; direct Wayland mpv runs with no decoder
-CPU downloads. Writable imports remain covered by the normal compositor path.

@@ -1,0 +1,92 @@
+From: Viktor Semykin <thesame.ml@gmail.com>
+Subject: [PATCH] mesa: reject GL writes to read-only imported resources
+
+Carry immutable-import metadata from Gallium into GL validation. Reject texture
+upload/copy updates with INVALID_OPERATION and make read-only attachments
+incomplete, so draw and clear report INVALID_FRAMEBUFFER_OPERATION.
+
+Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
+
+diff --git a/src/gallium/include/pipe/p_state.h b/src/gallium/include/pipe/p_state.h
+--- a/src/gallium/include/pipe/p_state.h
++++ b/src/gallium/include/pipe/p_state.h
+@@ -584,6 +584,8 @@
+ 
+    unsigned compression_rate:4; /**< Fixed-rate compresion bitrate if any */
+ 
++   /* Immutable external storage: sampling/readback only. Set by the importer. */
++   unsigned read_only:1;
+    enum pipe_resource_usage usage:4;
+    uint32_t bind;            /**< bitmask of PIPE_BIND_x */
+    uint32_t flags;           /**< bitmask of PIPE_RESOURCE_FLAG_x */
+diff --git a/src/mesa/main/teximage.c b/src/mesa/main/teximage.c
+--- a/src/mesa/main/teximage.c
++++ b/src/mesa/main/teximage.c
+@@ -2238,6 +2238,11 @@
+                         GLenum format, GLenum type, const GLvoid *pixels,
+                         const char *callerName)
+ {
++   if (texObj && texObj->pt && texObj->pt->read_only) {
++      _mesa_error(ctx, GL_INVALID_OPERATION, "write to read-only imported texture");
++      return GL_TRUE;
++   }
++
+    struct gl_texture_image *texImage;
+    GLenum err;
+ 
+@@ -2662,6 +2667,11 @@
+                             GLint width, GLint height, const char *caller)
+ {
+    assert(texObj);
++
++   if (texObj && texObj->pt && texObj->pt->read_only) {
++      _mesa_error(ctx, GL_INVALID_OPERATION, "write to read-only imported texture");
++      return GL_TRUE;
++   }
+ 
+    struct gl_texture_image *texImage;
+ 
+diff --git a/src/mesa/main/fbobject.c b/src/mesa/main/fbobject.c
+--- a/src/mesa/main/fbobject.c
++++ b/src/mesa/main/fbobject.c
+@@ -1178,6 +1178,13 @@
+     */
+    assert(bindings == PIPE_BIND_RENDER_TARGET ||
+           bindings == PIPE_BIND_DEPTH_STENCIL);
++
++   if ((att->Renderbuffer && att->Renderbuffer->texture &&
++        att->Renderbuffer->texture->read_only) ||
++       (stObj && stObj->pt && stObj->pt->read_only)) {
++      fbo_invalid("Read-only imported storage cannot be a render target");
++      return GL_FALSE;
++   }
+ 
+    /* Only validate texture attachments for now, since
+     * st_renderbuffer_alloc_storage makes sure that
+diff --git a/src/mesa/state_tracker/st_cb_texture.c b/src/mesa/state_tracker/st_cb_texture.c
+--- a/src/mesa/state_tracker/st_cb_texture.c
++++ b/src/mesa/state_tracker/st_cb_texture.c
+@@ -2146,6 +2146,11 @@
+                GLenum format, GLenum type, const void *pixels,
+                const struct gl_pixelstore_attrib *unpack)
+ {
++   if (texImage->pt && texImage->pt->read_only) {
++      _mesa_error(ctx, GL_INVALID_OPERATION, "write to read-only imported texture");
++      return;
++   }
++
+    struct st_context *st = st_context(ctx);
+    struct gl_texture_object *stObj = texImage->TexObject;
+    struct pipe_context *pipe = st->pipe;
+@@ -3016,6 +3021,11 @@
+ {
+    struct gl_texture_image *stImage = texImage;
+    struct gl_texture_object *stObj = texImage->TexObject;
++   if (texImage->pt && texImage->pt->read_only) {
++      _mesa_error(ctx, GL_INVALID_OPERATION, "write to read-only imported texture");
++      return;
++   }
++
+    struct st_context *st = st_context(ctx);
+    struct pipe_context *pipe = st->pipe;
+    struct pipe_screen *screen = st->screen;
