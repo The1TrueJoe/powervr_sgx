@@ -1,6 +1,6 @@
-From 73a418df3a6292102d5e8327eb44db7eb7983513 Mon Sep 17 00:00:00 2001
+From a15440b284da66294f286caed0d23ee1cf112da7 Mon Sep 17 00:00:00 2001
 From: Viktor Semykin <thesame.ml@gmail.com>
-Date: Mon, 23 Nov 2026 13:13:31 -0300
+Date: Mon, 23 Nov 2026 13:27:47 -0300
 Subject: [PATCH] drm/gma500: add opt-in Cedarview MSVDX H.264 decoding
 
 Host MSVDX beside its existing PCI/display owner. Admit bounded H.264
@@ -23,7 +23,7 @@ Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
  drivers/gpu/drm/gma500/Kconfig                |   10 +
  drivers/gpu/drm/gma500/Makefile               |    2 +
  drivers/gpu/drm/gma500/cdv_h264_template.h    |  333 ++
- drivers/gpu/drm/gma500/cdv_msvdx.c            | 3526 +++++++++++++++++
+ drivers/gpu/drm/gma500/cdv_msvdx.c            | 3494 +++++++++++++++++
  drivers/gpu/drm/gma500/cdv_msvdx.h            |   21 +
  drivers/gpu/drm/gma500/cedar-msvdx-dma.h      |   51 +
  drivers/gpu/drm/gma500/cedar-msvdx.h          |  381 ++
@@ -32,7 +32,7 @@ Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
  .../drm/gma500/msvdx-template.json.license    |    1 +
  drivers/gpu/drm/gma500/power.c                |    7 +
  drivers/gpu/drm/gma500/psb_drv.c              |    8 +
- 13 files changed, 5021 insertions(+)
+ 13 files changed, 4989 insertions(+)
  create mode 100644 Documentation/gpu/gma500-msvdx.rst
  create mode 100644 drivers/gpu/drm/gma500/cdv_h264_template.h
  create mode 100644 drivers/gpu/drm/gma500/cdv_msvdx.c
@@ -538,10 +538,10 @@ index 0000000000000000000000000000000000000000..10e1163e35d59f4984098e1fed944a59
 +};
 diff --git a/drivers/gpu/drm/gma500/cdv_msvdx.c b/drivers/gpu/drm/gma500/cdv_msvdx.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..389b00057cca2f3ae876ee7ff78cf2fe08dc3551
+index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54fdceb22e
 --- /dev/null
 +++ b/drivers/gpu/drm/gma500/cdv_msvdx.c
-@@ -0,0 +1,3526 @@
+@@ -0,0 +1,3494 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Cedarview MSVDX H.264 decoder, hosted by the existing PCI/display owner.
@@ -2664,10 +2664,7 @@ index 0000000000000000000000000000000000000000..389b00057cca2f3ae876ee7ff78cf2fe
 +	struct cdv_reference_state state;
 +	u32 frame, displays = 0;
 +
-+	if (job->version >= 6)
-+		state = *previous_state;
-+	else
-+		cdv_reference_reset(&state);
++	state = *previous_state;
 +
 +	for (frame = 0; frame < job->frames; ++frame) {
 +		const u8 *d = job->packet + 32 + frame * 64;
@@ -2692,14 +2689,12 @@ index 0000000000000000000000000000000000000000..389b00057cca2f3ae876ee7ff78cf2fe
 +		    job->h264_qps[frame] > 51 || job->h264_cabac_init[frame] > 2 ||
 +		    job->h264_direct[frame] > 1 || p->display >= job->frames ||
 +		    (displays & BIT(p->display)) ||
-+		    (job->version == 5 ?
-+			     poc != p->display * 2 :
-+			     (poc > (job->version == 14 ? 0x7ffffffeU : 65534) || (poc & 1))) ||
++		    (poc > (job->version == 14 ? 0x7ffffffeU : 65534) || (poc & 1)) ||
 +		    p->output > (job->version >= 12 ? 4 : 2) ||
 +		    (p->type != 1 && p->type != 2 && p->type != 5 &&
 +		     !(job->version == 14 && p->type == 6)))
 +			return -EINVAL;
-+		for (index = job->version >= 6 ? 52 : 48; index < 64; index += 4)
++		for (index = 52; index < 64; index += 4)
 +			if (get_unaligned_le32(d + index))
 +				return -EINVAL;
 +		if (job->version >= 12) {
@@ -2885,29 +2880,11 @@ index 0000000000000000000000000000000000000000..389b00057cca2f3ae876ee7ff78cf2fe
 +		ret = -EMSGSIZE;
 +		goto fail;
 +	}
-+	if (CDV_CODEC_MODE == 1) {
-+		bool bidirectional =
-+			CDV_H264_BIDIRECTIONAL &&
-+			(job->version == 5 ||
-+			 ((job->version == 6 ||
-+			   (CDV_H264_RUNTIME_TEMPLATE &&
-+			    (job->version == 7 || (CDV_H264_EXPLICIT_P && job->version == 8) ||
-+			     (CDV_H264_P_REF2 && job->version == 9) ||
-+			     (CDV_H264_STABLE_REFS && job->version == 11) ||
-+			     (CDV_H264_DPB4 && (job->version == 12 || job->version == 13 ||
-+						job->version == 14)))))));
-+
-+		if (job->version != 3 && !(CDV_H264_PREDICTED && job->version == 4) &&
-+		    !bidirectional)
-+			goto fail;
-+	} else if (job->version != 1 && job->version != 2) {
-+		goto fail;
-+	}
 +	if (memcmp(job->packet, "CDV2", 4) || get_unaligned_le32(job->packet + 28) != count - 32)
 +		goto fail;
 +	job->width = get_unaligned_le32(job->packet + 8);
 +	job->height = get_unaligned_le32(job->packet + 12);
-+	if (job->version >= 7) {
++	{
 +		u32 words[16];
 +
 +		static_assert(sizeof(job->config) == sizeof(words));
@@ -3048,21 +3025,17 @@ index 0000000000000000000000000000000000000000..389b00057cca2f3ae876ee7ff78cf2fe
 +			     job->weights.chroma_denom != job->weights1.chroma_denom))
 +				goto fail;
 +		}
-+	} else if (job->width != CDV_H264_WIDTH || job->height != CDV_H264_HEIGHT ||
-+		   session->config_valid) {
-+		goto fail;
 +	}
 +	job->frame_bytes = job->width * job->height * 3 / 2;
 +	slices = get_unaligned_le32(job->packet + 16);
 +	job->frames = get_unaligned_le32(job->packet + 20);
 +	job->flags = get_unaligned_le32(job->packet + 24);
 +	if (slices != CDV_H264_SLICE_COUNT || !job->frames || job->frames > CDV_BATCH_FRAMES ||
-+	    (job->flags & ~1U) || (job->version >= 6 && job->frames != 1))
++	    (job->flags & ~1U) || job->frames != 1)
 +		goto fail;
 +	slots = slices * job->frames;
-+	lengths_offset = 32 + (job->version != 1 ? job->frames * (job->version >= 5 ? 64 : 32) : 0);
-+	if (job->version >= 7)
-+		lengths_offset += 64;
++	lengths_offset = 32 + job->frames * 64;
++	lengths_offset += 64;
 +	if (job->version >= 8 && job->version < 12)
 +		lengths_offset += 64;
 +	if (job->version == 12 || job->version == 13)
@@ -3080,7 +3053,7 @@ index 0000000000000000000000000000000000000000..389b00057cca2f3ae876ee7ff78cf2fe
 +		const u8 *slice;
 +		u32 bytes = get_unaligned_le32(job->packet + lengths_offset + i * 4);
 +
-+		if (bytes < (job->version >= 3 ? 2 : 6) ||
++		if (bytes < 2 ||
 +		    bytes > (job->version == 14 ?
 +				     CEDAR_H264_MAX_SLICE_BYTES :
 +				     min_t(u32, 65535, CDV_H264_BITSTREAM_PAGES * PAGE_SIZE)) ||
@@ -3090,8 +3063,8 @@ index 0000000000000000000000000000000000000000..389b00057cca2f3ae876ee7ff78cf2fe
 +		/* One complete slice per macroblock row, no extra data.
 +		 * Header and picture syntax are further checked by the packer.
 +		 */
-+		if (job->version >= 3) {
-+			u32 type = job->version == 3 ? 5 : job->pictures[i].type;
++		{
++			u32 type = job->pictures[i].type;
 +			u32 kind = type == 5 ? 5 : 1;
 +
 +			if ((slice[0] & 0x9f) != kind ||
@@ -3101,11 +3074,6 @@ index 0000000000000000000000000000000000000000..389b00057cca2f3ae876ee7ff78cf2fe
 +								      job->dpb.reserved[1])) :
 +				     (type == 2 ? (slice[0] & 0x60) : !(slice[0] & 0x60))) ||
 +			    job->h264_offsets[i] >= bytes * 8)
-+				goto fail;
-+		} else {
-+			if (slice[0] || slice[1] || slice[2] != 1 || slice[3] != i % slices + 1 ||
-+			    (job->version == 1 ? (slice[4] & 0xfc) != 0x10 :
-+						 (!(slice[4] >> 3) || (slice[4] & 4))))
 +				goto fail;
 +		}
 +		job->offsets[i] = offset;
