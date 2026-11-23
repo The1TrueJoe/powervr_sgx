@@ -4578,8 +4578,11 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
                                             ? nir_tex_src_lod
                                             : nir_tex_src_bias);
    int pi = nir_tex_instr_src_index(tex, nir_tex_src_projector);
+   /* gradients: a 2D sample's (sgx_txd_lowered) */
+   bool grad = tex->op == nir_texop_txd;
    if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
-        tex->op != nir_texop_txl) ||
+        tex->op != nir_texop_txl && !grad) ||
+       (grad && (vertex || tex->sampler_dim != GLSL_SAMPLER_DIM_2D)) ||
        (vertex && tex->op == nir_texop_txb) || ci < 0) {
       sgx_fail(c, "texture op %d", tex->op);
       return;
@@ -4645,7 +4648,7 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
          sgx_fail(c, "projected read of a varying that isn't iterated");
          return;
       }
-   } else if (!vertex && bi < 0 && pi < 0 && !planar) {
+   } else if (!vertex && bi < 0 && pi < 0 && !planar && !grad) {
       /* (a whole varying, or its first components; directly or through a
        * mov that takes its first components in order) */
       int pa = -1;
@@ -4805,6 +4808,29 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
          i->op[2] = const_f32(src_comp(c, &lb, 0));
          i->op[2].step = 0;
          i->nops = 3;
+      } else if (grad) {
+         /* LOD mode 3: four registers from src2, ds/dx, ds/dy, dt/dx,
+          * dt/dy (hardware: hwt_grad, the LOD of each pair's length; which
+          * of x and y is first doesn't show in it) */
+         int xi = nir_tex_instr_src_index(tex, nir_tex_src_ddx),
+             yi = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
+         nir_legacy_src lx = nir_legacy_chase_src(&tex->src[xi].src),
+                        ly = nir_legacy_chase_src(&tex->src[yi].src);
+         unsigned g = new_vreg(c, 4);
+         struct sgx_ref gd[4], gs[2][4];
+         unsigned form = SGX_OP_MOV;
+         for (unsigned k = 0; k < 4; k++) {
+            gd[k] = vref(g, k);
+            gs[0][k] = const_f32(src_comp(c, k & 1 ? &ly : &lx, k >> 1));
+            gs[1][k] = cref(48);
+            if (gs[0][k].h16)
+               form = SGX_OP_FSUBFLR; /* F16 beside f32: widen */
+         }
+         emit_runs(c, form, 0xf, gd, form == SGX_OP_MOV ? 1 : 2, gs, &NOF, 0);
+         s->lod = 3;
+         i->op[2] = vref(g, 0);
+         i->op[2].step = 0;
+         i->nops = 3;
       } else if (vertex) {
          /* no derivatives: the base level (ISA.md, vertex texture fetch) */
          s->lod = 2;
@@ -4817,8 +4843,9 @@ emit_tex(struct sgx_ctx *c, nir_tex_instr *tex)
    if (s->dependent && i->nops == 3 && i->op[2].file == SGX_F_K &&
        hw_const(i->op[2].n) >= 0)
       i->op[2] = cref(hw_const(i->op[2].n));
-   /* (the bias is an f32 source: a mediump one widens) */
-   if (s->dependent && i->nops == 3 &&
+   /* (the bias is an f32 source: a mediump one widens; gradients are four
+    * registers of their own already) */
+   if (s->dependent && i->nops == 3 && s->lod != 3 &&
        (i->op[2].h16 || !slot_ok(SGX_OP_SMP, 3, &i->op[2]))) {
       struct sgx_ref m = materialize(c, i, i->op[2], 1);
       i->op[2] = m;
@@ -6118,6 +6145,10 @@ mark_helpers(struct sgx_ctx *c)
          any = true;
       } else if (i->kind == SGX_INS_SAMPLE && i->smp->dependent) {
          need_ref(nd, &i->op[1], 1, true);
+         /* and a gradient sample's gradients: the quad's first instance's
+          * may be read */
+         if (i->smp->lod == 3)
+            need_ref(nd, &i->op[2], 1, true);
          any = true;
       }
    }
@@ -6180,7 +6211,9 @@ split_vregs(struct sgx_ctx *c)
    list_for_each_entry (struct sgx_ins, i, &c->ins, link)
       for (unsigned k = 0; k < i->nops; k++)
          if (i->op[k].file == SGX_F_V && i->op[k].n < nv &&
-             (i->op[k].h16 || (i->op[k].step && i->rpt > 1)))
+             (i->op[k].h16 || (i->op[k].step && i->rpt > 1) ||
+              /* (a gradient sample's four, read from its src2 on) */
+              (i->kind == SGX_INS_SAMPLE && k == 2 && i->smp->lod == 3)))
             run[i->op[k].n] = true;
    int *split = malloc(nv * 16 * sizeof(int));
    for (unsigned v = 0; v < nv * 16; v++)
@@ -6585,6 +6618,9 @@ place_in_pa(struct sgx_ctx *c, const BITSET_WORD *six, unsigned nins,
          unsigned n = r->step && i->rpt > 1 ? i->rpt : 1;
          if (i->kind == SGX_INS_SAMPLE && k < i->ndst && i->smp->f16_return)
             n = 2;
+         /* (a gradient sample reads four from its src2) */
+         if (i->kind == SGX_INS_SAMPLE && k == 2 && i->smp->lod == 3)
+            n = 4;
          unsigned first = half ? r->comp / 2 : r->comp;
          bool early = (i->rpt > 1 && !is_fdp(i->form)) ||
                       i->kind == SGX_INS_SAMPLE ||

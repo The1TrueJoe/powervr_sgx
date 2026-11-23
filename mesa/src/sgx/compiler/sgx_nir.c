@@ -2359,11 +2359,22 @@ r32_instr(nir_builder *b, nir_tex_instr *tex, void *data)
    return true;
 }
 
+/* A gradient sample smp takes as it is (LOD mode 3, the gradients in four
+ * registers, ISA.md "LOD mode"): a 2D one; the others become an explicit
+ * LOD (nir_lower_tex's lower_gradient) */
+bool
+sgx_txd_lowered(const nir_tex_instr *tex, const void *data)
+{
+   return tex->sampler_dim != GLSL_SAMPLER_DIM_2D || tex->is_array ||
+          tex->is_shadow;
+}
+
 bool
 sgx_lower_tex(nir_shader *s, const struct sgx_compile_options *opts)
 {
    nir_lower_tex_options to = {
-      .lower_txd = true,
+      .lower_txd_cb = sgx_txd_lowered,
+      .lower_txd_clamp = true,
       .lower_txf_offset = true,
       .lower_rect_offset = true,
       .lower_rect = true,

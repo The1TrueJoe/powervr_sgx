@@ -129,7 +129,7 @@ struct sgx_sample {
    int coord_pa; /* ... and its plain iteration, -1 none */
    /* where the PDS leaves the raw texel (RGBA8, unpacked in place) */
    unsigned pa;
-   unsigned lod; /* dependent: 0 none, 1 bias, 2 replace */
+   unsigned lod; /* dependent: 0 none, 1 bias, 2 replace, 3 gradients */
    /* unpacked to F16 (two channels per register), else left as RGBA8 */
    bool f16;
    bool f16coord; /* dependent: F16 coordinates, two per register (smp .f16) */

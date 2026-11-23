@@ -166,6 +166,11 @@ struct sgx_pipe_shader {
    uint32_t r32x4, r32x2;
    /* shadow samples: each unit's compare function (lower_shadow) */
    uint8_t compare[PIPE_MAX_SAMPLERS];
+   /* fragment: the units an implicit-LOD sample reads dependently
+    * (dep_lod_units, the base shader's), and of those the ones bound to a
+    * mipmapped view and sampler: this variant's samples there take their
+    * LOD from the coordinate's derivatives (lower_dep_lod) */
+   uint32_t dep_lod_units, dep_mip;
    struct sgx_pipe_shader *variants_srgb[8];
    unsigned next_variant_srgb;
 };

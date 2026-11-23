@@ -1318,12 +1318,151 @@ fill_clip_dist0(nir_shader *nir)
    nir->info.outputs_written |= BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST0);
 }
 
+/* A non-dependent sample (the PDS samples it, the compiler's
+ * sample_only_load): a plain one whose coordinate is a varying as loaded,
+ * every use of that load a sample of the same kind.  Otherwise the program
+ * samples it (dependent), the TPU taking its LOD from the quad. */
+static bool
+pds_sample(nir_tex_instr *tex)
+{
+   int ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+
+   if (tex->op != nir_texop_tex || tex->is_array || ci < 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_projector) >= 0)
+      return false;
+   nir_instr *pi = nir_def_instr(tex->src[ci].src.ssa);
+   if (pi->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr *ld = nir_instr_as_intrinsic(pi);
+   /* (before nir_lower_io, the compiler's, a varying is a load_deref of an
+    * input variable) */
+   bool input = ld->intrinsic == nir_intrinsic_load_input ||
+                ld->intrinsic == nir_intrinsic_load_interpolated_input;
+   if (ld->intrinsic == nir_intrinsic_load_deref) {
+      nir_deref_instr *d = nir_src_as_deref(ld->src[0]);
+      input = d && d->deref_type == nir_deref_type_var &&
+              d->var->data.mode == nir_var_shader_in;
+   }
+   if (!input || ld->def.num_components != tex->coord_components)
+      return false;
+   nir_foreach_use_including_if (u, &ld->def) {
+      if (nir_src_is_if(u))
+         return false;
+      nir_instr *ui = nir_src_use_instr(u);
+      if (ui->type != nir_instr_type_tex)
+         return false;
+      nir_tex_instr *t = nir_instr_as_tex(ui);
+      int tci = nir_tex_instr_src_index(t, nir_tex_src_coord);
+      if (t->op != nir_texop_tex || tci < 0 || u != &t->src[tci].src ||
+          nir_tex_instr_src_index(t, nir_tex_src_bias) >= 0 ||
+          nir_tex_instr_src_index(t, nir_tex_src_projector) >= 0 ||
+          t->coord_components != ld->def.num_components)
+         return false;
+   }
+   return true;
+}
+
+/* the units a sample may read: its texture_index, or before the samplers
+ * are lowered its variable's binding (an array of them indexed by a value:
+ * all of its units) */
+static uint32_t
+tex_units(nir_tex_instr *tex)
+{
+   int d = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+
+   if (d < 0)
+      return tex->texture_index < 32 ? 1u << tex->texture_index : 0;
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[d].src);
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   if (!var)
+      return ~0u;
+   unsigned first = var->data.binding, n = 1;
+   if (deref->deref_type == nir_deref_type_array) {
+      if (nir_src_is_const(deref->arr.index))
+         first += nir_src_as_uint(deref->arr.index);
+      else
+         n = MAX2(glsl_get_aoa_size(var->type), 1);
+   }
+   return first < 32 ? BITFIELD_RANGE(first, MIN2(n, 32 - first)) : 0;
+}
+
+/* an implicit-LOD 2D sample the program makes itself */
+static bool
+dep_lod_sample(nir_tex_instr *tex)
+{
+   return (tex->op == nir_texop_tex || tex->op == nir_texop_txb) &&
+          tex->sampler_dim == GLSL_SAMPLER_DIM_2D &&
+          nir_tex_instr_src_index(tex, nir_tex_src_coord) >= 0 &&
+          nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0 &&
+          nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) < 0 &&
+          !pds_sample(tex);
+}
+
+/* the units a fragment shader's implicit-LOD dependent samples read */
+static uint32_t
+dep_lod_units(nir_shader *nir)
+{
+   uint32_t units = 0;
+
+   if (nir->info.stage != MESA_SHADER_FRAGMENT)
+      return 0;
+   nir_foreach_function_impl (impl, nir) {
+      nir_foreach_block (b, impl) {
+         nir_foreach_instr (instr, b) {
+            if (instr->type == nir_instr_type_tex &&
+                dep_lod_sample(nir_instr_as_tex(instr)))
+               units |= tex_units(nir_instr_as_tex(instr));
+         }
+      }
+   }
+   return units;
+}
+
+/* An implicit-LOD dependent sample of a mipmapped texture takes the wrong
+ * LOD in a quad its primitive covers only in part: the TPU seems to take it
+ * from the covered pixels' coordinates alone (measured: a texture2D(s,
+ * uv * one) against texture2D(s, uv), NEAREST_MIPMAP_NEAREST, differs in
+ * the 128 pixels of the quads on a quad's diagonal, and nowhere else; the
+ * helpers hold the coordinate, dFdx of it is the same everywhere).  With
+ * the gradients from fdsx / fdsy (coarse: every pixel of the quad gets the
+ * same) it matches the PDS sample: the sample becomes a txd, which smp
+ * takes as it is (LOD mode 3, hwt_grad).  A bias scales the
+ * gradients by 2^bias.  Not in divergent flow, where derivatives are
+ * undefined; only on the units in data (dep_mip). */
+static bool
+lower_dep_lod(nir_builder *b, nir_tex_instr *tex, void *data)
+{
+   uint32_t units = *(const uint32_t *)data;
+
+   if (!dep_lod_sample(tex) || !(units & tex_units(tex)) ||
+       tex->instr.block->divergent)
+      return false;
+   b->cursor = nir_before_instr(&tex->instr);
+   int ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   nir_def *coord = nir_trim_vector(b, tex->src[ci].src.ssa, 2);
+   nir_def *dx = nir_ddx_coarse(b, coord), *dy = nir_ddy_coarse(b, coord);
+   int bi = nir_tex_instr_src_index(tex, nir_tex_src_bias);
+
+   if (bi >= 0) {
+      nir_def *s = nir_fexp2(b, nir_f2f32(b, tex->src[bi].src.ssa));
+
+      dx = nir_fmul(b, dx, s);
+      dy = nir_fmul(b, dy, s);
+      nir_tex_instr_remove_src(tex, bi);
+   }
+   tex->op = nir_texop_txd;
+   nir_tex_instr_add_src(tex, nir_tex_src_ddx, dx);
+   nir_tex_instr_add_src(tex, nir_tex_src_ddy, dy);
+   return true;
+}
+
 static bool
 compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
                nir_shader *orig, const struct sgx_varyings *fs_vary,
                unsigned srgb, uint32_t srgb_filter, const uint16_t *swz,
                uint32_t not_bgra, const uint8_t *vtx_fmt, bool points,
-               uint32_t depth, const uint8_t *compare)
+               uint32_t depth, const uint8_t *compare, uint32_t dep_mip)
 {
    struct sgx_screen *screen = sgx_screen(ctx->base.screen);
    nir_shader *nir = nir_shader_clone(NULL, orig);
@@ -1428,6 +1567,17 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_tex_3d,
                   nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_lower_tex, &tex);
+   }
+   if (dep_mip && !vertex) {
+      nir_lower_tex_options txd = {.lower_txd_cb = sgx_txd_lowered,
+                                   .lower_txd_clamp = true};
+
+      nir_divergence_analysis(nir);
+      NIR_PASS(_, nir, nir_shader_tex_pass, lower_dep_lod,
+               nir_metadata_control_flow, &dep_mip);
+      /* (sgx_lower_tex lowers the others with native integers) */
+      if (!opts.native_integers)
+         NIR_PASS(_, nir, nir_lower_tex, &txd);
    }
    /* textureGrad, the Offset variants and texelFetch as smp can do them;
     * the sizes they ask for are lower_txs's */
@@ -1985,8 +2135,9 @@ sgx_create_shader_state(struct pipe_context *pctx,
           (nir->info.outputs_written &
            BITFIELD64_RANGE(FRAG_RESULT_DATA1, 7)))
          so->rt_target = 1;
+      so->dep_lod_units = dep_lod_units(nir);
       bool ok = compile_shader(ctx, so, nir, NULL, 0, 0, NULL, 0, NULL, false,
-                               0, NULL);
+                               0, NULL, 0);
 
       ctx->stats.compile_ns += os_time_get_nano() - t;
       if (ok)
@@ -2087,11 +2238,14 @@ struct tex_key {
    uint32_t not_bgra, depth;
    uint32_t r32x4, r32x2;
    uint8_t compare[PIPE_MAX_SAMPLERS];
+   uint32_t dep_mip;
 };
 
-/* false when every unit reads as a variant-free program does */
+/* false when every unit reads as a variant-free program does; dep_lod the
+ * units an implicit-LOD dependent sample reads (dep_lod_units) */
 static bool
-tex_key_of(const nir_shader *nir, struct pipe_sampler_view *const *views,
+tex_key_of(const nir_shader *nir, uint32_t dep_lod,
+           struct pipe_sampler_view *const *views,
            struct pipe_sampler_state *const *samplers, struct tex_key *k)
 {
    bool any_swz = false;
@@ -2103,6 +2257,11 @@ tex_key_of(const nir_shader *nir, struct pipe_sampler_view *const *views,
 
       if (!v)
          continue;
+      /* mipmapped: lower_dep_lod's units */
+      if ((dep_lod >> unit & 1) && samplers[unit] &&
+          samplers[unit]->min_mip_filter != PIPE_TEX_MIPFILTER_NONE &&
+          v->u.tex.last_level > v->u.tex.first_level)
+         k->dep_mip |= 1u << unit;
       if (util_format_is_srgb(v->format)) {
          const struct pipe_sampler_state *ss = samplers[unit];
 
@@ -2174,7 +2333,8 @@ tex_key_of(const nir_shader *nir, struct pipe_sampler_view *const *views,
       }
    }
    /* (depth alone, as before: a depth unit is not B, G, R, A either) */
-   return k->srgb || any_swz || k->not_bgra || k->r32x4 || k->r32x2;
+   return k->srgb || any_swz || k->not_bgra || k->r32x4 || k->r32x2 ||
+          k->dep_mip;
 }
 
 static bool
@@ -2184,7 +2344,7 @@ tex_key_is(const struct sgx_pipe_shader *v, const struct tex_key *k)
           v->not_bgra == k->not_bgra && v->depth == k->depth &&
           v->r32x4 == k->r32x4 && v->r32x2 == k->r32x2 &&
           !memcmp(v->compare, k->compare, sizeof(k->compare)) &&
-          !memcmp(v->swz, k->swz, sizeof(k->swz));
+          !memcmp(v->swz, k->swz, sizeof(k->swz)) && v->dep_mip == k->dep_mip;
 }
 
 static void
@@ -2198,6 +2358,7 @@ tex_key_set(struct sgx_pipe_shader *v, const struct tex_key *k)
    v->r32x4 = k->r32x4;
    v->r32x2 = k->r32x2;
    memcpy(v->compare, k->compare, sizeof(k->compare));
+   v->dep_mip = k->dep_mip;
 }
 
 /* vs_for: the vertex shader for fs's sets (NULL: its own), these input
@@ -2213,7 +2374,7 @@ sgx_vs_for(struct sgx_context *ctx, struct sgx_pipe_shader *vs,
    struct sgx_pipe_shader **slot;
    struct tex_key k;
    bool tex =
-      vs->nir && tex_key_of(vs->nir, ctx->vs_views, ctx->vs_samplers, &k);
+      vs->nir && tex_key_of(vs->nir, 0, ctx->vs_views, ctx->vs_samplers, &k);
 
    if (!vtx_fmt)
       vtx_fmt = f32x4;
@@ -2245,7 +2406,7 @@ sgx_vs_for(struct sgx_context *ctx, struct sgx_pipe_shader *vs,
    tex_key_set(*slot, &k);
    if (!compile_shader(ctx, *slot, vs->nir, fs ? fs->vary : NULL, k.srgb,
                        k.srgb_filter, k.swz, k.not_bgra, vtx_fmt, points,
-                       k.depth, k.compare) ||
+                       k.depth, k.compare, 0) ||
        !(*slot)->prog.code) {
       FREE((*slot)->vary);
       FREE(*slot);
@@ -2322,8 +2483,9 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
          }
       }
    }
-   if (!tex_key_of(fs->nir, ctx->views, ctx->samplers, &k) && !rt_int &&
-       !rt_target && !rt_srgb)
+   if (!tex_key_of(fs->nir, fs->dep_lod_units, ctx->views, ctx->samplers,
+                   &k) &&
+       !rt_int && !rt_target && !rt_srgb)
       return fs;
    for (unsigned i = 0; i < ARRAY_SIZE(fs->variants_srgb); i++) {
       if (fs->variants_srgb[i] && tex_key_is(fs->variants_srgb[i], &k) &&
@@ -2350,8 +2512,12 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
    (*slot)->rt_srgb = rt_srgb;
    memcpy(&(*slot)->rt_blend, &rt_blend, sizeof(rt_blend));
    memcpy((*slot)->rt_blend_color, rt_blend_color, sizeof(rt_blend_color));
+   if (k.dep_mip)
+      SGX_DBG(DRAW,
+              "fragment variant: units %#x take their LOD from derivatives (lower_dep_lod)\n",
+              k.dep_mip);
    if (!compile_shader(ctx, *slot, fs->nir, NULL, k.srgb, k.srgb_filter, k.swz,
-                       k.not_bgra, NULL, false, k.depth, k.compare) ||
+                       k.not_bgra, NULL, false, k.depth, k.compare, k.dep_mip) ||
        !(*slot)->code) {
       FREE((*slot)->vary);
       FREE(*slot);
