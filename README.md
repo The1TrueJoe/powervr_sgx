@@ -1,7 +1,6 @@
 # powervr_sgx
 
-> **Status:** an out-of-tree driver, maintained for the people who use it on Cedarview and
-> CE5300 hardware. It was written with heavy use of an AI coding assistant.
+> **Status:** an out-of-tree driver.
 
 An open graphics driver stack for the PowerVR **SGX** GPUs. It supports the **SGX545**: the
 GPU in Intel's Cedarview Atoms (N2600, N2800, D2500, D2550, D2700, "GMA 3600/3650") and in the
