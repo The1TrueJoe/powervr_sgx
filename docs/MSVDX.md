@@ -43,8 +43,9 @@ DRM/media API. A standard media/DRM design is separate future work.
 
 Backing has stride 1920 and UV offset 2088960. Completed exports retain image
 storage independently of the engine session, prevent output reuse while read,
-and reject writable mappings/DMA directions. Direct SGX import additionally requires the companion read-only kernel
-and Mesa import patches; those are outside this gma500-only contribution. Initialized format-probe exports use
+and allow conventional writable sharing. Consumers must finish external writes
+before decoder use, including reference reads. CPU access requires DMA-BUF sync.
+Only image pages are exposed; motion/command allocations stay private. Initialized format-probe exports use
 separate storage and never mark an undecoded surface ready.
 
 Submission is synchronous with bounded completion polling. Shutdown/suspend

@@ -1,10 +1,10 @@
-From a15440b284da66294f286caed0d23ee1cf112da7 Mon Sep 17 00:00:00 2001
+From c60f79e7cca16e14842b77adc4a8c696463a14c3 Mon Sep 17 00:00:00 2001
 From: Viktor Semykin <thesame.ml@gmail.com>
-Date: Mon, 23 Nov 2026 13:27:47 -0300
+Date: Mon, 23 Nov 2026 18:41:44 -0300
 Subject: [PATCH] drm/gma500: add opt-in Cedarview MSVDX H.264 decoding
 
 Host MSVDX beside its existing PCI/display owner. Admit bounded H.264
-picture state, own MMU/storage, export immutable decoded images and
+picture state, own MMU/storage, export writable decoded images and
 initialized format probes, and checkpoint before suspend. Unproved
 quiescence quarantines DMA storage.
 
@@ -13,26 +13,26 @@ downstream prototype ABI, not a mainline media API. No firmware binary
 or sample picture is included.
 
 Validated on N2800 with software-reference NV12 comparisons,
-boundary/rejection inputs, sequence wrap, read-only imports, exact GPU
+boundary/rejection inputs, sequence wrap, writable imports, exact GPU
 plane sampling and native Wayland presentation. The separate mpv chroma
 fix is necessary for correct GL2/GLES2 imported colors.
 
 Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
 ---
- Documentation/gpu/gma500-msvdx.rst            |  120 +
+ Documentation/gpu/gma500-msvdx.rst            |  124 +
  drivers/gpu/drm/gma500/Kconfig                |   10 +
  drivers/gpu/drm/gma500/Makefile               |    2 +
  drivers/gpu/drm/gma500/cdv_h264_template.h    |  333 ++
- drivers/gpu/drm/gma500/cdv_msvdx.c            | 3494 +++++++++++++++++
+ drivers/gpu/drm/gma500/cdv_msvdx.c            | 3491 +++++++++++++++++
  drivers/gpu/drm/gma500/cdv_msvdx.h            |   21 +
  drivers/gpu/drm/gma500/cedar-msvdx-dma.h      |   51 +
- drivers/gpu/drm/gma500/cedar-msvdx.h          |  381 ++
+ drivers/gpu/drm/gma500/cedar-msvdx.h          |  384 ++
  .../gpu/drm/gma500/generate-msvdx-template.py |   62 +
  drivers/gpu/drm/gma500/msvdx-template.json    |  499 +++
  .../drm/gma500/msvdx-template.json.license    |    1 +
  drivers/gpu/drm/gma500/power.c                |    7 +
  drivers/gpu/drm/gma500/psb_drv.c              |    8 +
- 13 files changed, 4989 insertions(+)
+ 13 files changed, 4993 insertions(+)
  create mode 100644 Documentation/gpu/gma500-msvdx.rst
  create mode 100644 drivers/gpu/drm/gma500/cdv_h264_template.h
  create mode 100644 drivers/gpu/drm/gma500/cdv_msvdx.c
@@ -45,10 +45,10 @@ Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
 
 diff --git a/Documentation/gpu/gma500-msvdx.rst b/Documentation/gpu/gma500-msvdx.rst
 new file mode 100644
-index 0000000000000000000000000000000000000000..0a6ba2fa1b560284d2c5dd417e14440cebcf95b7
+index 0000000000000000000000000000000000000000..ae70ddd0ad8c948bf1c6fc1b24b71cce7330bc3b
 --- /dev/null
 +++ b/Documentation/gpu/gma500-msvdx.rst
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,124 @@
 +.. SPDX-License-Identifier: GPL-2.0-only
 +
 +Cedarview MSVDX H.264 decoding
@@ -85,14 +85,18 @@ index 0000000000000000000000000000000000000000..0a6ba2fa1b560284d2c5dd417e14440c
 +
 +Image backing uses stride 1920 and UV offset 2088960 even for smaller pictures.
 +Five bounded image/motion slots retain the decoded reference state. Completed
-+read-only DMA-BUFs retain storage independently of the decoder file and prevent
-+slot reuse until their readers retire. CPU download packs the logical rectangle.
-+Undecoded VA format probes export separate initialized read-only storage without
-+starting the engine or marking the surface decoded. Exported images supply a
-+read-only kernel vmap for importer cache maintenance. SGX must use read-only
-+DMA attachments and GPU mappings; writable CPU mappings remain rejected.
-+Coherent image allocations match their cached read-only mappings; motion and
-+command storage use write-combined mappings with explicit cache maintenance.
++DMA-BUFs retain storage independently of the decoder file and prevent output
++slot reuse until their external references retire. CPU download packs the
++logical rectangle. Undecoded VA probes have independent initialized backing;
++they do not start the engine or mark the surface decoded.
++
++``CEDAR_CAP_WRITABLE_EXPORT`` advertises conventional O_RDWR image sharing.
++VA access flags are usage hints, not an enforced immutability guarantee. CPU
++access must use DMA-BUF synchronization; callers must finish external writes
++before decoder use, including reference-picture reads. Only image pages are
++exported. Motion and command storage remain private. Coherent image allocations
++match cached CPU mappings, with cache maintenance at CPU/device access boundaries.
++Motion and command storage use write-combined mappings.
 +
 +Completion is polled synchronously with bounded waits. Closing or suspending
 +must prove engine quiescence before unmapping DMA pages. An unproved shutdown
@@ -133,8 +137,8 @@ index 0000000000000000000000000000000000000000..0a6ba2fa1b560284d2c5dd417e14440c
 +suspend check requires an explicit operator request.
 +
 +Presentation is separate from decoding. CPU-copy playback downloads and uploads
-+NV12. Optional zero-copy playback needs read-only SGX imports, Mesa R8/GR88
-+sampling and corrected mpv imported-chroma metadata; these are separate patches.
++NV12. Optional zero-copy playback needs Mesa R8/GR88 sampling and corrected
++mpv imported-chroma metadata. No read-only SGX import patches are required.
 +Both paths require SGX_DEBUG=serial in compositor and player to avoid tile
 +tearing/reordering. Zero dropped-frame counters do not detect
 +that corruption. Keep a bootable fallback when replacing gma500.
@@ -158,11 +162,11 @@ index 0000000000000000000000000000000000000000..0a6ba2fa1b560284d2c5dd417e14440c
 +---------------------------
 +
 +At most 64 image/motion allocations exist globally, including detached exports
-+and the one shared initialized black image used for format probes. Each owns
++and independent initialized images used for format probes. Each owns
 +1024 pages (4 MiB at 4 KiB pages); this bounds DMA32 image/motion storage to
 +256 MiB. Engine command, RENDEC and bitstream allocations are separate bounded
-+resources. The initialized black storage can remain cached until driver removal;
-+that one allocation is the expected idle baseline after a format probe.
++resources. Probe allocations retire with their last external reference; no
++shared black allocation remains cached after all clients close.
 +
 +DMA-BUF release uses atomic reader accounting and never takes the mutex held
 +while firmware is polled. Quarantine prevents new work until reboot. Sleep may
@@ -538,10 +542,10 @@ index 0000000000000000000000000000000000000000..10e1163e35d59f4984098e1fed944a59
 +};
 diff --git a/drivers/gpu/drm/gma500/cdv_msvdx.c b/drivers/gpu/drm/gma500/cdv_msvdx.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54fdceb22e
+index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24efa74a03e
 --- /dev/null
 +++ b/drivers/gpu/drm/gma500/cdv_msvdx.c
-@@ -0,0 +1,3494 @@
+@@ -0,0 +1,3491 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Cedarview MSVDX H.264 decoder, hosted by the existing PCI/display owner.
@@ -3368,7 +3372,8 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +	}
 +	caps.features |= CEDAR_CAP_PERSISTENT;
 +	if (cdv_export_layout_valid() && CDV_H264_RUNTIME_TEMPLATE)
-+		caps.features |= CEDAR_CAP_FRAME_DMABUF | CEDAR_CAP_EXPORT_BLANK;
++		caps.features |= CEDAR_CAP_FRAME_DMABUF | CEDAR_CAP_EXPORT_BLANK |
++			 CEDAR_CAP_WRITABLE_EXPORT;
 +	if ((caps.features & CEDAR_CAP_FRAME_DMABUF))
 +		caps.features |= CEDAR_CAP_INDEPENDENT_SURFACES;
 +	if (CDV_H264_SURFACES == 5 && CDV_H264_COLOCATED_BYTES &&
@@ -3570,8 +3575,7 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +	return ret;
 +}
 +
-+static struct cdv_surface_storage *cdv_blank_storage;
-+
++/* Writable probe surfaces must have independent backing, including padding. */
 +static int cdv_frame_blank(const struct cedar_frame_export *request,
 +			   struct cdv_msvdx_frame **out)
 +{
@@ -3584,20 +3588,17 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +		ret = cdv_msvdx_dev ? -EUCLEAN : -ENODEV;
 +		goto unlock;
 +	}
-+	if (!cdv_blank_storage) {
-+		storage = cdv_storage_alloc(cdv_msvdx_dev);
-+		if (IS_ERR(storage)) {
-+			ret = PTR_ERR(storage);
-+			goto unlock;
-+		}
-+		/* Limited-range black including padding; never bound to the engine. */
-+		for (i = 0; i < CEDAR_H264_STORAGE_PAGES; i++)
-+			memset(storage->pages[i].cpu,
-+			       i < CEDAR_H264_STORAGE_UV_OFFSET / PAGE_SIZE ? 16 : 128, PAGE_SIZE);
-+		cdv_blank_storage = storage;
++	storage = cdv_storage_alloc(cdv_msvdx_dev);
++	if (IS_ERR(storage)) {
++		ret = PTR_ERR(storage);
++		goto unlock;
 +	}
-+	ret = cdv_frame_from_storage(cdv_blank_storage, request->width, request->height,
++	for (i = 0; i < CEDAR_H264_STORAGE_PAGES; i++)
++		memset(storage->pages[i].cpu,
++		       i < CEDAR_H264_STORAGE_UV_OFFSET / PAGE_SIZE ? 16 : 128, PAGE_SIZE);
++	ret = cdv_frame_from_storage(storage, request->width, request->height,
 +				     U32_MAX, out);
++	kref_put(&storage->refs, cdv_storage_destroy);
 +unlock:
 +	mutex_unlock(&cdv_msvdx_lock);
 +	return ret;
@@ -3697,6 +3698,20 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +	drm_dev_put(dev);
 +}
 +
++/* MSVDX and SGX are not assumed cache-coherent. Callers serialize external
++ * writes with VA use; mapping and CPU-access boundaries maintain CPU aliases.
++ * Exports contain image pages only, never colocated motion or command storage.
++ */
++static void cdv_frame_flush(struct cdv_msvdx_frame *frame)
++{
++	u32 i;
++
++	for (i = 0; i < frame->npages; i++)
++		drm_clflush_virt_range(frame->storage->pages[i].cpu, PAGE_SIZE);
++	/* Complete cache writeback/invalidation before the next owner proceeds. */
++	mb();
++}
++
 +static struct sg_table *cdv_frame_dma_map(struct dma_buf_attachment *attachment,
 +					  enum dma_data_direction direction)
 +{
@@ -3705,9 +3720,9 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +	struct scatterlist *sg;
 +	unsigned int i;
 +	int ret;
-+	/* Completed pictures are immutable, including while used as references. */
-+	if (direction != DMA_TO_DEVICE)
-+		return ERR_PTR(-EACCES);
++
++	if (direction == DMA_NONE)
++		return ERR_PTR(-EINVAL);
 +	table = kzalloc_obj(*table);
 +	if (!table)
 +		return ERR_PTR(-ENOMEM);
@@ -3718,12 +3733,7 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +	}
 +	for_each_sg(table->sgl, sg, frame->npages, i)
 +		sg_set_page(sg, frame->pages[i], PAGE_SIZE, 0);
-+	/* Acquisition flushed the completed image before publication. All CPU
-+	 * aliases and DMA attachments are read-only, and readers prevent reuse;
-+	 * mapping another reader cannot dirty the image or require a second
-+	 * full cache walk. Keep ordering before exposing it to this device.
-+	 */
-+	dma_rmb();
++	cdv_frame_flush(frame);
 +	ret = dma_map_sgtable(attachment->dev, table, direction, 0);
 +	if (ret) {
 +		sg_free_table(table);
@@ -3737,28 +3747,27 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +				enum dma_data_direction direction)
 +{
 +	dma_unmap_sgtable(attachment->dev, table, direction, 0);
++	if (direction != DMA_TO_DEVICE)
++		cdv_frame_flush(attachment->dmabuf->priv);
 +	sg_free_table(table);
 +	kfree(table);
 +}
 +
 +static int cdv_frame_dma_begin_cpu(struct dma_buf *buffer, enum dma_data_direction direction)
 +{
-+	/* DMA_BUF_SYNC_READ means DMA_FROM_DEVICE for CPU access. */
-+	if (direction != DMA_FROM_DEVICE)
-+		return -EACCES;
-+	/* Acquisition flushes every image page after hardware completion and
-+	 * before publishing the frame. Readers pin immutable storage: CPU
-+	 * mappings cannot write, DMA attachments cannot write, and output-slot
-+	 * reuse is rejected until readers retire. Repeated reads therefore do
-+	 * not need another full-image invalidation. Retain the ordering barrier.
-+	 */
-+	dma_rmb();
++	if (direction == DMA_NONE)
++		return -EINVAL;
++	cdv_frame_flush(buffer->priv);
 +	return 0;
 +}
 +
 +static int cdv_frame_dma_end_cpu(struct dma_buf *buffer, enum dma_data_direction direction)
 +{
-+	return direction == DMA_FROM_DEVICE ? 0 : -EACCES;
++	if (direction == DMA_NONE)
++		return -EINVAL;
++	if (direction != DMA_FROM_DEVICE)
++		cdv_frame_flush(buffer->priv);
++	return 0;
 +}
 +
 +static int cdv_frame_dma_mmap(struct dma_buf *buffer, struct vm_area_struct *vma)
@@ -3767,11 +3776,8 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +	unsigned long pages = vma_pages(vma);
 +	int ret;
 +
-+	if (vma->vm_flags & VM_WRITE)
-+		return -EACCES;
 +	if (vma->vm_pgoff > frame->npages || pages > frame->npages - vma->vm_pgoff)
 +		return -EINVAL;
-+	vm_flags_clear(vma, VM_MAYWRITE);
 +	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
 +	/* Match the allocation type: never introduce a WB alias of WC pages.
 +	 * This driver targets x86, where dma_alloc_coherent uses normal RAM.
@@ -3785,14 +3791,13 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +	return ret;
 +}
 +
-+/* Importers use this mapping for cache maintenance, never image writes.
-+ * Match coherent/WC allocation attributes and keep the alias read-only.
++/* Match coherent/WC allocation attributes for the importer's CPU alias.
 + * The DMA-BUF core serializes and reference-counts vmap/vunmap calls.
 + */
 +static int cdv_frame_dma_vmap(struct dma_buf *buffer, struct iosys_map *map)
 +{
 +	struct cdv_msvdx_frame *frame = buffer->priv;
-+	pgprot_t prot = frame->cpu_cached ? PAGE_KERNEL_RO : pgprot_writecombine(PAGE_KERNEL_RO);
++	pgprot_t prot = frame->cpu_cached ? PAGE_KERNEL : pgprot_writecombine(PAGE_KERNEL);
 +	void *address = vmap(frame->pages, frame->npages, VM_MAP, prot);
 +
 +	if (!address)
@@ -3874,7 +3879,7 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +	export.exp_name = "cedar-msvdx";
 +	export.ops = &cdv_frame_dma_ops;
 +	export.size = frame->npages * PAGE_SIZE;
-+	export.flags = O_RDONLY;
++	export.flags = O_RDWR;
 +	export.priv = frame;
 +	buffer = dma_buf_export(&export);
 +	if (IS_ERR(buffer)) {
@@ -3916,10 +3921,6 @@ index 0000000000000000000000000000000000000000..0dacc1227664ff0aa4b72674a7320e54
 +	if (cdv_active_session)
 +		cdv_session_stop(cdv_active_session);
 +	cdv_msvdx_dev = NULL;
-+	if (cdv_blank_storage) {
-+		kref_put(&cdv_blank_storage->refs, cdv_storage_destroy);
-+		cdv_blank_storage = NULL;
-+	}
 +	registered = cdv_msvdx_registered;
 +	cdv_msvdx_registered = false;
 +	mutex_unlock(&cdv_msvdx_lock);
@@ -4122,10 +4123,10 @@ index 0000000000000000000000000000000000000000..49b96043bb5b4b62c18cb8be69a1e2ab
 +#endif
 diff --git a/drivers/gpu/drm/gma500/cedar-msvdx.h b/drivers/gpu/drm/gma500/cedar-msvdx.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a2b3e0ae67ea27c847cf39c12499b0335e893a8a
+index 0000000000000000000000000000000000000000..3292f6b551ae1ad2de4eae195e9e4105f45afde7
 --- /dev/null
 +++ b/drivers/gpu/drm/gma500/cedar-msvdx.h
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,384 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef CEDAR_MSVDX_PRIVATE_H
 +#define CEDAR_MSVDX_PRIVATE_H
@@ -4152,6 +4153,7 @@ index 0000000000000000000000000000000000000000..a2b3e0ae67ea27c847cf39c12499b033
 +#define CEDAR_CAP_H264_VARIABLE_RESOLUTION 131072U
 +#define CEDAR_CAP_H264_LARGE_SLICES 262144U
 +#define CEDAR_CAP_EXPORT_BLANK 524288U
++#define CEDAR_CAP_WRITABLE_EXPORT 1048576U
 +#define CEDAR_H264_MAX_SLICE_BYTES (1024U * 1024U)
 +#define CEDAR_H264_MAX_WIDTH 1920U
 +#define CEDAR_H264_MAX_HEIGHT 1088U
@@ -4197,12 +4199,14 @@ index 0000000000000000000000000000000000000000..a2b3e0ae67ea27c847cf39c12499b033
 +
 +#define CEDAR_MSVDX_GET_CAPS _IOR('C', 1, struct cedar_msvdx_caps)
 +
-+/* Completed, immutable, linear NV12 image. EXPORT input: version1, fd=-1,
++/* Completed, linear NV12 image. EXPORT input: version1, fd=-1,
 + * everything else zero.
 + * The id is unique within this loaded driver; dup/SCM_RIGHTS retain identity.
 + * Export pins the output slot until the last fd/mapping/display reader closes.
-+ * This read-only exporter uses fixed-capacity coherent backing storage, with
++ * Exports use fixed-capacity coherent image backing storage, with
 + * coded dimensions and an explicit fixed UV offset for smaller rectangles.
++ * WRITABLE_EXPORT advertises O_RDWR buffers. Callers must complete external
++ * writes before any subsequent VA/decoder use, including reference reads.
 + */
 +struct cedar_frame_export {
 +	__u32 version, flags;
@@ -4215,7 +4219,7 @@ index 0000000000000000000000000000000000000000..a2b3e0ae67ea27c847cf39c12499b033
 +
 +#define CEDAR_FRAME_NV12 0x3231564eU
 +#define CEDAR_MSVDX_EXPORT_FRAME _IOWR('C', 2, struct cedar_frame_export)
-+/* Allocate a separate immutable, initialized NV12 surface for format probing.
++/* Allocate a separate initialized NV12 surface for format probing.
 + * Input: version=1, fd=-1, even width/height in 16..1920/1088, rest zero.
 + * No decoder state is created or changed. It never aliases a decoded picture.
 + */
