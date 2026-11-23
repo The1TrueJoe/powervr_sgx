@@ -12,6 +12,7 @@
 
 #include "compiler/nir/nir.h"
 #include "util/format/u_format.h"
+#include "util/format_srgb.h"
 #include "util/half_float.h"
 #include "util/hash_table.h"
 #include "util/list.h"
@@ -419,6 +420,11 @@ clear_one(struct pipe_context *pctx, unsigned buffers,
       if (sgx_cbuf(ctx)->texture &&
           !util_format_has_alpha(sgx_cbuf(ctx)->format))
          rgba[3] = 1.0f;
+      /* an sRGB buffer: the clear colour encoded, as a draw's is */
+      if (sgx_cbuf(ctx)->texture && util_format_is_srgb(sgx_cbuf(ctx)->format))
+         for (unsigned c = 0; c < 3; c++)
+            rgba[c] =
+               util_format_linear_to_srgb_float(CLAMP(rgba[c], 0.0f, 1.0f));
       if (rg_whole) {
          if (!(tm & PIPE_MASK_G))
             rgba[1] = 0.0f;
@@ -1435,7 +1441,7 @@ vcache_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
    bool expand = expanded_prim(info->mode) &&
                  u_reduced_prim(info->mode) == MESA_PRIM_TRIANGLES;
    unsigned count = draw->count, out_count;
-   uint64_t now = os_time_get_nano();
+   uint64_t now;
 
    if (!u_trim_pipe_prim(info->mode, &count))
       return false;
@@ -1448,8 +1454,11 @@ vcache_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
          return false;
       ib = sgx_resource(info->index.resource);
    }
-   if (out_count > SGXWS_MAX_INDICES ||
-       (ib && now - ib->written_ns < 1000000000ull))
+   if (out_count > SGXWS_MAX_INDICES)
+      return false;
+   /* (the clock only for a draw the cache may take: a call each draw) */
+   now = os_time_get_nano();
+   if (ib && now - ib->written_ns < 1000000000ull)
       return false;
    memset(&key, 0, sizeof(key));
    key.n_fetch = n_fetch;
@@ -2015,8 +2024,10 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       bool int_rt = util_format_is_pure_integer(cf);
 
       /* an integer target isn't blended (GL); its packed word is masked by
-       * byte, an R32 word being all of R */
-      if (ctx->blend && ctx->blend->enable[br] && !int_rt)
+       * byte, an R32 word being all of R.  An sRGB one is blended by the
+       * program, in linear (lower_srgb_output) */
+      if (ctx->blend && ctx->blend->enable[br] && !int_rt &&
+          !util_format_is_srgb(cf))
          epi = ctx->blend->hw[br][has_alpha];
       if (int_rt && sgx_tex_raw32(cf))
          mask = word_mask(ctx, mask);
@@ -2115,11 +2126,15 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
             SKIP("no blend variant of the fragment program");
       }
       /* pass type: a blend 1; discard 4, or 2 with a blend; a depthf
-       * (gl_FragDepth) 5 (ISA.md, H10) */
-      st.pass_type = fs->depth_pa >= 0       ? 5
-                     : fs->discard_pa >= 0   ? (blend && blend->blend ? 2 : 4)
-                     : blend && blend->blend ? 1
-                                             : 0;
+       * (gl_FragDepth) 5 (ISA.md, H10).  A program that reads the tile
+       * (an sRGB blend) is a blend: o0 holds the tile's colour only in a
+       * translucent pass */
+      bool blends = (blend && blend->blend) || fs->reads_tile;
+
+      st.pass_type = fs->depth_pa >= 0     ? 5
+                     : fs->discard_pa >= 0 ? (blends ? 2 : 4)
+                     : blends              ? 1
+                                           : 0;
       /* counted in submission order, as a translucent object is shaded */
       if (query_va && !st.pass_type)
          st.pass_type = 1;
@@ -2184,8 +2199,21 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
                     unit - 1);
             return;
          }
-         sgx_tex_words(view, ctx->samplers[unit - 1], tex[unit - 1]);
-         sgx_resource(view->texture)->use_seq = sgxws_next_seq(ctx->hw);
+         struct sgx_view *sv = (struct sgx_view *)view;
+         struct sgx_resource *tr = sgx_resource(view->texture);
+         const struct pipe_sampler_state *smp = ctx->samplers[unit - 1];
+         uint32_t sid = smp ? ((const struct sgx_sampler *)smp)->id : 0;
+
+         if (!sv->words_valid || sv->words_sampler != sid ||
+             sv->words_va != tr->bo.va || sv->words_cube0_va != tr->cube0.va) {
+            sgx_tex_words(view, smp, sv->words);
+            sv->words_sampler = sid;
+            sv->words_va = tr->bo.va;
+            sv->words_cube0_va = tr->cube0.va;
+            sv->words_valid = true;
+         }
+         memcpy(tex[unit - 1], sv->words, sizeof(sv->words));
+         tr->use_seq = sgxws_next_seq(ctx->hw);
          sampled |= 1u << (unit - 1);
          SGX_DBG(DRAW,
                  "  sample (PDS) %u: unit %u %s %ux%u target %u levels %u-%u, %s, state %08x %08x %08x %08x\n",
@@ -2538,10 +2566,14 @@ sgx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * fetched for it (setup_fetch). */
    /* depth textures renders stored into, before the frame records a draw
     * that samples them (sgx_resource_zls_for_sampling) */
-   for (unsigned i = 0; i < ARRAY_SIZE(ctx->views); i++) {
+   /* (up to the highest unit bound, not every slot: a draw looked at all
+    * 128 of each, 15% of this function's own time in Quake 3) */
+   for (unsigned i = 0; i < ctx->n_views; i++) {
       if (ctx->views[i] && ctx->views[i]->texture)
          sgx_resource_zls_for_sampling(ctx,
                                        sgx_resource(ctx->views[i]->texture));
+   }
+   for (unsigned i = 0; i < ctx->n_vs_views; i++) {
       if (ctx->vs_views[i] && ctx->vs_views[i]->texture)
          sgx_resource_zls_for_sampling(ctx,
                                        sgx_resource(ctx->vs_views[i]->texture));

@@ -1,232 +1,153 @@
 # Agent brief: powervr_sgx, an out-of-tree GPU driver for Cedarview and CE5300
 
 **Read this first if you are a session working on `The1TrueJoe/powervr_sgx` (branch `dev`; `main` is the stable branch).**
-It explains what the project is for, the standards the work has to meet, and the
-work that was planned, in order. It does not replace `docs/`. `docs/` says how the
-hardware works; this says what we are building with that knowledge and what rules
-that build has to follow.
+It says what the project is for, where it stands, the standards the work has to meet,
+and what comes next. It does not replace `docs/`. `docs/` says how the hardware works;
+this says what we build with that knowledge and the rules that build follows.
 
 ---
 
-## 1. The goal, in one paragraph
+## 1. The goal
 
 Old netbooks and nettops with **Intel Cedarview (GMA 3600/3650: Atom D2500/D2550/D2700/N2600/N2800)**,
-and CE5300/CE5310 boards, get GPU acceleration from this **out-of-tree** driver: a kernel
-package or a DKMS module, the open microkernel, and Mesa with the sgx driver, from this
-repository's releases and apt repository. Upstream (Linux, linux-firmware, Mesa) was the
-original goal; the kernel RFC and the Mesa merge request were withdrawn in November 2026,
-and the driver is not headed upstream. The project is maintained for the people who use it.
+and CE5300/CE5310 boards, get GPU acceleration from this **out-of-tree** driver stack: a
+kernel package or a DKMS module, the open microkernel, and Mesa with the sgx driver, from
+this repository's releases and apt repository. The project is maintained for the people who
+use it.
 
-Secondary goal: climb from GLES2 to **GLES 3.0 / OpenGL 3.x**. The hardware was
-marketed as DX10.1 / OpenGL 3.2, and Intel's Windows ICD shipped GL 3.0 on this
-core.
+The work is held to the standards of an upstream DRM and Mesa driver (§3), because that is
+what makes it reliable and maintainable, not because it is waiting for a merge. Mesa
+realistically won't take this driver. Kernel upstreaming is being discussed with the
+maintainers; don't plan work around either outcome.
+
+Next goals: **OpenGL ES 3.0**, then desktop **OpenGL 3.1** (`docs/GL3.md`). OpenGL 3.2 is
+not planned, since no hardware path for geometry shaders is known.
 
 ---
 
-## 2. Where the project is now (as of `um-re` 7d02f89, 2026-11-01)
+## 2. Where the project is now (v0.2.2, 2026-11-22)
 
-| Piece | State | Upstreamable as-is? |
+| Piece | Where | State |
 |---|---|---|
-| `kernel/` (`pvrsrvkm`) | Intel's GPL DDK 1.7 ported to Linux 7.1, with an i386↔x86_64 compat bridge. Runs on the EA. | **No.** The services/bridge-ioctl uAPI will not be accepted (§3.1). Keep it as the downstream driver and the A/B rig. |
-| `ukernel/` | Open microkernel in USSE assembly, validated offline: init, host-kick dispatch, TA kick, TA finished, 3D start, render done; register programming matches the DDK per phase. 3ce8f51 fixed the init path offline (bare-DOUTU pds0 + loader-patched limms). | The **key to the firmware problem** (§3.3). Not complete: render teardown, transfers, cleanup, power, multi-render bookkeeping, hardware validation. |
-| `mesa/` | Gallium driver + NIR→USSE compiler, overlay on Mesa 26.2.5. EGL fbdev only, GLES2, no GBM. Pixel-exact vs the DDK in the A/B cases. Minecraft through gl4es at ~33.5 FPS vs the DDK's ~41. | **Compiler and most of the driver: yes, in spirit.** The winsys (`libpvr` over the services bridge) must be rewritten for a new uAPI. |
-| `libpvr/` | Services client (bridge ioctls) for the tools that drive the pvrsrvkm port; GPL-2.0-only, as `abi/` is generated from the GPL kernel headers. | **No.** It disappears once the new uAPI exists. Nothing derived from `kernel/src` headers may go into Mesa (§3.5). |
-| `docs/` | Hardware reference written from the RE: ISA, PDS, STATE, TEX, UKERNEL, SRVINIT, GEN | This is the *clean-room interface* (§3.6). Keep it authoritative. |
+| Kernel driver | `drm/powervr_sgx/` | `powervr_sgx`: GEM shmem, drm_gpuvm, drm_sched, syncobj, runtime PM, devcoredump, hardware recovery. On Cedarview it binds to an auxiliary device that `gma500` publishes (`drm/gma500/`). Shipped as a Debian kernel package and as DKMS (`drm/dkms/`). |
+| Microkernel | `ukernel/` | The open microkernel, in USSE assembly, built by our own assembler. It is the only microkernel the stack uses; it ships as `sgx545-firmware`. |
+| Mesa driver | `mesa/` | `sgx`, a gallium driver with a NIR to USSE compiler, as a patch series on Mesa 26.2.5. OpenGL 2.1, OpenGL ES 2.0, EGL, GBM, GLX and DRI3. dEQP-GLES2: 16,587 passes. |
+| GLES 3.0 | `mesa/`, `docs/GL3.md` | In progress, much of it in a contributor's series (issue #16). New features stay behind `SGX_DEBUG` switches until they pass on hardware. |
+| Video decode | PRs #37 to #40 | Hardware H.264 decoding for Cedarview through VA-API, being contributed. Not merged yet. |
+| Test sticks | `kit/` | A live Debian USB image for Cedarview testers (`docs/TESTING-CEDARVIEW.md`). |
+| Earlier path | `kernel/`, `libpvr/` | Intel's GPL DDK kernel driver (`pvrsrvkm`) ported to modern Linux, and its client library. The current stack doesn't use them. Don't extend them. |
+
+Other cores: the **SGX530** (TI OMAP3) is in bring-up and paused: the kernel driver powers
+the core and reads its ID, but the microkernel's first frame doesn't finish yet. Clover Trail
+(Atom Z2760) runs for a contributor (`docs/porting/cores/clovertrail.md`).
 
 ### Hardware facts that drive the design
 
-- **CE5300/CE5310:** the SGX545 is its own PCI function, `01:02.0 8086:089b`. The display (VDC, `01:08.0 8086:2e61`) is a separate function with **no upstream KMS driver**. Core rev **1014**.
-- **Cedarview:** the SGX sits **behind the same PCI function/BAR as the display engine**, which upstream `gma500` already owns. gma500 keeps Cedar Trail support (Medfield and Moorestown were removed in 2021; Poulsbo, Oaktrail and Cedar Trail stay). Core rev **10131** (same errata as 1014, but the microkernel build may differ, so verify).
-- **Clover Trail (Atom Z2760)** also has SGX545, but its display has no upstream support. Out of scope.
+- **CE5300/CE5310:** the SGX545 is its own PCI function, `01:02.0 8086:089b`. The display is a separate function, driven outside this repository. Core rev **1014**.
+- **Cedarview:** the SGX sits **behind the same PCI function and BAR as the display engine**, which `gma500` owns. Core rev **10131**.
 
 ---
 
 ## 3. The standards the work must meet
 
-### 3.1 Kernel DRM uAPI rules (non-negotiable)
+### 3.1 Kernel uAPI
 
-From `Documentation/gpu/drm-uapi.rst`, "Open-Source Userspace Requirements":
+Follow the conventions of `include/uapi/drm/pvr_drm.h`:
 
-- Any new DRM uAPI needs **open-source userspace that is reviewed and ready to merge into its canonical upstream project** (here, Mesa). It must be the real driver, handling errors and corner cases, not a test toy.
-- A userspace-side reviewer should **Ack the kernel uAPI patch**.
-- The kernel patch **must land in drm-next or drm-misc-next before** the userspace patches land. uAPI flows from the kernel.
-- Mesa's `include/drm-uapi/` is only updated from drm-next (or a tagged release), with the source commit in the message. **We cannot ship a Mesa driver against an out-of-tree uAPI.**
-
-uAPI design conventions (follow `include/uapi/drm/pvr_drm.h` as the house model):
-
-- No pointers in structs. User pointers are `__u64`. All members type-aligned, structs padded to 64 bits, explicit padding, **identical layout on i386 and x86_64**. That makes the whole compat layer unnecessary.
+- No pointers in structs. User pointers are `__u64`. All members type-aligned, structs padded to 64 bits, explicit padding, **identical layout on i386 and x86_64**, so no compat layer is needed.
 - Every `flags`/`pad`/reserved field is checked to be zero, so it can be extended later.
-- Arrays are passed as `{stride, count, __u64 ptr}` objects (pvr's `drm_pvr_obj_array`), so structs can grow.
+- Arrays are passed as `{stride, count, __u64 ptr}` objects, so structs can grow.
 - Render-node ioctls are marked `DRM_RENDER_ALLOW`. Nothing global or modeset-related goes on the render node.
 - Header license: `(GPL-2.0-only WITH Linux-syscall-note) OR MIT`, so Mesa can carry it.
-- Full kerneldoc on every struct and ioctl, plus `Documentation/gpu/<driver>/uapi.rst`.
+- Full kerneldoc on every struct and ioctl. `docs/UAPI.md` is the design record; change it with the code.
 
-### 3.2 What a modern DRM render driver is expected to use
+### 3.2 Standard kernel helpers
 
-Reviewers will expect the standard helpers, not hand-rolled equivalents:
+Use the standard helpers, not hand-rolled equivalents: GEM shmem and PRIME, `drm_gpuvm` with `drm_exec`/`dma_resv`, `drm_sched` with job timeouts feeding recovery, `dma_fence` from the completion IRQ, syncobj (including timeline), runtime PM, debugfs, devcoredump, and `request_firmware()` with a version check. Fences must signal in bounded time, with no allocation or blocking in the signaling path (`dma_fence_begin/end_signalling`). The upstream Rogue driver (`drivers/gpu/drm/imagination`) is the model for the shape, not the code.
 
-| Need | Expected mechanism |
-|---|---|
-| Buffers | GEM, almost certainly `drm_gem_shmem`; dma-buf export/import (PRIME) |
-| GPU virtual memory | Per-file VM contexts on **`drm_gpuvm`** (VM_MAP/UNMAP), `drm_exec`/`dma_resv` locking. SGX MMU: per-context page directory via the BIF (see UKERNEL.md, TA kick). |
-| Scheduling | **`drm_sched`**, with job timeouts feeding hardware recovery (UKERNEL.md §5a) |
-| Sync | `dma_fence` signalled from the completion IRQ; **syncobj, including timeline**, for in/out fences; implicit sync through `dma_resv` on shared BOs |
-| Power | Runtime PM, mapped onto the microkernel power command (type 3) and APM |
-| Debug | debugfs; **devcoredump** on hang |
-| Firmware | `request_firmware()` from linux-firmware, with a version and ABI check |
-| Tests | IGT tests for the uAPI (`tests/<driver>/`) are strongly expected |
+### 3.3 Isolation and security
 
-`dma_fence` rules matter. Fences must signal in bounded time, with no memory allocation or blocking on other fences in the signalling path, and with `dma_fence_begin/end_signalling` annotations so lockdep checks it. A GPU that can hang must have a timeout and recovery path, or fences never signal.
+The kernel **owns every firmware-visible structure** (host control block, kernel CCB, render and transfer contexts, RT data, parameter buffers, free lists, sync words). Userspace submits only the client part of a command, as a validated stream, with GPU addresses **inside its own VM**. One client's commands must never make the microkernel read or write another client's memory. Treat every userspace-supplied address as hostile. `docs/UAPI.md` has the threat model; keep it current.
 
-**The model to copy is `drivers/gpu/drm/imagination` (the upstream Rogue driver).** It is firmware-mediated like ours. It uses drm_sched, the GPU VA manager, runtime PM, drm_gem_shmem and watchdog/device-loss handling. Userspace-supplied parts of firmware commands are passed as **"streams" whose layout the kernel validates field by field** (`pvr_stream.c`; formats in Mesa's `src/imagination/csbgen/rogue_kmd_stream.xml`). Its uAPI has DEV_QUERY (GPU info, quirks, heaps), CREATE_BO, VM contexts, VM_MAP/UNMAP, contexts, free lists, HWRT datasets and SUBMIT_JOBS. Ours should look much like a small SGX-flavoured version of it. It does **not** cover SGX, and its ISA, firmware and MMU are all different, so reuse its *shape*, not its code paths.
+### 3.4 Firmware
 
-### 3.3 Isolation and security: the biggest design change from the DDK
-
-In the DDK, userspace (`libsrv_um`) builds structures the microkernel trusts: render contexts, RT data, PB descriptors and sync objects, in shared heaps. `docs/GEN.md` ("Layout") records that **the microkernel reads the previous client's structures at the next TA**. Upstream will reject anything like that. The new kernel driver must:
-
-- **Own every firmware-visible structure:** host control block, kernel CCB, HW render/transfer contexts, RT data, parameter buffers and free lists, and the sync/status words the microkernel writes.
-- Let userspace submit **only** the client part of a command (e.g. the `SGXMKIF_CMDTA` client fields documented in STATE.md §1), as a validated stream, plus GPU VAs **inside its own VM**. The kernel patches in the addresses of kernel-owned structures.
-- Make sure one client's commands can't make the microkernel read or write another client's memory. Both the per-context page directory and the kernel-owned structures enforce this.
-- Treat every userspace-supplied address the microkernel will dereference as hostile. Range-check it against the client's VM and heaps.
-
-Write a short **threat-model section** in the uAPI design doc. Reviewers will ask for it.
-
-### 3.4 Firmware: linux-firmware rules
-
-- linux-firmware only takes **redistributable** firmware with a license file and a `WHENCE` entry. Imagination's 53,096-byte microkernel can't go in, and can't go on any ISO, unless Imagination licenses it. (Joseph is asking them separately. Don't block on it.)
-- **Our open microkernel is the primary plan.** To be submittable it needs:
-  1. Hardware validation on **both core revs** (1014 on a CE5300 board and 10131 on Cedarview).
-  2. The full command set the kernel driver uses: TA, 3D, render teardown with multi-render bookkeeping, transfer, cleanup, power, HWR re-init, get-misc-info.
-  3. A permissive license (MIT/BSD), source in-tree, and a **reproducible build** from `ukernel/build.py` with no DDK inputs.
-  4. A versioned host interface. The kernel checks the version at load.
-- **Strategic decision (record it in `docs/` once made):** keep the open microkernel **SGXMKIF-compatible** until it's complete, so the DDK microkernel stays a drop-in for A/B testing. After that, decide whether to simplify the host interface for the new kernel driver. Changing it later means a firmware ABI bump.
+The open microkernel is the firmware. It needs a permissive license, source in-tree, a **reproducible build** from `ukernel/build.py`, and a versioned host interface that the kernel checks at load. Validate changes on **both core revs** (1014 and 10131) when they touch shared paths.
 
 ### 3.5 Licensing boundaries
 
-- `kernel/src/` is **GPL-2.0** (Imagination via Intel). Register and struct knowledge from it can be used in a **GPL kernel driver**.
-- **Mesa is MIT.** Nothing copied or mechanically derived from `kernel/src/` goes into Mesa: no headers, tables or struct layouts. `libpvr/abi/` is in that category. Mesa-side hardware definitions must be our own, preferably as XML with generated packers, the way `src/imagination/csbgen` and genxml do it. `docs/` is the source for writing them.
-- The uAPI header is dual-licensed (§3.1), so both sides can include it.
-- **Never commit** DDK binaries, the Imagination microkernel, the Windows ICD, or decompiler output.
+- `drm/` is **GPL-2.0-only**. Everything else is **MIT** unless the file says otherwise (`LICENSE`).
+- `kernel/src/` is GPL-2.0 (Imagination via Intel). Nothing copied or mechanically derived from it goes into Mesa: no headers, tables or struct layouts. Mesa-side hardware definitions are our own, written from `docs/`.
+- **Never commit** vendor binaries, the vendor microkernel, firmware we may not redistribute, or decompiler output.
 
-### 3.6 Clean-room provenance
+### 3.6 Clean room
 
-Reviewers for reverse-engineered drivers (lima, etnaviv, asahi, panfrost) ask how the knowledge was obtained. Keep the existing discipline, which `ukernel/README.md` already states: implementation is written **from `docs/`** (behaviour, encodings, register meanings found by tracing and hardware tests like `tools/isa/hwt_*`), and is **never translated from proprietary bytes or decompiled code**. Proprietary drivers are *oracles* for A/B comparison and behaviour, not sources. When a doc fact came from static analysis of a blob, record it in the doc's provenance markers. Then confirm it by hardware experiment before code depends on it.
+Follow `docs/CLEANROOM.md`. Shipping code is written from `docs/`. Before code relies on a hardware fact, the fact goes into `docs/` with how it was established, and it is confirmed by a hardware test.
 
-### 3.7 Mesa expectations
+### 3.7 Mesa driver standards
 
-- **Location and name:** new gallium driver plus compiler. Talk to the `src/imagination` (Rogue) maintainers early about naming and placement. `src/imagination/sgx/…` versus `src/gallium/drivers/sgx` is their call, and the ISA is unrelated to Rogue's. The DRM driver name (what `drmGetVersion` returns) decides the loader mapping. **Don't pick `pvr`**, which is taken.
-- **Platforms:** with a proper render node and dma-buf, gallium gives you GBM, EGL Wayland/X11/surfaceless and DRI3 almost for free. The fbdev EGL platform in the overlay is downstream-only and won't go upstream (Mesa has no fbdev platform).
-- **Render-only pairing (`kmsro`/`renderonly`):** on Cedarview, the display device is gma500 and the render device is ours. Mesa needs a kmsro entry so opening gma500 creates our screen. Scanout buffers are linear (verify gma500's stride and alignment rules).
-- **Modifiers:** support `DRM_FORMAT_MOD_LINEAR` everywhere first. Twiddled/tiled layouts (TEX.md §1) would need modifiers in `drm_fourcc.h`. Check whether an Imagination vendor namespace exists before inventing one.
-- **Sync:** implicit sync through dma_resv for X/DRI3 and old Wayland; explicit timeline syncobj for Wayland's `linux-drm-syncobj-v1`.
-- **Testing culture:** dEQP via `deqp-runner`, with `*-fails.txt`/`*-flakes.txt`/`*-skips.txt` expectation files (Mesa CI convention), and piglit for desktop GL. A hardware CI runner (LAVA/ci-tron) is welcome but not required to merge. Khronos conformance submission is optional, but a clean dEQP-GLES2 run is the credibility bar.
-- **Code standards:** Mesa style, meson options, no environment-variable-only features in default paths, and the `SGX_*` debug variables moved to the driver's debug-option table.
+- Mesa style, meson options, and debug variables in the driver's debug-option table. No environment-variable-only features in default paths.
+- Linear scanout first. Implicit sync through `dma_resv` for X/DRI3, explicit syncobj for Wayland.
+- **Testing:** dEQP through `deqp-runner` with expectation files, and piglit for desktop GL. Run `meson test --suite sgx` before merging anything under `mesa/src`; a green CI build alone isn't enough.
 
 ---
 
-## 4. What desktops need from the driver (so priorities are right)
+## 4. What desktops need from the driver
 
 | Consumer | Needs | Our status |
 |---|---|---|
-| Any Wayland compositor / Xorg modesetting | KMS device + GBM + dma-buf + render node + fences | KMS: gma500 (Cedarview). The rest is the new driver + winsys. |
-| GNOME Mutter (Ubuntu 26.04 is **Wayland-only**) | GL ≥ 3.1 or **GLES ≥ 2.0** | GLES2 is enough |
-| wlroots (sway, labwc), Weston | GLES2 renderer | GLES2 is enough |
-| Xorg glamor | GLES2 + some extensions (verify the current list) | Likely GLES2 + extensions |
-| GTK4 GPU renderers (most GNOME apps) | **GL 3.3 / GLES 3.0** or Vulkan; otherwise Cairo software | Needs GLES3 |
-| Firefox WebRender (hardware) | GLES3-class | Needs GLES3; falls back to software WebRender |
-| Qt 6 / LXQt | GLES 2.0 works | GLES2 is enough |
-| Minecraft Java 1.17+ | **GL 3.2 core** | Needs 3.2 |
-| Video decode | Cedarview VXD decoder: no open driver | Out of scope (note for users) |
+| Xorg modesetting with glamor | KMS + GBM + dma-buf + render node + fences, GLES 2.0 | Works |
+| Wayland compositors (wlroots, Weston, Mutter) | The same | Should work; not tested yet |
+| Qt 6 / LXQt | GLES 2.0 | Works |
+| GTK4 GPU renderers | GL 3.3 or GLES 3.0 | Needs GLES 3.0 |
+| Firefox WebRender, Chromium GPU | GLES 3.0 or GL 3.2 | Needs GLES 3.0 |
+| Minecraft Java 1.17+ | GL 3.2 core | Not planned |
+| Video playback | VA-API decode, frames imported as dma-bufs | Being contributed (#37 to #40) |
 
 ---
 
-## 5. The work, in order
+## 5. The work
 
-Each milestone has an exit criterion. Don't start the next one's upstream-facing work until the previous criterion holds. Exploration ahead of that is fine.
+Done:
 
-### M0: finish GLES2 on the current stack (keeps the downstream distribution moving)
-The `mesa/README.md` "What is missing" list: discard/alpha test (ISPA pass types 2/4), gl_FragCoord/gl_PointCoord, constant-colour blend (sop2 k18/k19), the rest of textures, scissor/partial viewports, lines/points, ZLS, tear-free present, zero-copy vertices and pipelining, extension pruning.
-**Exit:** dEQP-GLES2 runs to completion on a CE5300 board with a fails list we understand. Run it on the DDK too for comparison.
+- **M0–M3:** GLES 2.0, the open microkernel on hardware, the new kernel driver and uAPI, and the Mesa winsys on it. dEQP-GLES2 is at least as good as on the vendor's stack.
+- **M4:** Cedarview through `gma500`'s auxiliary device, released as packages, and tested on testers' machines.
+- **M5:** the upstream submission plan (RFC to dri-devel, a Mesa merge request, firmware to linux-firmware) is on hold. The record stays in `docs/DRIVER-UPSTREAM.md`.
 
-### M1: open microkernel complete and on hardware
-Finish what `ukernel/README.md` lists as not yet reproduced. Bring it up on a CE5300 board with `srvinit -o`, then run frames, multi-render, transfers, cleanup, power and HWR. Validate against the DDK with `run_ours.py` per phase.
-**Exit:** the full M0 dEQP run passes as well with our microkernel as with the DDK's, with HWR recovery demonstrated. Reproducible build, license chosen.
+Next:
 
-### M2: uAPI design doc, then the new kernel driver (on CE5300 first)
-CE5300 first, because the SGX is its own PCI device there and nothing needs untangling.
-1. Write `docs/UAPI.md`: ioctls (DEV_QUERY with core rev/heaps/quirks; CREATE_BO; MMAP_OFFSET; VM context + VM_MAP/UNMAP; CREATE_CONTEXT render/transfer; parameter buffer/RT dataset objects if the kernel doesn't hide them; SUBMIT_JOBS with syncobj in/out and BO lists), stream formats for the client parts of TA/3D/transfer commands (from STATE.md), heap layout constraints (PDS/USSE code heaps and their addressing limits), the threat model (§3.3), and how HWR shows up to userspace (context guilty/innocent, device-lost).
-2. A new driver under `drivers/gpu/drm/`: kernel-side init that replaces `srvinit` (firmware load, host control block, kernel CCB, event programs), MMU/BIF, GEM shmem, drm_gpuvm, drm_sched + IRQ completion, syncobj, runtime PM, devcoredump, debugfs.
-3. IGT tests for each ioctl, including the negative cases (bad flags, VAs outside the VM, malformed streams).
+- **M6, desktop GL 2.1 completeness:** fix what piglit's `gpu` profile and testers' games find.
+- **M7, GLES 3.0:** integer ALU, texelFetch/textureSize, integer and float textures, float render targets, MRT, sRGB, transform feedback, texture arrays, MSAA, UBOs, instancing. The hardware questions still open are in `docs/GL3.md`. Gate: dEQP-GLES3 triaged.
+- **M8, GL 3.1:** TBOs, primitive restart, rect textures, sync objects.
+- **Video decode:** review and land #37 to #40.
+- **Other cores:** the SGX530 when there's new information on its first frame; new cores through `docs/porting/`.
 
-Leave `pvrsrvkm` alone apart from the downstream distribution's needs. **Don't add more compat-layer work to it.**
-**Exit:** the driver boots the GPU from the kernel on a CE5300 board and runs submitted jobs, IGT passes, and one client can't corrupt another (test it).
-
-### M3: Mesa winsys on the new uAPI
-Replace `libpvr` in `src/gallium/winsys/sgx/` with a DRM winsys: BO allocation, VM_BIND, submit, syncobj, dma-buf import/export. Drop the fbdev platform from the upstream branch (keep it in the downstream overlay). Enable surfaceless, GBM, Wayland and X11.
-**Exit:** dEQP-GLES2 on the new kernel driver matches the M0 baseline. Weston or labwc runs on CE5300 through a KMS device. A minimal VDC KMS driver or simpledrm on the CEFDK framebuffer is fine for the EA. Lower priority than Cedarview.
-
-### M4: Cedarview
-Needs a Cedarview machine (open question §7).
-1. **gma500 hosts the SGX:** gma500 creates an **auxiliary bus device** for the SGX, shares the BAR mapping, and dispatches the SGX interrupt to it. Work out on hardware how gma500's IRQ handler and the SGX status bits share the line. Our driver binds to the auxiliary device.
-2. **Scanout path:** gma500 either imports our dma-bufs for scanout, or exports its dumb buffers for us to import (kmsro allocates on the KMS device). Check gma500's current PRIME support and add what's missing. Linear only.
-3. **Mesa kmsro mapping** for gma500 → our driver.
-4. Confirm the microkernel and errata for core rev 10131.
-
-**Exit:** a stock Debian or Ubuntu install with our kernel driver (DKMS) and our Mesa build runs Weston, labwc, sway, Mutter and Xorg (modesetting+glamor) with GPU compositing on a Cedarview netbook. This is also the bridge release.
-
-### M5: upstream submission (withdrawn)
-
-Withdrawn in November 2026: Mesa declined the driver, and the kernel RFC was withdrawn with it. The plan is kept as a record.
-
-1. RFC series to **dri-devel** (driver + uAPI + docs + MAINTAINERS), with the Mesa MR open as a draft that points at it, and the gma500 auxiliary-device patches CC'd to gma500's maintainers. The target tree is probably drm-misc.
-2. Firmware to linux-firmware (open microkernel binary, license, WHENCE entry, and a source pointer).
-3. Iterate. Once the kernel lands in drm-misc-next/drm-next, sync `include/drm-uapi/` in Mesa and merge the Mesa driver.
-
-**Exit:** merged in all three. Distros pick it up from there.
-
-### M6–M8: the GL ladder (can overlap M3–M5 once the compiler work is separable)
-- **M6, desktop GL 2.1 (compat):** occlusion queries (needed since GL 1.5), 3D textures (Windows exposed `EXT_texture3D`), shadow compare (or `nir_lower_tex` shadow lowering), clip planes, point sprites, polygon modes via st/mesa fallbacks. Gate: piglit `gpu` profile triaged.
-- **M7, GLES 3.0 / GL 3.0:** integer ALU and bitwise ops, texelFetch/textureSize, integer and float textures, float render targets, MRT (Windows ICD: 8 colour attachments), sRGB, packed depth/stencil, transform feedback (Windows: 4 separate attribs × 4 components), texture arrays, MSAA, UBOs, instancing (PDS.md already shows an instance divisor), 8 clip distances (lower beyond the hardware's 6 planes), seamless cube maps (verify the hardware does them), ETC2 via Mesa's decompress-on-upload. Gate: dEQP-GLES3 triaged.
-- **M8, GL 3.1 / 3.2 core:** TBOs, primitive restart (CPU fallback is fine), rect textures; **geometry shaders** (ISA.md notes libusc's geometry "emit and cut" bit), depth clamp, sync objects, multisample textures. Gate: piglit + GL CTS subsets.
-
-**Oracles for M6–M8:**
-- **Intel's Windows GL 3.0 ICD for this core** (`ig4icd32.dll` 8.14.10.2117; Wildfire Games' capability report lists its extensions and limits). Use it to learn what the hardware can do and what the encodings must achieve. Confirm everything with `hwt_*` hardware tests before code depends on it (§3.6).
-- The DDK 1.7 libusc may already contain integer and geometry paths, since it's shared across APIs. Use it as an A/B oracle the way the GLES2 work does.
-- Imagination's own claims: DX10.1, OpenGL 3.2, geometry shaders, a DX10 data assembler (vertex/primitive/instance IDs), render-target arrays.
-
-Expectation to set in docs: the point of GL3 on this GPU is that apps start and run correctly. It won't be fast.
+The point of GL3 on this GPU is that apps start and run correctly. It won't be fast.
 
 ---
 
-## 6. Rules of engagement for sessions on this repo
+## 6. Rules for sessions on this repo
 
-- Follow the repo's existing rules: wrap GPU runs in `flock /tmp/gpu.lock`, never build Buildroot locally, and log hardware work in `docs/log/entries/`.
-- **Boxes (Joseph, 2026-11-01):** GPU work with visible output, including Minecraft on our driver, runs on a CE5310 board with a monitor (it has no smart plug, so nothing wedge-prone; stop and restart `mc-session` around runs and tell the Minecraft session). A second CE5300 board belongs to the DSP and Ethernet-switch work; open-microkernel tests that may wedge the GPU run there in slots agreed with those sessions, recovered with a remote power switch.
-- Don't break the downstream distribution. `pvrsrvkm` + the overlay stay its shipping stack until the new driver replaces them.
-- Don't put uAPI in Mesa before the kernel side has merged. Don't write 32-bit compat structs in new uAPI. Don't copy `kernel/src` material into Mesa. Don't commit proprietary binaries.
-- Before code relies on any reverse-engineered fact, it goes into `docs/` with how it was established.
-- **Clean room (Joseph, 2026-11-01):** follow `docs/CLEANROOM.md`. Shipping code is written from `docs/` only, by sessions that have not read decompiles or listings for that subsystem; validation is black-box.
-- When a decision closes off options (driver name, firmware host-interface changes, the uAPI shape), write it into `docs/` with the reasoning and check it with Joseph first.
+- Follow `CONTRIBUTING.md`: branch from `dev`, PRs to `dev`, SPDX lines, sign-off, American English, short comments.
+- Say which board and core revision a hardware result comes from. Run tests that may hang the GPU only where the board can be power-cycled, and serialize GPU runs on a shared board.
+- Log hardware milestones in `docs/log/`.
+- Nothing in the default build or packages may need the vendor's closed stack.
+- When a decision closes off options (uAPI shape, firmware host interface, driver names), write it into `docs/` with the reasoning and check it with Joseph first.
 
 ---
 
-## 7. Open questions (for Joseph, or for the session to resolve)
+## 7. Open questions
 
-1. **Cedarview hardware:** which machine(s) do we have, with which CPU, panel and RAM? M4 can't start without one.
-2. **Driver name** for the kernel module, DRM name and Mesa directory. Coordinate with Imagination's Rogue maintainers.
-3. **Imagination:** will they license the SGX545 microkernel for linux-firmware, or bless the open one? Joseph is asking. Either answer is useful.
-4. Does the open microkernel stay SGXMKIF-compatible forever, or get a simpler host interface for the new driver after M1?
-5. The CE5300 display: a minimal VDC KMS driver, or simpledrm only? This only matters for a downstream distribution wanting Wayland.
-6. The Cedarview IRQ topology and the BAR layout split between gma500 and SGX, for the auxiliary-device design.
+1. GLES 3.0: the hardware questions listed as open in `docs/GL3.md`.
+2. Some Cedarview panels stay dark with `gma500`; the test stick records why.
+3. SGX530: how the microkernel's state task hands its words to the MTE, so the first object reaches the parameter buffer.
+4. Video decode: how the decoder's frames and the GPU's imports fit together on Cedarview (#37 to #40, issue #15).
 
 ---
 
 ## 8. References
 
-- Linux DRM uAPI docs, "Open-Source Userspace Requirements" and render nodes: `Documentation/gpu/drm-uapi.rst` (https://docs.kernel.org/gpu/drm-uapi.html)
-- Mesa `include/drm-uapi/README` (headers only from drm-next or tagged releases)
-- Upstream Rogue driver series, the design model: https://lkml.indiana.edu/2311.2/07062.html ; uAPI `include/uapi/drm/pvr_drm.h` ; stream formats in Mesa `src/imagination/csbgen/rogue_kmd_stream.xml`
-- gma500 keeps Cedar Trail (Medfield removal thread): https://lists.freedesktop.org/archives/dri-devel/2021-January/295823.html
-- Imagination's SGX545 announcement (DX10.1, OpenGL 3.2, OpenCL 1.0): https://us.design-reuse.com/news/22405/graphics-ip-core-directx-opengl-opencl.html
+- Linux DRM uAPI docs, "Open-Source Userspace Requirements" and render nodes: https://docs.kernel.org/gpu/drm-uapi.html
+- The upstream Rogue driver, the design model: https://lkml.indiana.edu/2311.2/07062.html ; uAPI `include/uapi/drm/pvr_drm.h`
+- Imagination's SGX545 announcement: https://us.design-reuse.com/news/22405/graphics-ip-core-directx-opengl-opencl.html
 - SGX545 Windows GL 3.0 capability report: https://feedback.wildfiregames.com/report/opengl/device/PowerVR%20SGX545
-- In-repo: `README.md`, `kernel/README.md`, `mesa/README.md` (status, missing list, downstream plan), `ukernel/README.md`, `docs/UKERNEL.md`, `docs/SRVINIT.md`, `docs/GEN.md`, `docs/STATE.md`, `docs/TEX.md`, `docs/ISA.md`, `docs/PDS.md`, `docs/log/`
+- In-repo: `README.md`, `CONTRIBUTING.md`, `docs/README.md`, `docs/CLEANROOM.md`, `docs/UAPI.md`, `docs/GL3.md`, `docs/UKERNEL.md`, `docs/STATE.md`, `docs/ISA.md`, `docs/log/`

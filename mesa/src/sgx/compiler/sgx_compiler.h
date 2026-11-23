@@ -34,6 +34,7 @@ extern "C" {
 
 struct nir_shader;
 struct nir_shader_compiler_options;
+struct nir_tex_instr;
 
 #define SGX_MAX_SETS 10
 
@@ -369,6 +370,7 @@ bool sgx_lower_clip_fs(struct nir_shader *fs, unsigned ucp_enables);
  * instructions it adds (and the program's own textureSize) are the driver's
  * to lower before sgx_compile. Call after the texture and sampler indices
  * are final */
+bool sgx_txd_lowered(const struct nir_tex_instr *tex, const void *data);
 bool sgx_lower_tex(struct nir_shader *s,
                    const struct sgx_compile_options *opts);
 
