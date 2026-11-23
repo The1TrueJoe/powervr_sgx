@@ -3569,11 +3569,22 @@ emit_intrinsic(struct sgx_ctx *c, nir_intrinsic_instr *in)
       unsigned nc = in->def.num_components, w = new_vreg(c, nc);
       struct sgx_ref r[4] = {0};
       for (unsigned j = 0; j < nc; j++) {
-         struct sgx_ins *d =
-            ins_alloc(c, SGX_INS_ALU, y ? SGX_OP_FDSY : SGX_OP_FDSX);
-         d->nops = 3;
-         d->op[0] = vref(w, j);
-         d->op[1] = d->op[2] = src_comp(c, &ls, j);
+         struct sgx_ref x = src_comp(c, &ls, j);
+         struct sgx_ins *d;
+
+         if (x.file == SGX_F_K) {
+            /* a constant's derivative is 0 (and an F16 constant has no
+             * format select in fdsx) */
+            d = ins_alloc(c, SGX_INS_ALU, SGX_OP_MOV);
+            d->nops = 2;
+            d->op[0] = vref(w, j);
+            d->op[1] = ref(SGX_F_K, 0);
+         } else {
+            d = ins_alloc(c, SGX_INS_ALU, y ? SGX_OP_FDSY : SGX_OP_FDSX);
+            d->nops = 3;
+            d->op[0] = vref(w, j);
+            d->op[1] = d->op[2] = x;
+         }
          emit(c, d);
          r[j] = in->def.bit_size == 16 ? f32_to_h(c, vref(w, j)) : vref(w, j);
       }

@@ -1385,6 +1385,37 @@ TEST_F(sgx_compile_test, fragment_derivative_source_no_skipinv)
    EXPECT_EQ(line.find("skipinv"), std::string::npos) << s;
 }
 
+/* a derivative of a vector with a constant component: that component's is
+ * 0, not an fdsx of the constant (an F16 one had no format select in fdsx:
+ * "16-bit constant in a 32-bit instruction"; the cube LOD lowering builds
+ * such a vector, a face's direction, in the fragment program) */
+TEST_F(sgx_compile_test, fragment_derivative_of_a_constant_component)
+{
+   start(MESA_SHADER_FRAGMENT);
+   nir_variable *in =
+      var(nir_var_shader_in, glsl_vec_type(2), "v", VARYING_SLOT_VAR0);
+   nir_variable *col = var(nir_var_shader_out, glsl_vec4_type(), "gl_FragColor",
+                           FRAG_RESULT_COLOR);
+   in->data.precision = col->data.precision = GLSL_PRECISION_MEDIUM;
+   nir_def *v = nir_f2f16(&b, nir_load_var(&b, in));
+   nir_def *d = nir_vec3(&b, nir_imm_float16(&b, -1.0), nir_channel(&b, v, 0),
+                         nir_channel(&b, v, 1));
+   nir_def *dx = nir_ddx_coarse(&b, nir_f2f32(&b, d));
+   nir_store_var(&b, col,
+                 nir_vec4(&b, nir_channel(&b, dx, 0), nir_channel(&b, dx, 1),
+                          nir_channel(&b, dx, 2), nir_imm_float(&b, 1.0)),
+                 0xf);
+
+   ASSERT_TRUE(compile(true)) << out.log;
+   expect_decodes();
+   std::string s = disasm();
+   size_t n = 0;
+   for (size_t at = s.find("fdsx"); at != std::string::npos;
+        at = s.find("fdsx", at + 1))
+      n++;
+   EXPECT_EQ(n, 2u) << s;
+}
+
 /* gl_FragDepth: the instruction that writes pa<depth_pa> (the clamp) */
 static std::string
 depth_write(const std::string &s, unsigned pa)
