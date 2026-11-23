@@ -68,7 +68,8 @@ static int open_sgx(void)
          continue;
       link[len] = 0;
       const char *name = strrchr(link, '/');
-      if (strcmp(name ? name + 1 : link, "powervr_sgx"))
+      if (strcmp(name ? name + 1 : link, "powervr_sgx") &&
+          strcmp(name ? name + 1 : link, "powervr_sgx.sgx"))
          continue;
       snprintf(path, sizeof(path), "/dev/dri/renderD%d", i);
       return open(path, O_RDWR | O_CLOEXEC);
