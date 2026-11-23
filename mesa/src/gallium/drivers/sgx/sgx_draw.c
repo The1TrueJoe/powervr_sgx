@@ -1441,7 +1441,7 @@ vcache_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
    bool expand = expanded_prim(info->mode) &&
                  u_reduced_prim(info->mode) == MESA_PRIM_TRIANGLES;
    unsigned count = draw->count, out_count;
-   uint64_t now = os_time_get_nano();
+   uint64_t now;
 
    if (!u_trim_pipe_prim(info->mode, &count))
       return false;
@@ -1454,8 +1454,11 @@ vcache_draw(struct sgx_context *ctx, const struct pipe_draw_info *info,
          return false;
       ib = sgx_resource(info->index.resource);
    }
-   if (out_count > SGXWS_MAX_INDICES ||
-       (ib && now - ib->written_ns < 1000000000ull))
+   if (out_count > SGXWS_MAX_INDICES)
+      return false;
+   /* (the clock only for a draw the cache may take: a call each draw) */
+   now = os_time_get_nano();
+   if (ib && now - ib->written_ns < 1000000000ull)
       return false;
    memset(&key, 0, sizeof(key));
    key.n_fetch = n_fetch;
@@ -2196,8 +2199,21 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
                     unit - 1);
             return;
          }
-         sgx_tex_words(view, ctx->samplers[unit - 1], tex[unit - 1]);
-         sgx_resource(view->texture)->use_seq = sgxws_next_seq(ctx->hw);
+         struct sgx_view *sv = (struct sgx_view *)view;
+         struct sgx_resource *tr = sgx_resource(view->texture);
+         const struct pipe_sampler_state *smp = ctx->samplers[unit - 1];
+         uint32_t sid = smp ? ((const struct sgx_sampler *)smp)->id : 0;
+
+         if (!sv->words_valid || sv->words_sampler != sid ||
+             sv->words_va != tr->bo.va || sv->words_cube0_va != tr->cube0.va) {
+            sgx_tex_words(view, smp, sv->words);
+            sv->words_sampler = sid;
+            sv->words_va = tr->bo.va;
+            sv->words_cube0_va = tr->cube0.va;
+            sv->words_valid = true;
+         }
+         memcpy(tex[unit - 1], sv->words, sizeof(sv->words));
+         tr->use_seq = sgxws_next_seq(ctx->hw);
          sampled |= 1u << (unit - 1);
          SGX_DBG(DRAW,
                  "  sample (PDS) %u: unit %u %s %ux%u target %u levels %u-%u, %s, state %08x %08x %08x %08x\n",
@@ -2550,10 +2566,14 @@ sgx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * fetched for it (setup_fetch). */
    /* depth textures renders stored into, before the frame records a draw
     * that samples them (sgx_resource_zls_for_sampling) */
-   for (unsigned i = 0; i < ARRAY_SIZE(ctx->views); i++) {
+   /* (up to the highest unit bound, not every slot: a draw looked at all
+    * 128 of each, 15% of this function's own time in Quake 3) */
+   for (unsigned i = 0; i < ctx->n_views; i++) {
       if (ctx->views[i] && ctx->views[i]->texture)
          sgx_resource_zls_for_sampling(ctx,
                                        sgx_resource(ctx->views[i]->texture));
+   }
+   for (unsigned i = 0; i < ctx->n_vs_views; i++) {
       if (ctx->vs_views[i] && ctx->vs_views[i]->texture)
          sgx_resource_zls_for_sampling(ctx,
                                        sgx_resource(ctx->vs_views[i]->texture));

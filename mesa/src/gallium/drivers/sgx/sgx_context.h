@@ -205,6 +205,23 @@ struct sgx_blend {
 
 struct vcache_chunk;
 
+/* a sampler state, with an id no other one gets (sgx_view's cache) */
+struct sgx_sampler {
+   struct pipe_sampler_state base;
+   uint32_t id;
+};
+
+/* a sampler view, with the texture state words (sgx_tex_words) the last
+ * draw that sampled it made: the same while the sampler and the texture's
+ * addresses are.  A draw made them again for every unit (Quake 3 switches
+ * textures between nearly all of its draws, among a few hundred views). */
+struct sgx_view {
+   struct pipe_sampler_view base;
+   uint32_t words_sampler, words_va, words_cube0_va;
+   bool words_valid;
+   uint32_t words[4];
+};
+
 struct sgx_context {
    struct pipe_context base;
 
@@ -248,7 +265,29 @@ struct sgx_context {
    unsigned rt_plane, recording_plane;
    bool rt_later_pass;
    /* MRT, a pass a colour buffer: the one this pass draws or clears into */
+   /* sgx_fs_for's and sgx_vs_for's last answers, good while the counter
+    * for what each reads holds: fs_gen (fragment views and samplers, the
+    * framebuffer, the blend state and colour), vs_gen (vertex views and
+    * samplers); both go up when any variant ends.  A draw looked them up
+    * again, texture key and all (Quake 3 and GoldSrc draw hundreds a frame;
+    * the vertex shader's rarely changes between them). */
+   uint32_t fs_gen, vs_gen;
+   struct {
+      uint32_t gen;
+      const void *fs;
+      unsigned rt_index, rt_plane;
+      void *out;
+   } fs_memo;
+   struct {
+      uint32_t gen;
+      const void *vs, *fs;
+      uint8_t vtx_fmt[16];
+      bool points;
+      void *out;
+   } vs_memo;
    unsigned rt_index;
+   /* one past the highest view bound to the fragment and vertex stages */
+   unsigned n_views, n_vs_views;
 
    struct pipe_framebuffer_state framebuffer;
    struct pipe_viewport_state viewport;

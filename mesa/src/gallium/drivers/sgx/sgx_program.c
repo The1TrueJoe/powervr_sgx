@@ -2207,6 +2207,9 @@ destroy_variant(struct sgx_context *ctx, struct sgx_pipe_shader *v)
 {
    if (!v)
       return;
+   /* (no memoized answer outlives it) */
+   ctx->fs_gen++;
+   ctx->vs_gen++;
    free_programs(ctx, v);
    free(v->code);
    free(v->code1);
@@ -2364,10 +2367,9 @@ tex_key_set(struct sgx_pipe_shader *v, const struct tex_key *k)
 /* vs_for: the vertex shader for fs's sets (NULL: its own), these input
  * formats and points; and with vertex texture fetch, for the views and
  * samplers bound to its units (tex_key) */
-struct sgx_pipe_shader *
-sgx_vs_for(struct sgx_context *ctx, struct sgx_pipe_shader *vs,
-           const struct sgx_pipe_shader *fs, const uint8_t *vtx_fmt,
-           bool points)
+static struct sgx_pipe_shader *
+vs_for(struct sgx_context *ctx, struct sgx_pipe_shader *vs,
+       const struct sgx_pipe_shader *fs, const uint8_t *vtx_fmt, bool points)
 {
    static const uint8_t f32x4[16];
    const struct sgx_varyings *vary = fs && fs->vary ? fs->vary : vs->vary;
@@ -2429,8 +2431,8 @@ sgx_fs_textures_used(const struct sgx_pipe_shader *fs)
    return mask;
 }
 
-struct sgx_pipe_shader *
-sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
+static struct sgx_pipe_shader *
+fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
 {
    struct sgx_pipe_shader **slot;
    struct tex_key k;
@@ -2524,6 +2526,50 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
       *slot = NULL;
    }
    return *slot;
+}
+
+struct sgx_pipe_shader *
+sgx_vs_for(struct sgx_context *ctx, struct sgx_pipe_shader *vs,
+           const struct sgx_pipe_shader *fs, const uint8_t *vtx_fmt,
+           bool points)
+{
+   static const uint8_t f32x4[16];
+   const uint8_t *fmt = vtx_fmt ? vtx_fmt : f32x4;
+   struct sgx_pipe_shader *v;
+
+   if (ctx->vs_memo.out && ctx->vs_memo.gen == ctx->vs_gen &&
+       ctx->vs_memo.vs == vs && ctx->vs_memo.fs == fs &&
+       ctx->vs_memo.points == points &&
+       !memcmp(ctx->vs_memo.vtx_fmt, fmt, sizeof(ctx->vs_memo.vtx_fmt)))
+      return ctx->vs_memo.out;
+   v = vs_for(ctx, vs, fs, vtx_fmt, points);
+   /* (the counter after the lookup: a variant it compiled may have ended
+    * another) */
+   ctx->vs_memo.gen = ctx->vs_gen;
+   ctx->vs_memo.vs = vs;
+   ctx->vs_memo.fs = fs;
+   ctx->vs_memo.points = points;
+   memcpy(ctx->vs_memo.vtx_fmt, fmt, sizeof(ctx->vs_memo.vtx_fmt));
+   ctx->vs_memo.out = v;
+   return v;
+}
+
+struct sgx_pipe_shader *
+sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
+{
+   struct sgx_pipe_shader *v;
+
+   if (ctx->fs_memo.out && ctx->fs_memo.gen == ctx->fs_gen &&
+       ctx->fs_memo.fs == fs && ctx->fs_memo.rt_index == ctx->rt_index &&
+       ctx->fs_memo.rt_plane == ctx->rt_plane)
+      return ctx->fs_memo.out;
+   v = fs_for(ctx, fs);
+   ctx->fs_memo.gen = ctx->fs_gen;
+   ctx->fs_memo.fs = fs;
+   ctx->fs_memo.rt_index = ctx->rt_index;
+   ctx->fs_memo.rt_plane = ctx->rt_plane;
+   ctx->fs_memo.out = v;
+   return v;
 }
 
 /* the compiled fragment shader's program with its colour blended (b), or

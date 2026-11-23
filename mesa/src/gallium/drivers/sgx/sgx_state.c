@@ -274,6 +274,7 @@ static void
 sgx_bind_blend_state(struct pipe_context *pctx, void *hwcso)
 {
    sgx_context(pctx)->blend = hwcso;
+   sgx_context(pctx)->fs_gen++;
 }
 
 static void *
@@ -375,6 +376,7 @@ sgx_set_framebuffer_state(struct pipe_context *pctx,
    struct sgx_context *ctx = sgx_context(pctx);
 
    util_copy_framebuffer_state(&ctx->framebuffer, fb);
+   ctx->fs_gen++;
    /* depth only: a colour buffer of the context's own to render into
     * (begin_frame), at least the framebuffer's size, with the depth buffer's
     * samples.  Made here, not in begin_frame, which runs with the screen
@@ -431,6 +433,7 @@ sgx_set_blend_color(struct pipe_context *pctx,
                     const struct pipe_blend_color *color)
 {
    sgx_context(pctx)->blend_color = *color;
+   sgx_context(pctx)->fs_gen++;
 }
 
 static void
@@ -461,10 +464,13 @@ static void *
 sgx_create_sampler_state(struct pipe_context *pctx,
                          const struct pipe_sampler_state *cso)
 {
-   struct pipe_sampler_state *so = CALLOC_STRUCT(pipe_sampler_state);
+   static uint32_t next_id;
+   struct sgx_sampler *so = CALLOC_STRUCT(sgx_sampler);
 
-   if (so)
-      *so = *cso;
+   if (so) {
+      so->base = *cso;
+      so->id = p_atomic_inc_return(&next_id);
+   }
    return so;
 }
 
@@ -480,6 +486,10 @@ sgx_bind_sampler_states(struct pipe_context *pctx, mesa_shader_stage shader,
 
    if (!s)
       return;
+   if (shader == MESA_SHADER_FRAGMENT)
+      ctx->fs_gen++;
+   else
+      ctx->vs_gen++;
    for (unsigned i = 0; i < nr && start + i < PIPE_MAX_SAMPLERS; i++)
       s[start + i] = hwcso ? hwcso[i] : NULL;
 }
@@ -488,7 +498,8 @@ static struct pipe_sampler_view *
 sgx_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                         const struct pipe_sampler_view *cso)
 {
-   struct pipe_sampler_view *so = CALLOC_STRUCT(pipe_sampler_view);
+   struct sgx_view *v = CALLOC_STRUCT(sgx_view);
+   struct pipe_sampler_view *so = v ? &v->base : NULL;
 
    if (!so)
       return NULL;
@@ -521,12 +532,24 @@ sgx_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
 
    if (!v)
       return;
+   if (shader == MESA_SHADER_FRAGMENT)
+      ctx->fs_gen++;
+   else
+      ctx->vs_gen++;
    for (unsigned i = 0; i < nr + unbind_num_trailing_slots; i++) {
       unsigned s = start + i;
 
       if (s < PIPE_MAX_SHADER_SAMPLER_VIEWS)
          pipe_sampler_view_reference(&v[s], i < nr && views ? views[i] : NULL);
    }
+   /* one past the highest bound (what a draw looks through) */
+   unsigned *n = shader == MESA_SHADER_FRAGMENT ? &ctx->n_views : &ctx->n_vs_views;
+   unsigned top = MIN2(MAX2(*n, start + nr + unbind_num_trailing_slots),
+                       PIPE_MAX_SHADER_SAMPLER_VIEWS);
+
+   while (top && !v[top - 1])
+      top--;
+   *n = top;
 }
 
 static void
