@@ -1,11 +1,7 @@
 # powervr_sgx
 
-> **Status:** this is an out-of-tree driver, maintained for the people who use it on Cedarview
-> and CE5300 hardware. It was written with heavy use of an AI coding assistant. An RFC for the
-> kernel driver and a draft merge request for the Mesa driver were posted in November 2026; Mesa
-> declined the driver over its AI-generated code and provenance, so I withdrew both, and the
-> driver is not headed upstream. Material derived from the vendor's closed drivers has been
-> removed from the tree.
+> **Status:** an out-of-tree driver, maintained for the people who use it on Cedarview and
+> CE5300 hardware. It was written with heavy use of an AI coding assistant.
 
 An open graphics driver stack for the PowerVR **SGX** GPUs. It supports the **SGX545**: the
 GPU in Intel's Cedarview Atoms (N2600, N2800, D2500, D2550, D2700, "GMA 3600/3650") and in the
@@ -38,6 +34,9 @@ Tested on two CE5300 boards and, by testers, on Cedarview computers.
 - **Games:** Minecraft 1.7.10 runs in its world for 15 minutes without a GPU recovery.
 - **Cedarview:** the microkernel starts and draws frames on Cedarview's SGX545 (revision
   1.0.13). Some Cedarview panels stay dark with `gma500`; the test stick records why.
+- **Video decode:** hardware H.264 decoding for Cedarview, through VA-API, is being contributed
+  in [#37](https://github.com/The1TrueJoe/powervr_sgx/pull/37) to
+  [#40](https://github.com/The1TrueJoe/powervr_sgx/pull/40).
 - **Known issues:** see [docs/MAIN-MERGE.md](docs/MAIN-MERGE.md#known-issues-to-state-with-the-merge).
   The parameter-buffer out-of-memory handler, listed there as in progress, is now done and
   confirmed on the hardware.
