@@ -1,23 +1,29 @@
 <!-- SPDX-License-Identifier: MIT -->
 # Libdrm auxiliary DRM discovery
 
-The two patches target libdrm main at
-`33fab8cbca7f7581e955a675597d14412702edc4` and also apply to Debian 13's
-libdrm 2.4.124. Patch 1 preserves PCI metadata while separating the display
-parent, auxiliary render child and sibling children. Patch 2 adds optional
-Linux umockdev tests covering discovery, grouping and disappearance without
-DRM hardware or root.
+The two libdrm patches apply to main commit
+`33fab8cbca7f7581e955a675597d14412702edc4` and Debian 13 libdrm 2.4.124.
+Auxiliary children use a distinct public `DRM_BUS_AUXILIARY` identity containing
+the parent's PCI address and child name. Parent PCI IDs remain available in
+`deviceinfo.aux`; ordinary PCI identity and comparisons are unchanged.
 
-Apply with `git am` from the libdrm checkout, then build normally with Meson.
-The topology test requires umockdev >= 0.19.9 for fstat interception.
-Debian 13 ships 0.19.1; build a local test dependency with
-`tools/build-test-umockdev.sh` and select its bin, lib and pkgconfig directories.
-Run `meson test -C BUILD --print-errorlogs`; check that `device-topology` runs.
+This follows the explicit auxiliary model proposed by Alistair Popple for Nova:
+https://www.mail-archive.com/dri-devel@lists.freedesktop.org/msg625002.html.
+Stored child identities remain comparable after sysfs nodes disappear.
 
-For the private Debian installation, use `tools/build-libdrm-auxiliary.sh`
-from the libdrm/ integration directory. A distribution can apply the same series to its
-normal libdrm package. The discovery fix is shared library code; it requires
-no mpv or labwc source patch. The SGX serial workaround remains necessary.
+Apply the two top-level patches to libdrm. The separate `mesa/` patch applies
+to Mesa 26.2.5 with powervr_sgx's overlay patches, and requires rebuilding Mesa
+against the patched libdrm headers. It supports auxiliary render-node selection,
+parent metadata and distinct DRI_PRIME tags. Existing PCI-only applications may
+need equivalent handling; a new bus type is not transparent to every client.
 
-These are prepared patches. Follow libdrm's CONTRIBUTING.rst for submission
-and shared-code review; no upstream acceptance is implied.
+The topology test requires umockdev >= 0.19.9 for fstat interception. Debian 13
+ships an older version. `tools/build-test-umockdev.sh` builds the pinned upstream
+release tarball locally; select its bin/lib/pkgconfig directories before Meson.
+Run `meson test -C BUILD --print-errorlogs` and require `device-topology`.
+On hardware-free CI, drmdevice skips: report 4 passes and 1 skip, not 5 passes.
+
+The build helper installs only into an explicit private prefix. Selecting it
+for a compositor through LD_LIBRARY_PATH also selects it for inherited session
+clients. Keep that scope visible and rebuild the matching Mesa first. No patch
+has been submitted to libdrm or mpv upstream.

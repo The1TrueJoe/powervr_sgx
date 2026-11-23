@@ -1,32 +1,20 @@
-From 4d680340e42769a15a7b8af58f2ab20b92611493 Mon Sep 17 00:00:00 2001
+From 8fbe1457c15407f267157b230a8b467ee6757a8b Mon Sep 17 00:00:00 2001
 From: Viktor Semykin <thesame.ml@gmail.com>
-Date: Fri, 20 Nov 2026 11:48:12 -0300
-Subject: [PATCH libdrm 2/2] tests: cover PCI and auxiliary DRM device topology
- with umockdev
-
-Exercise fd, dev_t, enumeration, legacy APIs and PCI revision metadata
-without DRM hardware or root. Cover display/auxiliary separation,
-sibling children, primary/render grouping, ordinary PCI, virtio,
-disappearing sysfs nodes and rejection of non-PCI auxiliary parents.
-Build this Linux test with umockdev 0.19.9 or newer and its wrapper.
-Older releases do not intercept fstat() on the mock device descriptors.
+Date: Mon, 23 Nov 2026 13:14:47 -0300
+Subject: [PATCH] tests: cover explicit auxiliary identity and unplug stability
 
 Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
 ---
- tests/device-topology.c | 186 ++++++++++++++++++++++++++++++++++++++++
- tests/meson.build       |  17 ++++
- 2 files changed, 203 insertions(+)
- create mode 100644 tests/device-topology.c
-
 diff --git a/tests/device-topology.c b/tests/device-topology.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..bb45e3f82dd9540a17ccf462024d01befd01ef09
+index 0000000..5a5d3a7
 --- /dev/null
 +++ b/tests/device-topology.c
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,194 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Copyright (c) 2026 Viktor Semykin */
 +#include <errno.h>
++#include <stdbool.h>
 +#include <fcntl.h>
 +#include <glib.h>
 +#include <glib/gstdio.h>
@@ -75,7 +63,7 @@ index 0000000000000000000000000000000000000000..bb45e3f82dd9540a17ccf462024d01be
 +                                       "PCI_SLOT_NAME", name, NULL);
 +}
 +
-+static drmDevicePtr get_device(const char *node)
++static drmDevicePtr get_device(const char *node, bool auxiliary)
 +{
 +    drmDevicePtr from_fd = NULL, from_id = NULL, legacy = NULL;
 +    struct stat st;
@@ -88,12 +76,13 @@ index 0000000000000000000000000000000000000000..bb45e3f82dd9540a17ccf462024d01be
 +    g_assert_cmpint(drmGetDevice(fd, &legacy), ==, 0);
 +    g_assert_true(drmDevicesEqual(from_fd, from_id));
 +    g_assert_true(drmDevicesEqual(from_fd, legacy));
-+    g_assert_cmpint(from_fd->bustype, ==, DRM_BUS_PCI);
-+    g_assert_cmphex(from_fd->deviceinfo.pci->vendor_id, ==, 0x8086);
-+    g_assert_cmphex(from_fd->deviceinfo.pci->device_id, ==, 0x0be2);
-+    g_assert_cmphex(from_fd->deviceinfo.pci->subvendor_id, ==, 0x144d);
-+    g_assert_cmphex(from_fd->deviceinfo.pci->subdevice_id, ==, 0xc072);
-+    g_assert_cmphex(from_fd->deviceinfo.pci->revision_id, ==, 0x0b);
++    g_assert_cmpint(from_fd->bustype, ==, auxiliary ? DRM_BUS_AUXILIARY : DRM_BUS_PCI);
++    drmPciDeviceInfoPtr ids = auxiliary ? from_fd->deviceinfo.aux : from_fd->deviceinfo.pci;
++    g_assert_cmphex(ids->vendor_id, ==, 0x8086);
++    g_assert_cmphex(ids->device_id, ==, 0x0be2);
++    g_assert_cmphex(ids->subvendor_id, ==, 0x144d);
++    g_assert_cmphex(ids->subdevice_id, ==, 0xc072);
++    g_assert_cmphex(ids->revision_id, ==, 0x0b);
 +    drmFreeDevice(&from_id);
 +    drmFreeDevice(&legacy);
 +    close(fd);
@@ -107,7 +96,7 @@ index 0000000000000000000000000000000000000000..bb45e3f82dd9540a17ccf462024d01be
 +    char *other = add_pci(tb, "0000:01:00.0");
 +    char *aux1 = umockdev_testbed_add_device(tb, "auxiliary", "gpu.0", pci, NULL, NULL);
 +    char *aux2 = umockdev_testbed_add_device(tb, "auxiliary", "gpu.1", pci, NULL, NULL);
-+    drmDevicePtr display, render, primary, sibling, ordinary;
++    drmDevicePtr display, render, primary, sibling, ordinary, ordinary_copy;
 +    drmDevicePtr devices[8] = { NULL };
 +    int count;
 +
@@ -118,20 +107,21 @@ index 0000000000000000000000000000000000000000..bb45e3f82dd9540a17ccf462024d01be
 +    add_node(tb, other, "card2", 2);
 +    add_node(tb, other, "renderD130", 130);
 +
-+    display = get_device("/dev/dri/card0");
-+    primary = get_device("/dev/dri/card1");
-+    render = get_device("/dev/dri/renderD128");
-+    sibling = get_device("/dev/dri/renderD129");
-+    ordinary = get_device("/dev/dri/card2");
++    display = get_device("/dev/dri/card0", false);
++    primary = get_device("/dev/dri/card1", true);
++    render = get_device("/dev/dri/renderD128", true);
++    sibling = get_device("/dev/dri/renderD129", true);
++    ordinary = get_device("/dev/dri/card2", false);
++    ordinary_copy = get_device("/dev/dri/card2", false);
 +    {
-+        drmDevicePtr ordinary_render = get_device("/dev/dri/renderD130");
++        drmDevicePtr ordinary_render = get_device("/dev/dri/renderD130", false);
 +        g_assert_true(drmDevicesEqual(ordinary, ordinary_render));
 +        drmFreeDevice(&ordinary_render);
 +    }
 +    g_assert_cmpint(display->available_nodes, ==, 1 << DRM_NODE_PRIMARY);
 +    g_assert_cmpint(render->available_nodes, ==,
 +                    (1 << DRM_NODE_PRIMARY) | (1 << DRM_NODE_RENDER));
-+    g_assert_cmpint(render->businfo.pci->dev, ==, 2);
++    g_assert_cmpint(render->businfo.aux->parent.dev, ==, 2);
 +    g_assert_false(drmDevicesEqual(display, render));
 +    g_assert_true(drmDevicesEqual(primary, render));
 +    g_assert_false(drmDevicesEqual(sibling, render));
@@ -145,13 +135,17 @@ index 0000000000000000000000000000000000000000..bb45e3f82dd9540a17ccf462024d01be
 +    count = drmGetDevices(devices, G_N_ELEMENTS(devices));
 +    g_assert_cmpint(count, ==, 4);
 +    drmFreeDevices(devices, count);
-+    /* A node that vanishes cannot be grouped with a surviving parent. */
++    /* Stored identities stay stable after unplug; discovery fails separately. */
 +    {
 +        char *root = umockdev_testbed_get_root_dir(tb);
 +        char *node = g_strconcat(root, "/sys/dev/char/226:1", NULL);
 +        g_assert_cmpint(g_remove(node), ==, 0);
-+        g_assert_false(drmDevicesEqual(primary, render));
++        g_assert_true(drmDevicesEqual(primary, render));
 +        g_assert_false(drmDevicesEqual(display, render));
++        g_free(node);
++        node = g_strconcat(root, "/sys/dev/char/226:2", NULL);
++        g_assert_cmpint(g_remove(node), ==, 0);
++        g_assert_true(drmDevicesEqual(ordinary, ordinary_copy));
 +        g_free(node);
 +        g_free(root);
 +    }
@@ -160,6 +154,7 @@ index 0000000000000000000000000000000000000000..bb45e3f82dd9540a17ccf462024d01be
 +    drmFreeDevice(&render);
 +    drmFreeDevice(&sibling);
 +    drmFreeDevice(&ordinary);
++    drmFreeDevice(&ordinary_copy);
 +    g_free(aux1);
 +    g_free(aux2);
 +    g_free(pci);
@@ -194,7 +189,7 @@ index 0000000000000000000000000000000000000000..bb45e3f82dd9540a17ccf462024d01be
 +    drmDevicePtr device;
 +
 +    add_node(tb, virtio, "card0", 0);
-+    device = get_device("/dev/dri/card0");
++    device = get_device("/dev/dri/card0", false);
 +    g_assert_cmpint(device->businfo.pci->dev, ==, 2);
 +    drmFreeDevice(&device);
 +    g_free(virtio);
@@ -211,7 +206,7 @@ index 0000000000000000000000000000000000000000..bb45e3f82dd9540a17ccf462024d01be
 +    return g_test_run();
 +}
 diff --git a/tests/meson.build b/tests/meson.build
-index ac9e66b01ed324cbb0568b98877118679fd14e63..d13c4d819729807ff2a8a1404a73dc62828d6ba9 100644
+index ac9e66b..4a6b227 100644
 --- a/tests/meson.build
 +++ b/tests/meson.build
 @@ -72,3 +72,20 @@ drmdevice = executable(

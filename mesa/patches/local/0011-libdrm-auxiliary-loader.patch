@@ -1,0 +1,55 @@
+From: Viktor Semykin <thesame.ml@gmail.com>
+Subject: [PATCH] loader: recognize explicit auxiliary DRM identities
+
+Build against the companion libdrm auxiliary API. Include auxiliary SGX
+render nodes in render-only discovery, use parent metadata for driver
+selection, and give DRI_PRIME tags their own auxiliary identity.
+
+Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
+
+diff --git a/src/loader/loader.c b/src/loader/loader.c
+--- a/src/loader/loader.c
++++ b/src/loader/loader.c
+@@ -274,7 +274,11 @@
+ 
+       if ((device->available_nodes & (1 << DRM_NODE_RENDER)) &&
+           (device->bustype == DRM_BUS_PLATFORM ||
+-           device->bustype == DRM_BUS_PCI)) {
++           device->bustype == DRM_BUS_PCI
++#ifdef DRM_BUS_AUXILIARY
++           || device->bustype == DRM_BUS_AUXILIARY
++#endif
++           )) {
+          drmVersionPtr version;
+          bool found = false;
+ 
+@@ -758,6 +762,13 @@
+                    device->businfo.pci->func) < 0) {
+          return NULL;
+       }
++#ifdef DRM_BUS_AUXILIARY
++   } else if (device->bustype == DRM_BUS_AUXILIARY) {
++      const drmPciBusInfo *pci = &device->businfo.aux->parent;
++      if (asprintf(&tag, "aux-%04x_%02x_%02x_%u-%s", pci->domain,
++                   pci->bus, pci->dev, pci->func, device->businfo.aux->name) < 0)
++         return NULL;
++#endif
+    } else if (device->bustype == DRM_BUS_PLATFORM ||
+               device->bustype == DRM_BUS_HOST1X) {
+       char *fullname, *name, *address;
+@@ -1024,6 +1035,15 @@
+       return false;
+    }
+ 
++#ifdef DRM_BUS_AUXILIARY
++   if (device->bustype == DRM_BUS_AUXILIARY) {
++      *vendor_id = device->deviceinfo.aux->vendor_id;
++      *chip_id = device->deviceinfo.aux->device_id;
++      drmFreeDevice(&device);
++      return true;
++   }
++#endif
++
+    if (device->bustype != DRM_BUS_PCI) {
+       drmFreeDevice(&device);
+       log_(_LOADER_DEBUG, "MESA-LOADER: device is not located on the PCI bus\n");

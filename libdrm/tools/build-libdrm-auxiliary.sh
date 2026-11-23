@@ -22,6 +22,7 @@ if ! test -f "$archive"; then
 fi
 echo "ac36293f61ca4aafaf4b16a2a7afff312aa4f5c37c9fbd797de9e3c0863ca379  $archive" | sha256sum -c -
 if ! test -f "$work/.patched"; then
+    rm -rf "$work/src" "$work/build"
     mkdir -p "$work/src"
     tar -xf "$archive" -C "$work/src" --strip-components=1
     for patch_file in "$patch_dir"/*.patch; do
