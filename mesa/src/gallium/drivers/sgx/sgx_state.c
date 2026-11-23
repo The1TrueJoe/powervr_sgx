@@ -527,6 +527,14 @@ sgx_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
       if (s < PIPE_MAX_SHADER_SAMPLER_VIEWS)
          pipe_sampler_view_reference(&v[s], i < nr && views ? views[i] : NULL);
    }
+   /* one past the highest bound (what a draw looks through) */
+   unsigned *n = shader == MESA_SHADER_FRAGMENT ? &ctx->n_views : &ctx->n_vs_views;
+   unsigned top = MIN2(MAX2(*n, start + nr + unbind_num_trailing_slots),
+                       PIPE_MAX_SHADER_SAMPLER_VIEWS);
+
+   while (top && !v[top - 1])
+      top--;
+   *n = top;
 }
 
 static void

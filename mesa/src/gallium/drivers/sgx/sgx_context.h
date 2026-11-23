@@ -249,6 +249,8 @@ struct sgx_context {
    bool rt_later_pass;
    /* MRT, a pass a colour buffer: the one this pass draws or clears into */
    unsigned rt_index;
+   /* one past the highest view bound to the fragment and vertex stages */
+   unsigned n_views, n_vs_views;
 
    struct pipe_framebuffer_state framebuffer;
    struct pipe_viewport_state viewport;
