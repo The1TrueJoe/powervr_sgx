@@ -26,7 +26,7 @@
 #define NBUF 256
 #define NIMAGE 64
 #define STORAGE_POOL_LIMIT 16
-#define CONFIG_ID 1U
+#define NCONFIG 16
 #define CONTEXT_ID 1U
 #define BAD VA_INVALID_ID
 
@@ -40,6 +40,7 @@ typedef struct {
 } Surface;
 typedef struct { unsigned id, element, count; size_t capacity; VABufferType type; unsigned char *data; Surface *owner; } Buffer;
 typedef struct { unsigned id; VAImage image; } Image;
+typedef struct { bool used; VAProfile profile; } Config;
 typedef struct { VASliceParameterBufferH264 param; size_t base, bytes; } StagedSlice;
 typedef struct {
     pthread_mutex_t mutex;
@@ -47,7 +48,7 @@ typedef struct {
     VAProfile profile;
     unsigned width, height;
     unsigned next_id;
-    bool configured, context, begun, have_picture, have_slice, render_failed, disable_submission;
+    bool context, begun, have_picture, have_slice, render_failed, disable_submission;
     bool dmabuf, broker, recovery_preroll;
     unsigned discarded_preroll;
     unsigned frame_exports, storage_replacements, storage_reuses, storage_allocations, cpu_downloads;
@@ -69,6 +70,7 @@ typedef struct {
     Surface surfaces[NSURF];
     Buffer buffers[NBUF];
     Image images[NIMAGE];
+    Config configs[NCONFIG];
 } Driver;
 
 #define LOCK Driver *d = ctx->pDriverData; pthread_mutex_lock(&d->mutex)
@@ -194,17 +196,20 @@ static VAStatus cdv_GetConfigAttributes(VADriverContextP ctx, VAProfile profile,
 static VAStatus cdv_CreateConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entry, VAConfigAttrib *attrs, int count, VAConfigID *id) {
     LOCK;
     if (!supported_profile(d, profile) || entry != VAEntrypointVLD) DONE(VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
-    if (d->configured) DONE(VA_STATUS_ERROR_MAX_NUM_EXCEEDED);
     for (int i = 0; i < count; i++) if (attrs[i].type == VAConfigAttribRTFormat && attrs[i].value != VA_RT_FORMAT_YUV420) DONE(VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-    d->profile = profile; d->configured = true; *id = CONFIG_ID; DONE(VA_STATUS_SUCCESS);
+    for (unsigned i = 0; i < NCONFIG; i++) if (!d->configs[i].used) {
+        d->configs[i] = (Config){ .used = true, .profile = profile };
+        *id = i + 1; DONE(VA_STATUS_SUCCESS);
+    }
+    DONE(VA_STATUS_ERROR_MAX_NUM_EXCEEDED);
 }
 static VAStatus cdv_DestroyConfig(VADriverContextP ctx, VAConfigID id) {
-    LOCK; if (id != CONFIG_ID || !d->configured) DONE(VA_STATUS_ERROR_INVALID_CONFIG);
-    d->configured = false; DONE(VA_STATUS_SUCCESS);
+    LOCK; if (!id || id > NCONFIG || !d->configs[id - 1].used) DONE(VA_STATUS_ERROR_INVALID_CONFIG);
+    d->configs[id - 1].used = false; DONE(VA_STATUS_SUCCESS);
 }
 static VAStatus cdv_QueryConfigAttributes(VADriverContextP ctx, VAConfigID id, VAProfile *profile, VAEntrypoint *entry, VAConfigAttrib *attrs, int *count) {
-    LOCK; if (id != CONFIG_ID || !d->configured) DONE(VA_STATUS_ERROR_INVALID_CONFIG);
-    *profile = d->profile; *entry = VAEntrypointVLD; *count = 1;
+    LOCK; if (!id || id > NCONFIG || !d->configs[id - 1].used) DONE(VA_STATUS_ERROR_INVALID_CONFIG);
+    *profile = d->configs[id - 1].profile; *entry = VAEntrypointVLD; *count = 1;
     attrs[0] = (VAConfigAttrib){ .type = VAConfigAttribRTFormat, .value = VA_RT_FORMAT_YUV420 }; DONE(VA_STATUS_SUCCESS);
 }
 static VAStatus create_surfaces(Driver *d, unsigned format, unsigned width, unsigned height, VASurfaceID *ids, unsigned count, VASurfaceAttrib *attrs, unsigned nattrs) {
@@ -264,7 +269,7 @@ static VAStatus cdv_QuerySurfaceAttributes(VADriverContextP ctx, VAConfigID conf
 }
 static VAStatus cdv_CreateContext(VADriverContextP ctx, VAConfigID config, int width, int height, int flags, VASurfaceID *targets, int count, VAContextID *id) {
     LOCK;
-    if (!d->configured || config != CONFIG_ID) DONE(VA_STATUS_ERROR_INVALID_CONFIG);
+    if (!config || config > NCONFIG || !d->configs[config - 1].used) DONE(VA_STATUS_ERROR_INVALID_CONFIG);
     if (d->context) DONE(VA_STATUS_ERROR_MAX_NUM_EXCEEDED);
     if (d->dmabuf && !variable_resolution(d) && (width != 1280 || height != 720)) DONE(VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED);
     if (runtime_config(d)) {
@@ -276,6 +281,7 @@ static VAStatus cdv_CreateContext(VADriverContextP ctx, VAConfigID config, int w
     }
     d->fd = cedar_decoder_open(&d->broker);
     if (d->fd < 0) DONE(VA_STATUS_ERROR_OPERATION_FAILED);
+    d->profile = d->configs[config - 1].profile;
     d->context = true; reset_references(d); *id = CONTEXT_ID; DONE(VA_STATUS_SUCCESS);
 }
 static VAStatus cdv_DestroyContext(VADriverContextP ctx, VAContextID id) {

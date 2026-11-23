@@ -345,7 +345,7 @@ static void test_variable_geometry(void)
     assert(!cedar_h264_picture_geometry_valid(854,480));
     assert(cedar_h264_picture_geometry_valid(1920,1088));
     struct VADriverContext ctx={.pDriverData=&d};VASurfaceAttrib attrs[6];unsigned count=6;
-    assert(cdv_QuerySurfaceAttributes(&ctx,CONFIG_ID,attrs,&count)==VA_STATUS_SUCCESS);
+    assert(cdv_QuerySurfaceAttributes(&ctx,1,attrs,&count)==VA_STATUS_SUCCESS);
     assert(attrs[2].value.value.i==16 && attrs[3].value.value.i==16 && attrs[5].value.value.i==1088);
     d.width=640;d.height=368;
     struct cedar_frame_export frame={.width=640,.height=368,.stride=CEDAR_H264_STORAGE_STRIDE,.uv_offset=CEDAR_H264_STORAGE_UV_OFFSET,
@@ -419,8 +419,38 @@ static void test_slice_staging(struct VADriverContext *ctx, VASurfaceID sid)
     puts("Multislice grouping/packing and late-error cleanup passed (offline).");
 }
 
+static void test_configs(void)
+{
+    Driver d = { .profile = VAProfileH264Main, .context = true };
+    struct VADriverContext ctx = { .pDriverData = &d };
+    d.caps.features = CEDAR_CAP_H264_RUNTIME;
+    assert(!pthread_mutex_init(&d.mutex, NULL));
+    VAConfigID ids[NCONFIG], extra;
+    for (unsigned i = 0; i < NCONFIG; i++) {
+        VAProfile wanted = i & 1 ? VAProfileH264High : VAProfileH264Main;
+        assert(cdv_CreateConfig(&ctx, wanted, VAEntrypointVLD, NULL, 0, &ids[i]) == VA_STATUS_SUCCESS);
+        VAProfile profile; VAEntrypoint entry; VAConfigAttrib attr; int count;
+        assert(cdv_QueryConfigAttributes(&ctx, ids[i], &profile, &entry, &attr, &count) == VA_STATUS_SUCCESS);
+        assert(profile == wanted && entry == VAEntrypointVLD && count == 1);
+        for (unsigned j = 0; j < i; j++) assert(ids[i] != ids[j]);
+        assert(d.profile == VAProfileH264Main); /* Active context is immutable. */
+    }
+    assert(cdv_CreateConfig(&ctx, VAProfileH264High, VAEntrypointVLD, NULL, 0, &extra) == VA_STATUS_ERROR_MAX_NUM_EXCEEDED);
+    assert(cdv_DestroyConfig(&ctx, ids[1]) == VA_STATUS_SUCCESS);
+    assert(cdv_DestroyConfig(&ctx, ids[1]) == VA_STATUS_ERROR_INVALID_CONFIG);
+    VAContextID context;
+    assert(cdv_CreateContext(&ctx, ids[1], 64, 32, 0, NULL, 0, &context) == VA_STATUS_ERROR_INVALID_CONFIG);
+    assert(cdv_CreateContext(&ctx, ids[0], 64, 32, 0, NULL, 0, &context) == VA_STATUS_ERROR_MAX_NUM_EXCEEDED);
+    assert(cdv_CreateConfig(&ctx, VAProfileH264High, VAEntrypointVLD, NULL, 0, &extra) == VA_STATUS_SUCCESS);
+    assert(d.profile == VAProfileH264Main);
+    for (unsigned i = 0; i < NCONFIG; i++) assert(cdv_DestroyConfig(&ctx, ids[i]) == VA_STATUS_SUCCESS);
+    pthread_mutex_destroy(&d.mutex);
+    puts("Multiple VA configurations and active-context profile isolation passed (offline).");
+}
+
 int main(void)
 {
+    test_configs();
     test_runtime_controls();
     test_prediction_weights();
     test_p_references();
