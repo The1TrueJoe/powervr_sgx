@@ -23,6 +23,8 @@ build/test-dmabuf-planes: tests/test-dmabuf-planes.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) $(shell $(PKG_CONFIG) --cflags egl glesv2 libdrm) $< -o $@ $(LDFLAGS) $(shell $(PKG_CONFIG) --libs egl glesv2)
 build/test-va-export-frames: tests/test-va-export-frames.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) $(shell $(PKG_CONFIG) --cflags libavcodec libavformat libavutil libva) $< -o $@ $(LDFLAGS) $(shell $(PKG_CONFIG) --libs libavcodec libavformat libavutil libva)
+build/test-kernel-storage: tests/test-kernel-storage.c include/cedar-msvdx.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -Iinclude $< -o $@ $(LDFLAGS)
 build/test-va-export: tests/test-va-export.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) $(shell $(PKG_CONFIG) --cflags libva-drm libdrm) $< -o $@ $(LDFLAGS) $(shell $(PKG_CONFIG) --libs libva-drm libdrm)
 build/test-h264-dma: tests/test-h264-dma.c include/cedar-msvdx-dma.h include/cedar-msvdx.h | build

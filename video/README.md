@@ -88,6 +88,7 @@ authorized machine and keep generated media/captures under ignored build output.
   progress and resource retirement, including explicit rejection controls.
 - `tools/test-h264-stream.py`: per-frame hashes and sequence rollover; live
   suspend only when explicitly requested by the operator.
+- `build/test-kernel-storage`: root-only shared blank storage and global cap/retirement check, without firmware submission.
 - `build/test-va-export`: initialized probe exports, write rejection, retained
   descriptor lifetime and optional cross-device PRIME import.
 - `build/test-va-export-frames` plus `build/test-dmabuf-planes`: real decoded
