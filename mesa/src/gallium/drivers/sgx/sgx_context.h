@@ -153,6 +153,14 @@ struct sgx_pipe_shader {
    /* MRT: 1 + the colour buffer this variant draws into, its DATA output
     * made output 0 (remap_outputs); 0 a single buffer */
    uint8_t rt_target;
+   /* colour buffer 0 is sRGB (lower_srgb_output): 0 not, 1 the colour
+    * encoded, 2 blended first, in linear, with the tile's colour decoded (as
+    * rt_blend and rt_blend_color say; the compiler's rt_packed), the sop2
+    * epilogue left out.  reads_tile: it does read the tile (pass type) */
+   uint8_t rt_srgb;
+   bool reads_tile;
+   struct pipe_rt_blend_state rt_blend; /* colormask 0: the epilogue's */
+   float rt_blend_color[4];             /* 0 unless a factor reads it */
    /* units bound to an RGBA32 / RG32 texture, read a plane at a time (the
     * compiler's tex_r32x4 / tex_r32x2) */
    uint32_t r32x4, r32x2;

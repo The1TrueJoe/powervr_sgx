@@ -822,12 +822,92 @@ consts_f16_exact(nir_alu_instr *alu)
    return true;
 }
 
+/* an f32 value d is F16 from here on: its float users read f2f32(f2f16(d)) */
+static void
+seed16(nir_builder *b, nir_def *d)
+{
+   b->cursor = nir_after_instr(nir_def_instr(d));
+   nir_def *w = nir_f2f32(b, nir_f2f16(b, d));
+   nir_def_rewrite_uses_after(d, w);
+}
+
+static bool
+is_fdot(nir_op op)
+{
+   return op == nir_op_fdot2 || op == nir_op_fdot3 || op == nir_op_fdot4;
+}
+
+/* every operand of alu F16 underneath (an f2f32 of a 16-bit value) or a
+ * constant, and at least one of them F16 */
+static bool
+operands_f16(nir_alu_instr *alu)
+{
+   unsigned f16 = 0;
+
+   for (unsigned j = 0; j < nir_op_infos[alu->op].num_inputs; j++) {
+      nir_alu_instr *p = alu_of(alu->src[j].src);
+      if (p && p->op == nir_op_f2f32 && nir_src_bit_size(p->src[0].src) == 16)
+         f16++;
+      else if (!nir_src_is_const(alu->src[j].src))
+         return false;
+   }
+   return f16 > 0;
+}
+
+/* d is used only by square roots (normalize, length, distance) */
+static bool
+only_roots(nir_def *d)
+{
+   if (list_is_empty(&d->uses))
+      return false;
+   nir_foreach_use_including_if (src, d) {
+      if (nir_src_is_if(src) ||
+          nir_src_use_instr(src)->type != nir_instr_type_alu)
+         return false;
+      nir_op op = nir_instr_as_alu(nir_src_use_instr(src))->op;
+      if (op != nir_op_frsq && op != nir_op_fsqrt)
+         return false;
+   }
+   return true;
+}
+
+/* normalize(v) and length(v) of a mediump v: |v|^2 overflows F16 once |v|
+ * passes 256 (65504), and a world-space vector (ioquake3's view and light
+ * directions) is that long; the overflow made far surfaces white.  The dot
+ * product a square root is taken of stays f32 (an F16 one is computed in
+ * f32 and rounded), and so does its root, which goes back to F16 for its
+ * users: 1 / |v| and |v| themselves fit. */
+static bool
+root_of_dot_instr(nir_builder *b, nir_alu_instr *alu)
+{
+   if (alu->op != nir_op_frsq && alu->op != nir_op_fsqrt)
+      return false;
+   nir_alu_instr *dot = alu_of(alu->src[0].src);
+   if (!dot || !is_fdot(dot->op) || dot->def.bit_size != 32 ||
+       !operands_f16(dot) || !only_roots(&dot->def))
+      return false;
+   /* (once: its users read it through f2f16 already) */
+   if (list_is_singular(&alu->def.uses)) {
+      nir_src *u = list_first_entry(&alu->def.uses, nir_src, use_link);
+      if (!nir_src_is_if(u) &&
+          nir_src_use_instr(u)->type == nir_instr_type_alu &&
+          nir_instr_as_alu(nir_src_use_instr(u))->op == nir_op_f2f16)
+         return false;
+   }
+   seed16(b, &alu->def);
+   return true;
+}
+
 static bool
 demote_instr(nir_builder *b, nir_alu_instr *alu, void *data)
 {
    nir_op op = alu->op;
    if (alu->def.bit_size != 32 || !demote_op(op) || feeds_coord(&alu->def, 0))
       return false;
+   if (is_fdot(op) && only_roots(&alu->def))
+      return false;
+   if (root_of_dot_instr(b, alu))
+      return true;
    /* at least one operand F16 underneath, or constants that are F16 values
     * read as floats: constants alone don't say the value is a float
     * (bcsel(b, 3, 0) over ints, a 32-bit loop bound), nor that F16 holds
@@ -854,14 +934,6 @@ demote_instr(nir_builder *b, nir_alu_instr *alu, void *data)
    return true;
 }
 
-/* an f32 value d is F16 from here on: its float users read f2f32(f2f16(d)) */
-static void
-seed16(nir_builder *b, nir_def *d)
-{
-   b->cursor = nir_after_instr(nir_def_instr(d));
-   nir_def *w = nir_f2f32(b, nir_f2f16(b, d));
-   nir_def_rewrite_uses_after(d, w);
-}
 
 static bool
 low_prec(unsigned p)
@@ -1004,6 +1076,28 @@ lower_mediump(nir_shader *s, bool all)
    NIR_PASS(progress, s, nir_opt_constant_folding);
    NIR_PASS(progress, s, nir_opt_dce);
    return progress;
+}
+
+/* The same for a program Mesa's GLSL front end already lowered to 16 bits
+ * (fp16 cap): rsq16 / sqrt16 of a 16-bit dot product becomes the root of an
+ * f32 dot product of the same operands, rounded to F16 once.  (ioquake3's ES
+ * renderer, r_PreferOpenglES 1: far walls and the sky white) */
+static bool
+root_of_dot16_instr(nir_builder *b, nir_alu_instr *alu, void *data)
+{
+   if ((alu->op != nir_op_frsq && alu->op != nir_op_fsqrt) ||
+       alu->def.bit_size != 16)
+      return false;
+   nir_alu_instr *dot = alu_of(alu->src[0].src);
+   if (!dot || !is_fdot(dot->op) || dot->def.bit_size != 16)
+      return false;
+   b->cursor = nir_before_instr(&alu->instr);
+   nir_def *x = nir_f2f32(b, nir_ssa_for_alu_src(b, dot, 0));
+   nir_def *y = nir_f2f32(b, nir_ssa_for_alu_src(b, dot, 1));
+   nir_def *d = nir_build_alu2(b, dot->op, x, y);
+   nir_def *r = nir_build_alu1(b, alu->op, d);
+   nir_def_replace(&alu->def, nir_f2f16(b, r));
+   return true;
 }
 
 /* A 16-bit min / max / saturate of values that are f32 underneath (an f2f16,
@@ -2595,6 +2689,10 @@ sgx_lower(struct sgx_ctx *c)
 
    optimize_late(s);
 
+   if (c->p16 && s->info.stage == MESA_SHADER_FRAGMENT &&
+       nir_shader_alu_pass(s, root_of_dot16_instr, nir_metadata_control_flow,
+                           NULL))
+      NIR_PASS(_, s, nir_opt_dce);
    if (c->p16 && !sgx_debug(c, SGX_DBG_NO_MINMAX32)) {
       NIR_PASS(_, s, nir_shader_alu_pass, minmax32_instr,
                nir_metadata_control_flow, NULL);
