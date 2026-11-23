@@ -234,6 +234,38 @@ int main(int argc, char **argv)
       }
    }
 
+   /* Write attempts must fail in GL before a CPU store or GPU submission.
+    * The original exact sampling below then proves the source stayed intact. */
+   for (int plane = 0; plane < 2; plane++) {
+      if (!tex[plane]) continue;
+      glBindTexture(GL_TEXTURE_2D, tex[plane]);
+      const uint8_t replacement[4] = {255, 0, 255, 255};
+      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA,
+                      GL_UNSIGNED_BYTE, replacement);
+      GLenum error = glGetError();
+      if (error != GL_INVALID_OPERATION) {
+         fprintf(stderr, "read-only upload: expected INVALID_OPERATION, got %#x\n", error);
+         fails++;
+      }
+      GLuint fbo;
+      glGenFramebuffers(1, &fbo);
+      glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                            GL_TEXTURE_2D, tex[plane], 0);
+      if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+         fprintf(stderr, "read-only texture unexpectedly renderable\n");
+         fails++;
+      }
+      glClear(GL_COLOR_BUFFER_BIT);
+      error = glGetError();
+      if (error != GL_INVALID_FRAMEBUFFER_OPERATION) {
+         fprintf(stderr, "read-only clear: expected framebuffer error, got %#x\n", error);
+         fails++;
+      }
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      glDeleteFramebuffers(1, &fbo);
+   }
+
    static const char *hdr = "#ifdef GL_ES\nprecision highp float;\n#endif\nuniform vec2 sz;";
    char fs[512];
    for (int plane = 0; plane < 2; plane++) {

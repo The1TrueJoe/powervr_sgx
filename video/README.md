@@ -6,7 +6,8 @@ launchers and reproducible tests. It supports progressive 8-bit H.264 through
 coded 1920x1088 on Atom N2800. See [MSVDX architecture and provenance](../docs/MSVDX-USERSPACE.md)
 for the kernel/private ABI, admission limits, storage lifetime and firmware.
 
-The gma500 host is opt-in (`gma500_gfx.msvdx=1`). Its private device is root-only;
+The gma500 host needs the default-off `CONFIG_DRM_GMA500_MSVDX` build option
+and runtime opt-in `gma500_gfx.msvdx=1`. Its private device is root-only;
 the broker authorizes one configured desktop UID. This is a downstream prototype
 interface, not a mainline media/DRM ABI or a general multi-user decoder service.
 
@@ -35,7 +36,7 @@ Keep the socket directory root-owned. Keep the private decoder node mode 0600.
 No vendor binary is included in this subtree or the kernel patch. Obtain the
 unchanged vendor image independently under its original redistribution license:
 
-- request path: `/lib/firmware/cedarview-test/msvdx_fw_mfld_DE2.0.bin`
+- request path: `/lib/firmware/cedarview/msvdx_fw_mfld_DE2.0.bin`
 - version 0x496, size 32788 bytes
 - SHA256 `6d073592a1f10bc7da269f11fd8f15b6ca3e69c07d9efde4cdaa10f4af6be27b`
 

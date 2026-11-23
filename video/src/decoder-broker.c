@@ -62,7 +62,7 @@ static int safe_parent(const char *path)
 
 static int device_open(struct cedar_msvdx_caps *caps)
 {
-    int fd = open("/dev/cedar-msvdx-test",O_RDWR|O_CLOEXEC);
+    int fd = open("/dev/cedar-msvdx",O_RDWR|O_CLOEXEC);
     if (fd < 0) return -1;
     const unsigned required = CEDAR_CAP_H264_DPB4 | CEDAR_CAP_FRAME_DMABUF |
         CEDAR_CAP_INDEPENDENT_SURFACES | CEDAR_CAP_SURFACE_BINDING | CEDAR_CAP_LAZY_READBACK;
@@ -168,7 +168,7 @@ int main(int argc, char **argv)
     if (listener < 0) { perror("socket"); return 1; }
     umask(0077);
     if (bind(listener,(struct sockaddr *)&address,sizeof(address))) { perror("bind"); close(listener); return 1; }
-    if (chown(path,(uid_t)allowed,(gid_t)-1) || chmod(path,0600) || listen(listener,8)) {
+    if (chmod(path,0600) || chown(path,(uid_t)allowed,(gid_t)-1) || listen(listener,8)) {
         perror("listen permissions"); close(listener); unlink(path); return 1;
     }
     if (restrict_privileges()) {

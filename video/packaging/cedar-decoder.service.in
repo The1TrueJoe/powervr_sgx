@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 [Unit]
 Description=Cedarview MSVDX decoder broker
-ConditionPathExists=/dev/cedar-msvdx-test
+ConditionPathExists=/dev/cedar-msvdx
 After=systemd-modules-load.service
 
 [Service]

@@ -41,7 +41,7 @@ int cedar_decoder_open(bool *broker)
 {
     const char *path = getenv("CEDAR_DECODER_SOCKET");
     *broker = path && *path;
-    if (!*broker) return open("/dev/cedar-msvdx-test",O_RDWR|O_CLOEXEC);
+    if (!*broker) return open("/dev/cedar-msvdx",O_RDWR|O_CLOEXEC);
     struct sockaddr_un address = { .sun_family = AF_UNIX };
     if (strlen(path) >= sizeof(address.sun_path)) { errno = ENAMETOOLONG; return -1; }
     memcpy(address.sun_path,path,strlen(path)+1);

@@ -70,8 +70,7 @@ struct cedar_msvdx_caps {
 #define CEDAR_MSVDX_GET_CAPS _IOR('C', 1, struct cedar_msvdx_caps)
 
 /* Completed, immutable, linear NV12 image. EXPORT input: version1, fd=-1,
- * everything else zero. INFO input: version1 and an exported fd, rest zero.
- * INFO flag1 additionally exercises a read-only attachment on this device.
+ * everything else zero.
  * The id is unique within this loaded driver; dup/SCM_RIGHTS retain identity.
  * Export pins the output slot until the last fd/mapping/display reader closes.
  * This read-only exporter uses fixed-capacity coherent backing storage, with
