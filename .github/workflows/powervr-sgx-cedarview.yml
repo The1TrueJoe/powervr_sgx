@@ -68,6 +68,17 @@ jobs:
           done
           if grep -E ': (ERROR|WARNING|CHECK):' gma-checkpatch.log; then exit 1; fi
 
+      - name: Compile the opt-in MSVDX host; keep release config disabled
+        run: |
+          set -eux
+          L=linux-$LINUX_VERSION
+          ./$L/scripts/config --file $L/.config -e DRM_GMA500_MSVDX
+          make -C $L ARCH=x86_64 olddefconfig prepare
+          make -C $L ARCH=x86_64 -j"$(nproc)" W=1 C=1 drivers/gpu/drm/gma500/ 2>&1 | tee msvdx-build.log
+          if grep -E 'gma500/.*(warning|error):' msvdx-build.log; then exit 1; fi
+          ./$L/scripts/config --file $L/.config -d DRM_GMA500_MSVDX
+          make -C $L ARCH=x86_64 olddefconfig
+
       - name: Build the kernel and modules
         run: |
           set -eux

@@ -9,11 +9,7 @@ and lifetime details and [the companion cedar-video project](https://github.com/
 
 ## Source provenance
 
-This implementation derives from published open-source Intel/Imagination
-interfaces and hardware validation. It is not claimed to have been written
-solely from this project's clean-room specifications. The maintainer invited
-review with vendor binaries and copied decompiled vendor code excluded in
-[issue #15](https://github.com/The1TrueJoe/powervr_sgx/issues/15#issuecomment-7070865421).
+Published source inputs and hardware evidence:
 
 - The DE2 command framing, register definitions, H.264 setup and licensed VLC
   tables come from AOSP `hardware/intel/img/psb_video`, commit
@@ -29,9 +25,7 @@ review with vendor binaries and copied decompiled vendor code excluded in
   tables. It contains no sample bitstream, reference image or firmware binary.
   Caller input and admitted picture/reference state are patched at submission.
 
-The externally obtained vendor firmware remains non-free. No binary, firmware
-listing or decompiler output is part of this contribution. Firmware bytes are
-unchanged and are not an input to building the host or userspace.
+The externally obtained vendor firmware remains non-free. Firmware bytes are unchanged and are not an input to building the host or userspace.
 
 ## Runtime and trust boundary
 
