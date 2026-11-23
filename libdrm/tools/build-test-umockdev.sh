@@ -20,6 +20,7 @@ if ! test -f "$work/src/.unpacked"; then
     touch "$work/src/.unpacked"
 fi
 if ! test -f "$work/obj/build.ninja"; then
+    rm -rf "$work/obj"
     meson setup "$work/obj" "$work/src" --prefix="$work/install" --libdir=lib -Dgtk_doc=false
 fi
 ninja -C "$work/obj" -j "${CEDAR_LIBDRM_JOBS:-8}"

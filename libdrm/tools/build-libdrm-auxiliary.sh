@@ -31,6 +31,7 @@ if ! test -f "$work/.patched"; then
     printf '%s\n' "$patch_sha" > "$work/.patched"
 fi
 if ! test -f "$work/build/build.ninja"; then
+    rm -rf "$work/build"
     meson setup "$work/build" "$work/src" --prefix=/opt/cedar-libdrm --libdir=lib \
         -Dintel=disabled -Dradeon=disabled -Damdgpu=disabled -Dnouveau=disabled \
         -Dvmwgfx=disabled -Dfreedreno=disabled -Dvc4=disabled -Detnaviv=disabled \

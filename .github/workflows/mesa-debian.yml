@@ -64,6 +64,14 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Build against the optional auxiliary-device libdrm API
+        run: |
+          if test -f libdrm/tools/build-libdrm-auxiliary.sh; then
+            sh libdrm/tools/build-libdrm-auxiliary.sh --install
+            echo "PKG_CONFIG_PATH=/opt/cedar-libdrm/lib/pkgconfig" >> "$GITHUB_ENV"
+            echo "LD_LIBRARY_PATH=/opt/cedar-libdrm/lib" >> "$GITHUB_ENV"
+          fi
+
       - name: Build
         run: |
           set -eux
