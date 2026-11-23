@@ -12,9 +12,9 @@ firmware or userspace.
 
 | GPU | Hardware | Status |
 |---|---|---|
-| SGX545 | Intel Cedarview: Atom N2600, N2800, D2500, D2550, D2700 | **Supported.** Debian 13 packages, tested by users on their own machines |
-| SGX545 | Intel Atom CE5300 / CE5310 | **Supported.** The development boards |
-| SGX545 | Intel Clover Trail: Atom Z2760 | **Works** for a contributor on an HP ElitePad 900; manual setup ([notes](https://github.com/The1TrueJoe/powervr_sgx/blob/dev/docs/porting/cores/clovertrail.md)) |
+| SGX545 | Intel Cedarview: Atom N2600, N2800, D2500, D2550, D2700 | **Supported.** Debian 13 packages |
+| SGX545 | Intel Atom CE5300 / CE5310 | **Supported** |
+| SGX545 | Intel Clover Trail: Atom Z2760 | **Works**, tested on an HP ElitePad 900; manual setup ([notes](https://github.com/The1TrueJoe/powervr_sgx/blob/dev/docs/porting/cores/clovertrail.md)) |
 | SGX530 | TI OMAP3 (OMAP3430, OMAP3630, DM3730), AM335x, AM3517 | **In bring-up:** the kernel driver powers the GPU and reads its ID; no frames yet |
 | SGX535, SGX540, SGX543, SGX544, SGX554 | Intel Poulsbo, TI OMAP4/5, Allwinner A31/A83T, and others | Wanted: see [Contributing](#contributing) |
 
@@ -41,13 +41,11 @@ Minecraft also runs in its world for 15 minutes without a single GPU recovery.
 
 ### Games
 
-Run by us or by testers:
-
 | Game | Notes |
 |---|---|
 | Minecraft 1.7.10 | About 13 FPS standing on a CE5300 board |
-| OpenArena | About 44 FPS in the `opengl1` timedemo on an Atom N2600 (a tester). The `opengl2` renderer runs too, at about 7 to 12 FPS |
-| Doom 3 | Runs well (a tester) |
+| OpenArena | About 44 FPS in the `opengl1` timedemo on an Atom N2600. The `opengl2` renderer runs too, at about 7 to 12 FPS |
+| Doom 3 | Runs well |
 | Counter-Strike 1.6 | Through the 32-bit Mesa package |
 | QuakeSpasm, SuperTuxKart, Geometry Dash, the Super Mario 64 PC port | Run |
 
