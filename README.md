@@ -126,5 +126,5 @@ Compatibility patches under `video/patches/` retain their upstream licenses.
 
 The optional [VAAPI driver and broker](video/README.md) use the separately
 proposed gma500 MSVDX host. They support CPU-copy playback; direct import
-additionally needs the SGX read-only import and player compatibility changes.
+additionally needs NV12 SGX sampling and the player compatibility change.
 Firmware is supplied separately and the private kernel interface is opt-in.

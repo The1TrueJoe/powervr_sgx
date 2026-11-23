@@ -59,7 +59,8 @@ cedar-mpv-wayland-gpu --fullscreen /path/to/video.mp4
 ```
 
 Direct import additionally requires Mesa R8/GR88 sampling and the separate SGX
-kernel/Mesa read-only import changes. The VAAPI and gma500 changes alone do not
+writable DMA-BUF sharing (no read-only import patches are required). Reliable
+idle retirement additionally needs the separate SGX runtime-power-off fix. The VAAPI and gma500 changes alone do not
 enable zero-copy. mpv also needs the independent GR channel-metadata fix in
 `video/patches/mpv/`; see its README and `tools/build-mpv-nv12.sh`. The patched
 player installs into `/opt/cedar-mpv`, leaving the system player intact.
@@ -88,12 +89,17 @@ authorized machine and keep generated media/captures under ignored build output.
   progress and resource retirement, including explicit rejection controls.
 - `tools/test-h264-stream.py`: per-frame hashes and sequence rollover; live
   suspend only when explicitly requested by the operator.
-- `build/test-kernel-storage`: root-only shared blank storage and global cap/retirement check, without firmware submission.
-- `build/test-va-export`: initialized probe exports, write rejection, retained
+- `build/test-kernel-storage`: root-only independent probe storage and global cap/retirement check, without firmware submission.
+- `build/test-va-export`: initialized probe exports, writable mapping/isolation, retained
   descriptor lifetime and optional cross-device PRIME import.
 - `build/test-va-export-frames` plus `build/test-dmabuf-planes`: real decoded
   R8/GR88 planes sampled directly in SGX; compare all coded texels with the
-  immutable CPU mapping. This complements the software-reference check.
+  synchronized CPU mapping. This complements the software-reference check.
+  An optional final `--write` argument on the plane sampler is destructive: use
+  only on a standalone probe. Current SGX discards imported-plane clears despite
+  complete FBOs; that write probe fails while ordinary sampling passes.
+- `tools/test-import-retirement.py`: root-only repeated CPU-written probe imports
+  and idle retirement, requiring the plane sampler and intended graphics environment.
 - `tools/test-player-colors.py`: same-frame direct/copy compositor RGB capture,
   catching the mpv `.ra` versus `.rg` chroma bug. Requires `grim` and an active
   Wayland session; mpv's software screenshot fallback would hide the bug.

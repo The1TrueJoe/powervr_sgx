@@ -126,7 +126,7 @@ static int request(int client, int device, const struct cedar_broker_header *h,
         if (storage_quota()) { status=errno; break; }
         if (ioctl(device,CEDAR_MSVDX_EXPORT_BLANK,&response.frame)) { status=errno; break; }
         right=response.frame.fd; response.frame.fd=-1;
-        if (right < 0 || (fcntl(right,F_GETFL)&O_ACCMODE) != O_RDONLY) { status=EIO; break; }
+        if (right < 0 || (fcntl(right,F_GETFL)&O_ACCMODE) != O_RDWR) { status=EIO; break; }
         bytes=sizeof(response.frame); ++*exported; *used=true;
         break;
     case CEDAR_BROKER_EXPORT:
@@ -134,7 +134,7 @@ static int request(int client, int device, const struct cedar_broker_header *h,
         response.frame.version=1; response.frame.fd=-1;
         if (ioctl(device,CEDAR_MSVDX_EXPORT_FRAME,&response.frame)) { status=errno; break; }
         right=response.frame.fd; response.frame.fd=-1;
-        if (right < 0 || (fcntl(right,F_GETFL)&O_ACCMODE) != O_RDONLY) { status=EIO; break; }
+        if (right < 0 || (fcntl(right,F_GETFL)&O_ACCMODE) != O_RDWR) { status=EIO; break; }
         bytes=sizeof(response.frame); ++*exported;
         break;
     default:

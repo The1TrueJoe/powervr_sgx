@@ -154,8 +154,8 @@ static void want_yuv(int x, int y, uint8_t *e)
 
 int main(int argc, char **argv)
 {
-   if (argc != 6) {
-      fprintf(stderr, "usage: %s dma-buf-fd width height pitch UV-offset\n", argv[0]);
+   if (argc != 6 && (argc != 7 || strcmp(argv[6], "--write"))) {
+      fprintf(stderr, "usage: %s dma-buf-fd width height pitch UV-offset [--write]\n", argv[0]);
       return 2;
    }
    int dfd = number(argv[1]), W = number(argv[2]), H = number(argv[3]);
@@ -163,8 +163,8 @@ int main(int argc, char **argv)
    off_t size = lseek(dfd, 0, SEEK_END);
    if (W < 2 || H < 2 || W > 4096 || H > 4096 || (W & 1) || (H & 1) ||
        pitch < (unsigned)W || uv_off < pitch * H || size <= 0 ||
-       uv_off + pitch * (H / 2) > (uint64_t)size || (fcntl(dfd, F_GETFL) & O_ACCMODE) != O_RDONLY) {
-      fprintf(stderr, "invalid read-only NV12 layout\n");
+       uv_off + pitch * (H / 2) > (uint64_t)size) {
+      fprintf(stderr, "invalid NV12 layout\n");
       return 2;
    }
    expected = mmap(NULL, size, PROT_READ, MAP_SHARED, dfd, 0);
@@ -236,7 +236,7 @@ int main(int argc, char **argv)
 
    /* Write attempts must fail in GL before a CPU store or GPU submission.
     * The original exact sampling below then proves the source stayed intact. */
-   for (int plane = 0; plane < 2; plane++) {
+   for (int plane = 0; (fcntl(dfd, F_GETFL) & O_ACCMODE) == O_RDONLY && plane < 2; plane++) {
       if (!tex[plane]) continue;
       glBindTexture(GL_TEXTURE_2D, tex[plane]);
       const uint8_t replacement[4] = {255, 0, 255, 255};
@@ -299,6 +299,61 @@ int main(int argc, char **argv)
       uint8_t *px = draw(pr, W, H);
       fails += !!report("3 Y and UV in one shader", px, W, H, 3, want_yuv);
       free(px);
+   }
+   /* Optional destructive check for a standalone writable probe surface.
+    * Never use on a frame still needed by a decoder reference picture. */
+   if (argc == 7 && tex[0] && tex[1]) {
+      uint8_t *snapshot = malloc(size);
+      if (!snapshot) return 2;
+      memcpy(snapshot, expected, size);
+      sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+      if (ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync)) return 2;
+      for (int plane = 0; plane < 2; plane++) {
+         GLuint fbo;
+         glGenFramebuffers(1, &fbo);
+         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, tex[plane], 0);
+         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            fprintf(stderr, "writable plane %d is not renderable\n", plane);
+            fails++;
+         } else {
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(0, 0, 1, 1);
+            glClearColor(1, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDisable(GL_SCISSOR_TEST);
+            if (glGetError()) fails++;
+         }
+         glFinish();
+         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+         glDeleteFramebuffers(1, &fbo);
+      }
+      glFinish();
+      sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ;
+      if (ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync)) return 2;
+      if (expected[0] != 255 || expected[uv_off] != 255 || expected[uv_off + 1] != 0) {
+         fprintf(stderr, "GPU plane write bytes: Y=%u U=%u V=%u; expected 255,255,0\n", expected[0], expected[uv_off], expected[uv_off + 1]);
+         fails++;
+      }
+      for (off_t i = 0; i < size; i++)
+         if (i != 0 && i != (off_t)uv_off && i != (off_t)uv_off + 1 && expected[i] != snapshot[i]) {
+            fprintf(stderr, "GPU plane writes damaged neighboring byte %ld\n", (long)i);
+            fails++; break;
+         }
+      sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+      if (ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync)) return 2;
+      void *writeback = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, dfd, 0);
+      sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE;
+      if (writeback == MAP_FAILED || ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync)) return 2;
+      memcpy(writeback, snapshot, size);
+      sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
+      if (ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync)) return 2;
+      munmap(writeback, size);
+      free(snapshot);
+      sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ;
+      if (ioctl(dfd, DMA_BUF_IOCTL_SYNC, &sync)) return 2;
+      printf("Writable Y/UV GPU access, CPU visibility and neighboring bytes checked\n");
    }
    printf("glGetError 0x%x\nresult: %d failed\n", glGetError(), fails);
    glFinish();

@@ -419,6 +419,37 @@ static void test_slice_staging(struct VADriverContext *ctx, VASurfaceID sid)
     puts("Multislice grouping/packing and late-error cleanup passed (offline).");
 }
 
+static void test_export_access_modes(void)
+{
+    Driver d = { .dmabuf = true };
+    struct VADriverContext ctx = { .pDriverData = &d };
+    d.caps.features = CEDAR_CAP_WRITABLE_EXPORT;
+    assert(!pthread_mutex_init(&d.mutex, NULL));
+    FILE *file = tmpfile(); assert(file);
+    d.surfaces[0] = (Surface){ .id = 1, .width = 16, .height = 16, .ready = true,
+        .frame = { .id = 1, .fd = fileno(file), .stride = 1920,
+                   .uv_offset = 2088960, .mapping_bytes = 3133440 } };
+    for (unsigned access = 0; access <= VA_EXPORT_SURFACE_READ_WRITE; access++) {
+        VADRMPRIMESurfaceDescriptor descriptor;
+        assert(cdv_ExportSurfaceHandle(&ctx, 1, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+            access | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &descriptor) == VA_STATUS_SUCCESS);
+        assert(descriptor.num_layers == 2 && descriptor.layers[1].drm_format == DRM_FORMAT_GR88);
+        int fd = descriptor.objects[0].fd;
+        assert(fd != fileno(file) && (fcntl(fd, F_GETFL) & O_ACCMODE) == O_RDWR);
+        assert(fcntl(fd, F_GETFD) & FD_CLOEXEC);
+        close(fd);
+    }
+    VADRMPRIMESurfaceDescriptor descriptor;
+    assert(cdv_ExportSurfaceHandle(&ctx, 1, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+        0x80000000U, &descriptor) == VA_STATUS_ERROR_INVALID_PARAMETER);
+    assert(cdv_ExportSurfaceHandle(&ctx, 1, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+        VA_EXPORT_SURFACE_SEPARATE_LAYERS | VA_EXPORT_SURFACE_COMPOSED_LAYERS,
+        &descriptor) == VA_STATUS_ERROR_INVALID_PARAMETER);
+    fclose(file);
+    pthread_mutex_destroy(&d.mutex);
+    puts("VA export access hints, descriptor ownership and invalid flags passed (offline).");
+}
+
 static void test_configs(void)
 {
     Driver d = { .profile = VAProfileH264Main, .context = true };
@@ -451,6 +482,7 @@ static void test_configs(void)
 int main(void)
 {
     test_configs();
+    test_export_access_modes();
     test_runtime_controls();
     test_prediction_weights();
     test_p_references();

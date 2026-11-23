@@ -100,12 +100,12 @@ static void blank_export_tests(void)
             close(fd);close(pair[1]);_exit(0);
         }
         close(pair[1]);struct cedar_frame_export r=good;
-        if (writable) assert(cedar_decoder_export_blank(pair[0],true,&r)==-1 && errno==EPROTO);
+        if (!writable) assert(cedar_decoder_export_blank(pair[0],true,&r)==-1 && errno==EPROTO);
         else { assert(!cedar_decoder_export_blank(pair[0],true,&r));close(r.fd); }
         close(pair[0]);int status;assert(waitpid(child,&status,0)==child && status==0);
     }
     assert(fd_count()==initial);
-    puts("Blank export geometry, request bounds, read-only FD transfer and retirement passed (offline).");
+    puts("Blank export geometry, request bounds, writable FD transfer and retirement passed (offline).");
 }
 
 static void sealed_packet_tests(void)

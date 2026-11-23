@@ -102,7 +102,7 @@ int cedar_decoder_export(int fd, bool broker, struct cedar_frame_export *frame)
     if (!broker) return ioctl(fd,CEDAR_MSVDX_EXPORT_FRAME,frame);
     int right = -1;
     if (exchange(fd,CEDAR_BROKER_EXPORT,NULL,0,frame,sizeof(*frame),&right)) return -1;
-    if (frame->fd != -1 || (fcntl(right,F_GETFL)&O_ACCMODE) != O_RDONLY) {
+    if (frame->fd != -1 || (fcntl(right,F_GETFL)&O_ACCMODE) != O_RDWR) {
         close(right); errno = EPROTO; return -1;
     }
     frame->fd = right;
@@ -114,7 +114,7 @@ int cedar_decoder_export_blank(int fd, bool broker, struct cedar_frame_export *f
     if (!broker) return ioctl(fd, CEDAR_MSVDX_EXPORT_BLANK, frame);
     int right = -1;
     if (exchange(fd, CEDAR_BROKER_EXPORT_BLANK, frame, sizeof(*frame), frame, sizeof(*frame), &right)) return -1;
-    if (frame->fd != -1 || right < 0 || (fcntl(right, F_GETFL) & O_ACCMODE) != O_RDONLY) {
+    if (frame->fd != -1 || right < 0 || (fcntl(right, F_GETFL) & O_ACCMODE) != O_RDWR) {
         if (right >= 0) close(right);
         errno = EPROTO; return -1;
     }

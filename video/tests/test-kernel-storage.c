@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-/* Hardware check: shared blank probes and the global DMA32 allocation cap.
+/* Hardware check: independent blank probes and the global DMA32 allocation cap.
  * Run as root with no other decoder client. Does not submit firmware work.
  */
 #define _GNU_SOURCE
@@ -30,7 +30,7 @@ int main(void)
         probes[i] = (struct cedar_frame_export){.version=1,.fd=-1,.width=16+2*i,.height=16};
         assert(!ioctl(device, CEDAR_MSVDX_EXPORT_BLANK, &probes[i]));
     }
-    assert(objects() == 1); /* Eight concurrent exports share one black allocation. */
+    assert(objects() == 8); /* Writable probes have separate backing. */
     for (unsigned i = 0; i < 8; i++) close(probes[i].fd);
     unsigned made = 0;
     for (; made < CEDAR_SURFACE_HANDLES; made++) {
@@ -41,9 +41,14 @@ int main(void)
             break;
         }
     }
-    assert(made == 63 && objects() == 64);
+    assert(made == 64 && objects() == 64);
+    int second = open("/dev/cedar-msvdx", O_RDWR | O_CLOEXEC);
+    assert(second >= 0);
+    struct cedar_surface_request extra = {.version=1,.operation=CEDAR_SURFACE_CREATE,.slot=UINT32_MAX};
+    assert(ioctl(second,CEDAR_MSVDX_SURFACE,&extra) == -1 && errno == ENOSPC);
+    close(second);
     close(device);
-    assert(objects() == 1); /* Only the bounded blank cache remains. */
-    printf("Shared blank exports and global 64-object cap/retirement: OK\n");
+    assert(objects() == 0); /* Probes and session allocations all retire. */
+    printf("Independent writable blank exports and global 64-object cap/retirement: OK\n");
     return 0;
 }

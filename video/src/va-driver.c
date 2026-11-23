@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * Restricted native VA backend for the root-only Cedarview MSVDX prototype.
  * Decoding is performed by the kernel/firmware; completed NV12 can be exported
- * read-only or explicitly downloaded for CPU consumers.
+ * shared through DMA-BUF or explicitly downloaded for CPU consumers.
  */
 #include <va/va_backend.h>
 #include <va/va_version.h>
@@ -1051,9 +1051,11 @@ static VAStatus cdv_ExportSurfaceHandle(VADriverContextP ctx, VASurfaceID id,
     LOCK;
     if (!d->dmabuf) DONE(VA_STATUS_ERROR_UNIMPLEMENTED);
     if (memory_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) DONE(VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
-    if (!descriptor || !(flags & VA_EXPORT_SURFACE_READ_ONLY) || (flags & VA_EXPORT_SURFACE_WRITE_ONLY) ||
-        (flags & ~(VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS | VA_EXPORT_SURFACE_COMPOSED_LAYERS)) ||
+    if (!descriptor ||
+        (flags & ~(VA_EXPORT_SURFACE_READ_WRITE | VA_EXPORT_SURFACE_SEPARATE_LAYERS | VA_EXPORT_SURFACE_COMPOSED_LAYERS)) ||
         ((flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS) && (flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS))) DONE(VA_STATUS_ERROR_INVALID_PARAMETER);
+    if (!(d->caps.features & CEDAR_CAP_WRITABLE_EXPORT) &&
+        (flags & VA_EXPORT_SURFACE_READ_WRITE) != VA_EXPORT_SURFACE_READ_ONLY) DONE(VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
     Surface *s = surface(d, id);
     if (!s) DONE(VA_STATUS_ERROR_INVALID_SURFACE);
     if (s->error || s->preroll) DONE(VA_STATUS_ERROR_DECODING_ERROR);
@@ -1133,7 +1135,7 @@ VAStatus CDV_VA_INIT_NAME(VA_MAJOR_VERSION, VA_MINOR_VERSION)(VADriverContextP c
         fprintf(stderr, "cedar-va: broker requires explicit CEDAR_VA_DMABUF=1; no fallback\n");
         free(d); return VA_STATUS_ERROR_OPERATION_FAILED;
     }
-    unsigned required = CEDAR_CAP_FRAME_DMABUF | CEDAR_CAP_INDEPENDENT_SURFACES | CEDAR_CAP_SURFACE_BINDING | CEDAR_CAP_LAZY_READBACK;
+    unsigned required = CEDAR_CAP_FRAME_DMABUF | CEDAR_CAP_INDEPENDENT_SURFACES | CEDAR_CAP_SURFACE_BINDING | CEDAR_CAP_LAZY_READBACK | CEDAR_CAP_WRITABLE_EXPORT;
     if (d->dmabuf && ((d->caps.features & required) != required || d->caps.width != CEDAR_H264_MAX_WIDTH || d->caps.height != CEDAR_H264_MAX_HEIGHT || d->caps.stride != CEDAR_H264_STORAGE_STRIDE)) {
         fprintf(stderr, "cedar-va: DMA-BUF mode requires matching backing layout and lazy readback\n");
         free(d); return VA_STATUS_ERROR_OPERATION_FAILED;
@@ -1154,7 +1156,7 @@ VAStatus CDV_VA_INIT_NAME(VA_MAJOR_VERSION, VA_MINOR_VERSION)(VADriverContextP c
     ctx->max_profiles = runtime_config(d) ? 3 : 1;
     ctx->max_entrypoints = ctx->max_image_formats = ctx->max_subpic_formats = 1;
     ctx->max_attributes = 16; ctx->max_display_attributes = 0;
-    ctx->str_vendor = d->dmabuf ? "Experimental Cedarview MSVDX: restricted root decode, read-only DMA-BUF export" :
+    ctx->str_vendor = d->dmabuf ? "Experimental Cedarview MSVDX: restricted H.264 decode, DMA-BUF export" :
                                 "Experimental Cedarview MSVDX: restricted root decode, CPU image copies";
     ctx->vtable->vaAssociateSubpicture = cdv_AssociateSubpicture;
     ctx->vtable->vaBeginPicture = cdv_BeginPicture;

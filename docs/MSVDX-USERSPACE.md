@@ -43,8 +43,9 @@ DRM/media API. A standard media/DRM design is separate future work.
 
 Backing has stride 1920 and UV offset 2088960. Completed exports retain image
 storage independently of the engine session, prevent output reuse while read,
-and reject writable mappings/DMA directions. The separate SGX read-only import series retains those references and
-uses protected GPU PTEs; it is required only for direct presentation. Initialized format-probe exports use
+and allow conventional writable sharing. Consumers must finish external writes
+before decoder use, including reference reads. CPU access requires DMA-BUF sync.
+Only image pages are exposed; motion/command allocations stay private. Initialized format-probe exports use
 separate storage and never mark an undecoded surface ready.
 
 Submission is synchronous with bounded completion polling. Shutdown/suspend
@@ -70,5 +71,5 @@ can still drop frames; report performance separately from functional passes.
 
 The gma500 host is proposed in [PR #37](https://github.com/The1TrueJoe/powervr_sgx/pull/37).
 CPU checks need no kernel patch or firmware. Hardware decoding needs that host;
-zero-copy also needs the separate SGX import and mpv compatibility fixes.
+zero-copy also needs NV12 SGX sampling and the mpv compatibility fix.
 Libdrm auxiliary discovery is a separate, reusable desktop integration.

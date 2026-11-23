@@ -7,7 +7,8 @@
 #include "cedar-msvdx.h"
 
 /* Private, little-endian, local SOCK_SEQPACKET protocol. No native pointers,
- * arbitrary ioctls, register/MMU words, device paths or writable frame fds.
+ * arbitrary ioctls, register/MMU words or device paths. Frame fds expose only
+ * image backing, with access rights checked by both broker and transport.
  * Server sends CAPS greeting/status immediately; clients read it before sending
  * requests. Afterwards transactions are synchronous, one request/reply at a time. */
 #define CEDAR_BROKER_MAGIC 0x31425243U

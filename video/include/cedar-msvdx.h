@@ -24,6 +24,7 @@
 #define CEDAR_CAP_H264_VARIABLE_RESOLUTION 131072U
 #define CEDAR_CAP_H264_LARGE_SLICES 262144U
 #define CEDAR_CAP_EXPORT_BLANK 524288U
+#define CEDAR_CAP_WRITABLE_EXPORT 1048576U
 #define CEDAR_H264_MAX_SLICE_BYTES (1024U * 1024U)
 #define CEDAR_H264_MAX_WIDTH 1920U
 #define CEDAR_H264_MAX_HEIGHT 1088U
@@ -69,12 +70,14 @@ struct cedar_msvdx_caps {
 
 #define CEDAR_MSVDX_GET_CAPS _IOR('C', 1, struct cedar_msvdx_caps)
 
-/* Completed, immutable, linear NV12 image. EXPORT input: version1, fd=-1,
+/* Completed, linear NV12 image. EXPORT input: version1, fd=-1,
  * everything else zero.
  * The id is unique within this loaded driver; dup/SCM_RIGHTS retain identity.
  * Export pins the output slot until the last fd/mapping/display reader closes.
- * This read-only exporter uses fixed-capacity coherent backing storage, with
+ * Exports use fixed-capacity coherent image backing storage, with
  * coded dimensions and an explicit fixed UV offset for smaller rectangles.
+ * WRITABLE_EXPORT advertises O_RDWR buffers. Callers must complete external
+ * writes before any subsequent VA/decoder use, including reference reads.
  */
 struct cedar_frame_export {
 	__u32 version, flags;
@@ -87,7 +90,7 @@ struct cedar_frame_export {
 
 #define CEDAR_FRAME_NV12 0x3231564eU
 #define CEDAR_MSVDX_EXPORT_FRAME _IOWR('C', 2, struct cedar_frame_export)
-/* Allocate a separate immutable, initialized NV12 surface for format probing.
+/* Allocate a separate initialized NV12 surface for format probing.
  * Input: version=1, fd=-1, even width/height in 16..1920/1088, rest zero.
  * No decoder state is created or changed. It never aliases a decoded picture.
  */

@@ -31,7 +31,8 @@ def main():
     d.drmGetDevices.argtypes = [c.POINTER(P), c.c_int]
     loaded = sorted({line.split()[-1] for line in Path('/proc/self/maps').read_text().splitlines()
                      if '/libdrm.so.' in line})
-    assert loaded and all(p.startswith('/opt/cedar-libdrm/') for p in loaded), loaded
+    prefix = os.environ.get('CEDAR_LIBDRM_PREFIX', '/opt/cedar-libdrm').rstrip('/') + '/'
+    assert loaded and all(p.startswith(prefix) for p in loaded), loaded
     expected = [{'/dev/dri/card0'}, {'/dev/dri/card1', '/dev/dri/renderD128'}]
     nodes = ['/dev/dri/card0', '/dev/dri/card1', '/dev/dri/renderD128']
 
@@ -40,7 +41,7 @@ def main():
         names = [v.nodes[i].decode() for i in range(3) if v.available & (1 << i)]
         result = dict(bustype=v.bustype, nodes=names)
         result['identity'] = str((Path('/sys/class/drm') / Path(names[0]).name / 'device').resolve())
-        if v.bustype == 0:
+        if v.bustype in (0, 5):
             ids = c.cast(v.deviceinfo, c.POINTER(c.c_uint16))
             result['pci_ids'] = [ids[0], ids[1]]
         return result
@@ -62,7 +63,7 @@ def main():
                     assert d.drmDevicesEqual(p, legacy) == 1
                     desc = describe(p)
                     assert set(desc['nodes']) == expected[0 if i == 0 else 1], desc
-                    assert desc['bustype'] == 0, desc
+                    assert desc['bustype'] == (0 if i == 0 else 5), desc
                     assert desc['pci_ids'] == [0x8086, 0x0be2], desc
                     refs.append(p)
                     p = None

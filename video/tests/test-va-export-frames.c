@@ -70,11 +70,11 @@ static void sample_frame(const AVFrame *frame, const char *probe, struct retaine
     VADRMPRIMESurfaceDescriptor d;
     assert(vaSyncSurface(device->display,surface) == VA_STATUS_SUCCESS);
     assert(vaExportSurfaceHandle(device->display,surface,VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-        VA_EXPORT_SURFACE_READ_ONLY|VA_EXPORT_SURFACE_SEPARATE_LAYERS,&d) == VA_STATUS_SUCCESS);
+        VA_EXPORT_SURFACE_SEPARATE_LAYERS,&d) == VA_STATUS_SUCCESS);
     assert(d.fourcc == VA_FOURCC_NV12 && d.num_objects == 1 && d.num_layers == 2);
     assert(d.layers[0].offset[0] == 0 && d.layers[0].pitch[0] == d.layers[1].pitch[0]);
     int fd=d.objects[0].fd;
-    assert(fd >= 0 && (fcntl(fd,F_GETFL)&O_ACCMODE) == O_RDONLY);
+    assert(fd >= 0 && (fcntl(fd,F_GETFL)&O_ACCMODE) == O_RDWR);
     char args[5][32];
     unsigned values[]={fd,d.width,d.height,d.layers[0].pitch[0],d.layers[1].offset[0]};
     for (unsigned i=0;i<5;i++) snprintf(args[i],sizeof(args[i]),"%u",values[i]);
