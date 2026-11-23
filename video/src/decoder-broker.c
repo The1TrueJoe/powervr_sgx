@@ -176,10 +176,11 @@ int main(int argc, char **argv)
     }
     struct sigaction action={.sa_handler=stop};
     sigemptyset(&action.sa_mask); sigaction(SIGTERM,&action,NULL); sigaction(SIGINT,&action,NULL);
+    unsigned char *data = malloc(CEDAR_BROKER_MAX_PACKET);
+    if (!data) { perror("packet allocation"); close(listener); unlink(path); return 1; }
     int client=-1, device=-1;
     bool used=false;
     unsigned submitted=0, exported=0;
-    unsigned char data[CEDAR_BROKER_MAX_PACKET];
     fprintf(stderr,"cedar-broker: ready uid=%lu single-client page-limit=%u\n",allowed,CEDAR_BROKER_MAX_PAGES);
     fflush(stderr);
     int result=0;
@@ -191,7 +192,7 @@ int main(int argc, char **argv)
         if (client>=0 && fds[1].revents&(POLLIN|POLLHUP|POLLERR)) {
             struct cedar_broker_header h;
             int right=-1;
-            ssize_t bytes=cedar_broker_recv(client,&h,data,sizeof(data),&right);
+            ssize_t bytes=cedar_broker_recv(client,&h,data,CEDAR_BROKER_MAX_PACKET,&right);
             if (bytes<0) disconnect=true;
             else if (h.status || (h.operation == CEDAR_BROKER_SUBMIT_FD ? (right<0 || h.bytes) : right>=0)) {
                 if (right>=0) close(right);
@@ -241,5 +242,6 @@ int main(int argc, char **argv)
     if (client>=0) close(client);
     if (device>=0) close(device);
     close(listener); unlink(path);
+    free(data);
     return result;
 }

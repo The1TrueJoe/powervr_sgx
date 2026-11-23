@@ -237,6 +237,35 @@ static void test_explicit_dpb(void)
     puts("Reference-B retention, explicit retirement and stale-DPB rejection passed (offline).");
 }
 
+/* Oversized DPBs used to overwrite retained_ids before late packet validation. */
+static void test_oversized_dpb(void)
+{
+    Driver d = {.fd=-1,.width=64,.height=32,.profile=VAProfileH264Main,
+        .have_picture=true,.have_slice=true,.target=15,.ref_count=5,.ref_limit=5};
+    d.caps.width=64;d.caps.height=32;d.caps.max_slice_bytes=65535;
+    d.caps.features=CEDAR_CAP_H264_RUNTIME|CEDAR_CAP_H264_DPB4|
+        CEDAR_CAP_H264_EXPLICIT_DPB|CEDAR_CAP_H264_FULL_LISTS;
+    unsigned char nal[]={0x41,0x80,0};d.bitstream=nal;d.bitstream_bytes=sizeof(nal);
+    d.picture=(VAPictureParameterBufferH264){.CurrPic={.picture_id=15,
+        .TopFieldOrderCnt=10,.BottomFieldOrderCnt=10},.num_ref_frames=5,
+        .picture_width_in_mbs_minus1=3,.picture_height_in_mbs_minus1=1};
+    d.picture.seq_fields.bits.frame_mbs_only_flag=1;
+    d.picture.seq_fields.bits.chroma_format_idc=1;
+    for(unsigned i=0;i<16;i++)d.picture.ReferenceFrames[i].flags=VA_PICTURE_H264_INVALID;
+    for(unsigned i=0;i<6;i++)d.surfaces[i]=(Surface){.id=10+i,.width=64,.height=32,.ready=true,.poc=2*(int)i};
+    for(unsigned i=0;i<5;i++) {
+        d.history[i]=d.slots[i]=10+i;
+        d.picture.ReferenceFrames[i]=(VAPictureH264){.picture_id=10+i,
+            .TopFieldOrderCnt=2*(int)i,.BottomFieldOrderCnt=2*(int)i};
+    }
+    VASliceParameterBufferH264 slice={.slice_type=0,.slice_data_size=sizeof(nal),.slice_data_bit_offset=8};
+    slice.RefPicList0[0]=d.picture.ReferenceFrames[0];
+    PreparedSlice prepared;
+    assert(prepare_slice(&d,&slice,false,&prepared)==VA_STATUS_ERROR_INVALID_PARAMETER);
+    assert(d.fd==-1);
+    puts("Five-reference DPB rejected before retaining into the four-entry array (offline).");
+}
+
 static void test_full_lists(void)
 {
     Driver d = {.fd=-1,.width=64,.height=32,.profile=VAProfileH264Main,.have_picture=true,.have_slice=true,
@@ -377,9 +406,14 @@ static void test_slice_staging(struct VADriverContext *ctx, VASurfaceID sid)
     free(result.packet);
     /* Failure while preparing the later slice must free the first packet and
      * return before any decoder FD is opened or command is submitted. */
+    d->pool_count=STORAGE_POOL_LIMIT;
+    for(unsigned i=0;i<STORAGE_POOL_LIMIT;i++)d->pool[i].handle=i+1;
+    d->history[CEDAR_H264_SURFACES-1]=sid;
     d->slices[1].param.slice_data_size=4;
     assert(cdv_EndPicture(ctx,CONTEXT_ID)==VA_STATUS_ERROR_INVALID_PARAMETER);
-    assert(d->fd==-1 && !d->bitstream);
+    assert(d->fd==-1 && !d->bitstream && d->context && !d->pool_count);
+    for(unsigned i=0;i<STORAGE_POOL_LIMIT;i++)assert(!d->pool[i].handle);
+    for(unsigned i=0;i<CEDAR_H264_SURFACES;i++)assert(d->history[i]==BAD);
     for(unsigned i=0;i<3;i++)assert(cdv_DestroyBuffer(ctx,ids[i])==VA_STATUS_SUCCESS);
     assert(cdv_DestroyContext(ctx,CONTEXT_ID)==VA_STATUS_SUCCESS);
     puts("Multislice grouping/packing and late-error cleanup passed (offline).");
@@ -393,6 +427,7 @@ int main(void)
     test_stable_references();
     test_dpb4();
     test_explicit_dpb();
+    test_oversized_dpb();
     test_full_lists();
     test_variable_geometry();
     struct VADriverContext ctx = {0};

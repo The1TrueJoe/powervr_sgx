@@ -48,13 +48,11 @@ typedef struct {
     unsigned width, height;
     unsigned next_id;
     bool configured, context, begun, have_picture, have_slice, render_failed, disable_submission;
-    bool identity_weights;
     bool dmabuf, broker, recovery_preroll;
     unsigned discarded_preroll;
     unsigned frame_exports, storage_replacements, storage_reuses, storage_allocations, cpu_downloads;
     unsigned pool_count;
     struct cedar_surface_request pool[STORAGE_POOL_LIMIT];
-    bool packet_dumped;
     unsigned explicit_p_frames, nonidentity_p_frames;
     bool p_refs;
     unsigned p_ref_frames, two_ref_frames, older_first_frames, b_ref_frames, b_two_ref_frames;
@@ -138,7 +136,7 @@ static Buffer *new_buffer(Driver *d, VABufferType type, unsigned size, unsigned 
     }
     return NULL;
 }
-static void reset_references(Driver *d) { d->last = d->previous = BAD; d->poc_origin = 0; d->p_refs = false; d->recovery_preroll = false; d->ref_count = d->ref_limit = 0; for (unsigned i = 0; i < CEDAR_H264_SURFACES; i++) d->slots[i] = BAD; for (unsigned i = 0; i < CEDAR_H264_MAX_REFS; i++) d->history[i] = BAD; }
+static void reset_references(Driver *d) { d->last = d->previous = BAD; d->poc_origin = 0; d->p_refs = false; d->recovery_preroll = false; d->ref_count = d->ref_limit = 0; for (unsigned i = 0; i < CEDAR_H264_SURFACES; i++) d->slots[i] = BAD; for (unsigned i = 0; i < CEDAR_H264_SURFACES; i++) d->history[i] = BAD; }
 static void close_decoder(Driver *d) {
     if (d->fd >= 0) close(d->fd);
     d->fd = -1; d->context = d->begun = false;
@@ -150,8 +148,8 @@ static void close_decoder(Driver *d) {
 static VAStatus cdv_Terminate(VADriverContextP ctx) {
     Driver *d = ctx->pDriverData;
     if (!d) return VA_STATUS_SUCCESS;
-    if (d->explicit_p_frames) fprintf(stderr, "cedar-va: explicit_P=%u nonidentity_requested=%u identity_override=%u\n",
-        d->explicit_p_frames, d->nonidentity_p_frames, d->identity_weights);
+    if (d->explicit_p_frames) fprintf(stderr, "cedar-va: explicit_P=%u nonidentity_requested=%u\n",
+        d->explicit_p_frames, d->nonidentity_p_frames);
     if (d->dpb_frames) fprintf(stderr, "cedar-va: DPB_frames=%u max_l0=%u max_l1=%u\n", d->dpb_frames, d->max_l0, d->max_l1);
     if (d->b_ref_frames) fprintf(stderr, "cedar-va: B_refs=%u two_active=%u max_l0=%u max_l1=%u\n", d->b_ref_frames, d->b_two_ref_frames, d->b_max_l0, d->b_max_l1);
     if (d->discarded_preroll) fprintf(stderr, "cedar-va: discarded_unavailable_preroll=%u (surfaces unreadable)\n", d->discarded_preroll);
@@ -517,10 +515,6 @@ static VAStatus prediction_weights(Driver *d, const VASliceParameterBufferH264 *
                 w->cb_weight, w->cb_offset, w->cr_weight, w->cr_offset);
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
-    if (d->identity_weights) {
-        w->luma_weight = yw; w->cb_weight = w->cr_weight = cw;
-        w->luma_offset = w->cb_offset = w->cr_offset = 0;
-    }
     return VA_STATUS_SUCCESS;
 }
 #pragma GCC diagnostic push
@@ -544,6 +538,8 @@ static VAStatus prepare_slice(Driver *d, VASliceParameterBufferH264 *s, bool for
         fprintf(stderr, "cedar-va: incomplete picture (%u/%u/%u/%u)\n", d->have_picture, d->have_slice, !!d->bitstream, !!target);
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
+    if (p->num_ref_frames > CEDAR_H264_MAX_REFS)
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
     unsigned config = d->caps.config_flags;
     bool dynamic = runtime_config(d);
     bool dpb_packet = dynamic && (d->caps.features & CEDAR_CAP_H264_DPB4);
@@ -674,7 +670,7 @@ static VAStatus prepare_slice(Driver *d, VASliceParameterBufferH264 *s, bool for
             if (entry->picture_id == d->target ||
                 (int64_t)entry->TopFieldOrderCnt != (int64_t)ref->poc + origin ||
                 entry->BottomFieldOrderCnt != entry->TopFieldOrderCnt ||
-                (dpb.reserved[0] & (1U << slot)) || retained_count >= max_refs)
+                (dpb.reserved[0] & (1U << slot)) || retained_count >= max_refs || retained_count >= CEDAR_H264_MAX_REFS)
                 return VA_STATUS_ERROR_INVALID_SURFACE;
             dpb.reserved[0] |= 1U << slot;
             retained_ids[retained_count++] = entry->picture_id;
@@ -949,15 +945,6 @@ static VAStatus decode_picture(Driver *d) {
         status = bind_destination(d, target, (unsigned)prepared.out);
         if (status != VA_STATUS_SUCCESS) { free(packet); return status; }
     }
-    const char *dump_path = getenv("CEDAR_VA_TEST_PACKET_PATH");
-    if (dump_path && !d->packet_dumped) {
-        int dump = open(dump_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        if (dump < 0) { free(packet); return VA_STATUS_ERROR_OPERATION_FAILED; }
-        ssize_t copied = write(dump, packet, packet_bytes);
-        int closed = close(dump);
-        if (copied != (ssize_t)packet_bytes || closed) { free(packet); return VA_STATUS_ERROR_OPERATION_FAILED; }
-        d->packet_dumped = true;
-    }
     ssize_t result;
     do result = cedar_decoder_submit(d->fd, d->broker, packet, packet_bytes); while (result < 0 && errno == EINTR);
     free(packet);
@@ -1014,6 +1001,7 @@ static VAStatus cdv_EndPicture(VADriverContextP ctx, VAContextID context) {
     if (result != VA_STATUS_SUCCESS) {
         if (d->fd >= 0) close(d->fd);
         d->fd = -1; reset_references(d);
+        d->pool_count = 0; memset(d->pool, 0, sizeof(d->pool));
         for (unsigned i = 0; i < NSURF; i++) memset(&d->surfaces[i].storage, 0, sizeof(d->surfaces[i].storage));
     }
     free(d->bitstream); d->bitstream = NULL; d->bitstream_bytes = 0;
@@ -1126,8 +1114,6 @@ VAStatus CDV_VA_INIT_NAME(VA_MAJOR_VERSION, VA_MINOR_VERSION)(VADriverContextP c
     d->fd = -1;
     const char *disable = getenv("CEDAR_VA_TEST_DISABLE_SUBMISSION");
     d->disable_submission = disable && !strcmp(disable, "1");
-    const char *identity = getenv("CEDAR_VA_TEST_IDENTITY_WEIGHTS");
-    d->identity_weights = identity && !strcmp(identity, "1");
     const char *dmabuf = getenv("CEDAR_VA_DMABUF");
     d->dmabuf = dmabuf && !strcmp(dmabuf, "1");
     int fd = cedar_decoder_open(&d->broker);

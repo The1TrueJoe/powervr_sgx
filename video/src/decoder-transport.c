@@ -3,7 +3,6 @@
 #include "decoder-transport.h"
 #include "cedar-broker.h"
 #include <errno.h>
-#include <dlfcn.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -65,21 +64,9 @@ int cedar_decoder_open(bool *broker)
     if (getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&peer,&size) || size != sizeof(peer)) goto fail;
     step="root peer identity";
     if (peer.uid != 0) {
-        /* Firefox's parent connector authenticates host root before fd
-         * transfer. Its exported query binds that guarantee to this socket's
-         * kernel cookie, not a reusable fd number or an overflow UID. Other
-         * applications have no such query and retain the ordinary root check. */
-        void *symbol=dlsym(RTLD_DEFAULT,"MozillaCedarParentAuthenticatedSocket");
-        bool (*authenticated)(int)=NULL;
-        _Static_assert(sizeof(authenticated)==sizeof(symbol),"POSIX dlsym pointer size");
-        memcpy(&authenticated,&symbol,sizeof(symbol));
-        if (authenticated && authenticated(fd)) {
-            fprintf(stderr,"cedar-transport: host root authenticated by Firefox parent socket cookie\n");
-        } else {
-            fprintf(stderr,"cedar-transport: peer uid=%u client uid=%u euid=%u\n",
-                    (unsigned)peer.uid,(unsigned)getuid(),(unsigned)geteuid());
-            errno = EACCES; goto fail;
-        }
+        fprintf(stderr,"cedar-transport: peer uid=%u client uid=%u euid=%u\n",
+                (unsigned)peer.uid,(unsigned)getuid(),(unsigned)geteuid());
+        errno = EACCES; goto fail;
     }
     /* Read the server greeting before sending anything. A denied peer therefore
      * receives a deterministic errno rather than reset from unread requests. */

@@ -5,6 +5,16 @@ ConditionPathExists=/dev/cedar-msvdx-test
 After=systemd-modules-load.service
 
 [Service]
+CapabilityBoundingSet=CAP_SYS_RAWIO CAP_CHOWN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
 RuntimeDirectory=cedar-decoder
 RuntimeDirectoryMode=0711
 ExecStart=/opt/cedar-msvdx/cedar-decoder-broker --socket /run/cedar-decoder/decoder.sock --uid @UID@
