@@ -1,6 +1,6 @@
-From c60f79e7cca16e14842b77adc4a8c696463a14c3 Mon Sep 17 00:00:00 2001
+From 728c81f64ee8ad83ca5fabafcacaeb7bcd8b94c3 Mon Sep 17 00:00:00 2001
 From: Viktor Semykin <thesame.ml@gmail.com>
-Date: Mon, 23 Nov 2026 18:41:44 -0300
+Date: Mon, 23 Nov 2026 19:03:19 -0300
 Subject: [PATCH] drm/gma500: add opt-in Cedarview MSVDX H.264 decoding
 
 Host MSVDX beside its existing PCI/display owner. Admit bounded H.264
@@ -19,11 +19,11 @@ fix is necessary for correct GL2/GLES2 imported colors.
 
 Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
 ---
- Documentation/gpu/gma500-msvdx.rst            |  124 +
+ Documentation/gpu/gma500-msvdx.rst            |  126 +
  drivers/gpu/drm/gma500/Kconfig                |   10 +
  drivers/gpu/drm/gma500/Makefile               |    2 +
  drivers/gpu/drm/gma500/cdv_h264_template.h    |  333 ++
- drivers/gpu/drm/gma500/cdv_msvdx.c            | 3491 +++++++++++++++++
+ drivers/gpu/drm/gma500/cdv_msvdx.c            | 3492 +++++++++++++++++
  drivers/gpu/drm/gma500/cdv_msvdx.h            |   21 +
  drivers/gpu/drm/gma500/cedar-msvdx-dma.h      |   51 +
  drivers/gpu/drm/gma500/cedar-msvdx.h          |  384 ++
@@ -32,7 +32,7 @@ Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
  .../drm/gma500/msvdx-template.json.license    |    1 +
  drivers/gpu/drm/gma500/power.c                |    7 +
  drivers/gpu/drm/gma500/psb_drv.c              |    8 +
- 13 files changed, 4993 insertions(+)
+ 13 files changed, 4996 insertions(+)
  create mode 100644 Documentation/gpu/gma500-msvdx.rst
  create mode 100644 drivers/gpu/drm/gma500/cdv_h264_template.h
  create mode 100644 drivers/gpu/drm/gma500/cdv_msvdx.c
@@ -45,10 +45,10 @@ Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
 
 diff --git a/Documentation/gpu/gma500-msvdx.rst b/Documentation/gpu/gma500-msvdx.rst
 new file mode 100644
-index 0000000000000000000000000000000000000000..ae70ddd0ad8c948bf1c6fc1b24b71cce7330bc3b
+index 0000000000000000000000000000000000000000..c9069fd90702b73e022c3926775728f52aaee31e
 --- /dev/null
 +++ b/Documentation/gpu/gma500-msvdx.rst
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,126 @@
 +.. SPDX-License-Identifier: GPL-2.0-only
 +
 +Cedarview MSVDX H.264 decoding
@@ -96,7 +96,9 @@ index 0000000000000000000000000000000000000000..ae70ddd0ad8c948bf1c6fc1b24b71cce
 +before decoder use, including reference-picture reads. Only image pages are
 +exported. Motion and command storage remain private. Coherent image allocations
 +match cached CPU mappings, with cache maintenance at CPU/device access boundaries.
-+Motion and command storage use write-combined mappings.
++Motion and command storage use write-combined mappings. CPU-only page-descriptor
++arrays use virtual-contiguity allocation with vmalloc fallback; hardware sees
++the separately allocated DMA pages, not those descriptor arrays.
 +
 +Completion is polled synchronously with bounded waits. Closing or suspending
 +must prove engine quiescence before unmapping DMA pages. An unproved shutdown
@@ -542,10 +544,10 @@ index 0000000000000000000000000000000000000000..10e1163e35d59f4984098e1fed944a59
 +};
 diff --git a/drivers/gpu/drm/gma500/cdv_msvdx.c b/drivers/gpu/drm/gma500/cdv_msvdx.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24efa74a03e
+index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153dabc2b55
 --- /dev/null
 +++ b/drivers/gpu/drm/gma500/cdv_msvdx.c
-@@ -0,0 +1,3491 @@
+@@ -0,0 +1,3492 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Cedarview MSVDX H.264 decoder, hosted by the existing PCI/display owner.
@@ -740,7 +742,7 @@ index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24e
 +	atomic_sub(storage->allocated, &surface_pages);
 +	atomic_dec(&surface_objects);
 +	drm_dev_put(storage->dev);
-+	kfree(storage->pages);
++	kvfree(storage->pages);
 +	kfree(storage);
 +}
 +
@@ -766,7 +768,8 @@ index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24e
 +	drm_dev_get(dev);
 +	atomic_set(&storage->readers, 0);
 +	storage->id = atomic64_inc_return(&next_storage_id);
-+	storage->pages = kcalloc(npages, sizeof(*storage->pages), GFP_KERNEL);
++	/* CPU descriptors need virtual contiguity only; DMA pages are separate. */
++	storage->pages = kvcalloc(npages, sizeof(*storage->pages), GFP_KERNEL);
 +	if (!storage->pages)
 +		goto fail;
 +	for (i = 0; i < npages; i++) {
@@ -1864,12 +1867,12 @@ index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24e
 +		writel(U32_MAX, regs + 0x060c);
 +		writel(engine->saved_irq, regs + MSVDX_HOST_IRQ_ENABLE);
 +	}
-+	kfree(engine->reference_pages);
++	kvfree(engine->reference_pages);
 +	for (i = 0; i < engine->bitstream_allocated; i++) {
 +		cdv_surface_page_free(dev, &engine->bitstream[i]);
 +		atomic_dec(&bitstream_pages);
 +	}
-+	kfree(engine->bitstream);
++	kvfree(engine->bitstream);
 +	if (engine->bitstream_table)
 +		dma_free_wc(dev->dev, PAGE_SIZE, engine->bitstream_table,
 +			    engine->bitstream_table_dma);
@@ -1879,7 +1882,7 @@ index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24e
 +	for (i = 0; i < engine->arena_allocated; ++i)
 +		if (!cdv_arena_storage_page(engine, i))
 +			cdv_surface_page_free(dev, &engine->arena[i]);
-+	kfree(engine->arena);
++	kvfree(engine->arena);
 +	for (i = 0; i < ARRAY_SIZE(engine->surfaces); i++)
 +		if (engine->surfaces[i])
 +			kref_put(&engine->surfaces[i]->refs, cdv_storage_destroy);
@@ -1889,7 +1892,7 @@ index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24e
 +	for (i = 0; i < engine->rendec_allocated; ++i)
 +		dma_free_wc(dev->dev, PAGE_SIZE, engine->rendec_pages[i].cpu,
 +			    engine->rendec_pages[i].dma);
-+	kfree(engine->rendec_pages);
++	kvfree(engine->rendec_pages);
 +	if (engine->rendec_tables)
 +		dma_free_wc(dev->dev, 2 * PAGE_SIZE, engine->rendec_tables,
 +			    engine->rendec_tables_dma);
@@ -2087,7 +2090,7 @@ index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24e
 +
 +	engine->rendec_tables = dma_alloc_wc(dev->dev, 2 * PAGE_SIZE, &engine->rendec_tables_dma,
 +					     GFP_KERNEL | GFP_DMA32);
-+	engine->rendec_pages = kcalloc(pages, sizeof(*engine->rendec_pages), GFP_KERNEL);
++	engine->rendec_pages = kvcalloc(pages, sizeof(*engine->rendec_pages), GFP_KERNEL);
 +	if (!engine->rendec_tables || !engine->rendec_pages) {
 +		ret = -ENOMEM;
 +		goto free_directory;
@@ -2145,7 +2148,7 @@ index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24e
 +
 +	static_assert(CDV_H264_ARENA_VA + CDV_H264_ARENA_SIZE <= CDV_RENDEC_VA);
 +	engine->arena =
-+		kcalloc(CDV_H264_ARENA_SIZE / PAGE_SIZE, sizeof(*engine->arena), GFP_KERNEL);
++		kvcalloc(CDV_H264_ARENA_SIZE / PAGE_SIZE, sizeof(*engine->arena), GFP_KERNEL);
 +	if (!engine->arena) {
 +		ret = -ENOMEM;
 +		goto free_directory;
@@ -2238,8 +2241,8 @@ index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24e
 +		engine->reference_table = dma_alloc_wc(dev->dev, CDV_REFERENCE_TABLE_BYTES,
 +						       &engine->reference_table_dma,
 +						       GFP_KERNEL | GFP_DMA32);
-+		engine->reference_pages = kcalloc(CDV_REFERENCES_SIZE / PAGE_SIZE,
-+						  sizeof(*engine->reference_pages), GFP_KERNEL);
++		engine->reference_pages = kvcalloc(CDV_REFERENCES_SIZE / PAGE_SIZE,
++						   sizeof(*engine->reference_pages), GFP_KERNEL);
 +		if (!engine->reference_table || !engine->reference_pages) {
 +			ret = -ENOMEM;
 +			goto free_directory;
@@ -2297,7 +2300,7 @@ index 0000000000000000000000000000000000000000..793711a5c24a1a33947f49d82ceae24e
 +		engine->bitstream_table = dma_alloc_wc(dev->dev, PAGE_SIZE,
 +						       &engine->bitstream_table_dma,
 +						       GFP_KERNEL | GFP_DMA32);
-+		engine->bitstream = kcalloc(pages, sizeof(*engine->bitstream), GFP_KERNEL);
++		engine->bitstream = kvcalloc(pages, sizeof(*engine->bitstream), GFP_KERNEL);
 +		if (!engine->bitstream_table || !engine->bitstream) {
 +			ret = -ENOMEM;
 +			goto free_directory;
