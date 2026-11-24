@@ -1895,6 +1895,20 @@ of the four at 0.5 alone gives level 2, a fifth or sixth register nothing;
 r12 with r14, or r13 with r15, at 0.287 each give level 2, every other pair
 level 1). Which of x and y comes first doesn't show in an isotropic LOD.
 
+**On a cube map** (**hardware**, `tools/isa/hwt_cubegrad.py`: an 8x8 cube
+with its chains, every texel naming its face and level). `smp.3d.grad`
+returns the last level whatever r11-r27 hold, zeros included, so it
+isn't a gradient read we can use. `smp.2d.grad` with the cube's state
+words still picks the face from (x, y, z) and reads four registers from
+src2, r12-r15, and nothing after them. They act as the x and y derivatives
+of the direction, in the 2D form's order (dx/dx, dx/dy, dy/dx, dy/dy),
+taken as they are, with no projection onto the face. On +X only r14-r15
+change the level, on -Y only r12-r13, and on +Z all four; 0.5 gives level
+2 of 8 texels, as on a 2D texture, where the face's own derivative would
+be 0.25. The z derivatives can't be given. So neither form takes a cube's
+gradients the way GL defines them, and the driver computes a cube's LOD in
+the program.
+
 A dependent sample's implicit LOD is wrong in a quad its primitive covers
 only in part (**hardware**, `mesa/tests/sgx_deplod.c`: 128 of 4096 pixels
 against the PDS's sample, all on the quads where two triangles meet, with
