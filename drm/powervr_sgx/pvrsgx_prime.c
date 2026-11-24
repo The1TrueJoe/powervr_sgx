@@ -16,6 +16,7 @@
 #include <linux/dma-buf.h>
 #include <linux/ktime.h>
 #include <linux/overflow.h>
+#include <linux/pgtable.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 
@@ -121,10 +122,11 @@ out:
  */
 static u64 range_flush(const struct pvrsgx_cache_range *r)
 {
-	const struct iosys_map *map = &to_pvrsgx_bo(r->obj)->import_map;
+	const struct pvrsgx_bo *bo = to_pvrsgx_bo(r->obj);
+	const struct iosys_map *map = &bo->import_map;
 
-	/* I/O memory isn't cached. */
-	if (!r->import || map->is_iomem)
+	/* I/O memory isn't cached, and neither is an import its exporter maps uncached. */
+	if (!r->import || map->is_iomem || bo->import_uncached)
 		return 0;
 	/*
 	 * Rows less than a page apart: one flush of their span, which the range
@@ -141,6 +143,45 @@ static u64 range_flush(const struct pvrsgx_cache_range *r)
 		drm_clflush_virt_range(map->vaddr + r->offset + (u64)y * r->stride, r->size);
 	return (u64)r->size * r->rows;
 }
+
+#if IS_ENABLED(CONFIG_X86)
+/* A PTE's cache bits name a mode that never allocates lines (WC, UC-, UC). */
+static bool pte_uncached(pteval_t flags)
+{
+	pteval_t bits = flags & _PAGE_CACHE_MASK;
+
+	return bits == cachemode2protval(_PAGE_CACHE_MODE_WC) ||
+	       bits == cachemode2protval(_PAGE_CACHE_MODE_UC_MINUS) ||
+	       bits == cachemode2protval(_PAGE_CACHE_MODE_UC);
+}
+
+/*
+ * Whether every page of the exporter's kernel mapping is write-combined or
+ * uncached. x86 forbids mapping a page with two memory types (PAT), so an
+ * exporter that maps its pages WC for the kernel maps them WC everywhere
+ * (gma500 sets its pages WC with set_pages_array_wc(), TTM and the GEM shmem
+ * helpers map by the object's caching): the CPU never holds a line of them,
+ * and nothing is left to flush once the import's flush is done. A cached
+ * mapping, a large page or a hole: false, and every job flushes.
+ */
+static bool kmap_uncached(const void *vaddr, size_t size)
+{
+	for (size_t off = 0; off < size; off += PAGE_SIZE) {
+		unsigned int level;
+		pte_t *pte = lookup_address((unsigned long)vaddr + off, &level);
+
+		if (!pte || level != PG_LEVEL_4K || !pte_present(*pte) ||
+		    !pte_uncached(pte_flags(*pte)))
+			return false;
+	}
+	return true;
+}
+#else
+static bool kmap_uncached(const void *vaddr, size_t size)
+{
+	return false;
+}
+#endif
 
 /* The whole of an import, at import. */
 static void import_flush(struct drm_gem_object *obj)
@@ -198,6 +239,12 @@ struct drm_gem_object *pvrsgx_prime_import_sg_table(struct drm_device *drm,
 	 * could see the pages' earlier contents.
 	 */
 	import_flush(obj);
+	/*
+	 * Checked once here, against the mapping the flushes would go through:
+	 * one the exporter keeps uncached never needs them again.
+	 */
+	if (!map.is_iomem)
+		to_pvrsgx_bo(obj)->import_uncached = kmap_uncached(map.vaddr, obj->size);
 	return obj;
 }
 

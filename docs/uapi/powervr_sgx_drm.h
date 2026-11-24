@@ -1043,7 +1043,8 @@ struct drm_powervr_sgx_sync_op {
  * widened to whole cache lines: one damage rectangle of a linear buffer is one
  * entry. @rows 0 is one row. An entry for an object that isn't an import (ours
  * are write-combined, and a dma-buf of this device imports as the original
- * object) is checked and flushes nothing. No fence is attached.
+ * object), or for an import its exporter maps write-combined or uncached, is
+ * checked and flushes nothing. No fence is attached.
  *
  * Bytes of an import the job changes but doesn't list have undefined contents
  * afterwards, for the CPU and the GPU alike. That is never a leak: the kernel
