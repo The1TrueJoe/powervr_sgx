@@ -7,6 +7,11 @@ name: mesa-debian
 
 on:
   workflow_dispatch:
+    inputs:
+      aux_libdrm:
+        description: build against the private auxiliary-device libdrm (libdrm/), not Debian's
+        type: boolean
+        default: false
   # release.yml builds the release packages through this.
   workflow_call:
     inputs:
@@ -64,13 +69,13 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Build against the optional auxiliary-device libdrm API
+      # Opt-in: the packages are built against Debian's libdrm.
+      - name: Build against the private auxiliary-device libdrm
+        if: inputs.aux_libdrm
         run: |
-          if test -f libdrm/tools/build-libdrm-auxiliary.sh; then
-            sh libdrm/tools/build-libdrm-auxiliary.sh --install
-            echo "PKG_CONFIG_PATH=/opt/cedar-libdrm/lib/pkgconfig" >> "$GITHUB_ENV"
-            echo "LD_LIBRARY_PATH=/opt/cedar-libdrm/lib" >> "$GITHUB_ENV"
-          fi
+          sh libdrm/tools/build-libdrm-auxiliary.sh --install
+          echo "PKG_CONFIG_PATH=/opt/cedar-libdrm/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/opt/cedar-libdrm/lib" >> "$GITHUB_ENV"
 
       - name: Build
         run: |

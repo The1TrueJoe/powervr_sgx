@@ -11,9 +11,10 @@ This follows the explicit auxiliary model proposed by Alistair Popple for Nova:
 https://www.mail-archive.com/dri-devel@lists.freedesktop.org/msg625002.html.
 Stored child identities remain comparable after sysfs nodes disappear.
 
-Apply the two top-level patches to libdrm. The separate `mesa/` patch applies
-to Mesa 26.2.5 with powervr_sgx's overlay patches, and requires rebuilding Mesa
-against the patched libdrm headers. It supports auxiliary render-node selection,
+Apply the two patches here to libdrm. Mesa's side is
+`mesa/patches/local/0011-libdrm-auxiliary-loader.patch`, which the normal Mesa
+build applies; it takes effect only when Mesa is built against the patched
+libdrm headers. It supports auxiliary render-node selection,
 parent metadata and distinct DRI_PRIME tags. Existing PCI-only applications may
 need equivalent handling; a new bus type is not transparent to every client.
 

@@ -43,7 +43,7 @@ The loader patch recognizes auxiliary render nodes and constructs distinct
 auxiliary DRI_PRIME tags. Applications with their own PCI-only switch need
 corresponding support; do not assume an enum addition updates them automatically.
 
-The video subtree's `cedar-with-libdrm` launcher applies this selection. Keep
+The video decoding stack's `video/tools/cedar-with-libdrm` launcher applies this selection. Keep
 compositor and clients consistent. `cedar-labwc` passes LD_LIBRARY_PATH to its
 whole session: every inherited application receives the private library, not
 just the video player. This is opt-in and is not restricted to video. Installation neither changes `ld.so.conf`
