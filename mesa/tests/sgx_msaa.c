@@ -25,6 +25,10 @@
  * which no capture covers).
  *
  *   sgx_msaa          prints PASS/FAIL per case, exit 0 when all pass
+ *   sgx_msaa bench [frames] [samples]
+ *                     the colour case's frame and its resolve, repeated at
+ *                     1024x600 (samples 4, or 0 for a one-sample source):
+ *                     prints frames per second (issue #43)
  *
  * GL and EGL through libEGL.so.1 (glvnd) and eglGetProcAddress:
  * zig cc -target x86_64-linux-gnu.2.36 -I<mesa include> -o sgx_msaa
@@ -34,6 +38,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #define EGL_EGL_PROTOTYPES 0
 #define GL_GLEXT_PROTOTYPES 1
 #include <EGL/egl.h>
@@ -85,6 +90,7 @@ G(glCheckFramebufferStatus);
 G(glBlitFramebuffer);
 G(glDeleteFramebuffers);
 G(glDeleteRenderbuffers);
+G(glFinish);
 
 static int failures;
 
@@ -249,8 +255,35 @@ run(int w, int h, int depth, int scaled)
    free(px);
 }
 
+/* the colour case at 1024x600, frames times: a frame drawn and resolved */
+static int
+bench(int frames, int samples)
+{
+   const int w = 1024, h = 600;
+   GLuint rbm[2], rbs[2], fm = fbo(w, h, samples, 0, rbm), fs = fbo(w, h, 0, 0, rbs);
+   struct timespec t0, t1;
+
+   for (int i = -8; i < frames; i++) {
+      if (!i) {
+         glFinish_();
+         clock_gettime(CLOCK_MONOTONIC, &t0);
+      }
+      glBindFramebuffer_(GL_FRAMEBUFFER, fm);
+      draw(w, h, 0);
+      glBindFramebuffer_(GL_READ_FRAMEBUFFER, fm);
+      glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, fs);
+      glBlitFramebuffer_(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+   }
+   glFinish_();
+   clock_gettime(CLOCK_MONOTONIC, &t1);
+   double s = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
+   printf("bench %dx%d %dx: %d frames in %.2f s, %.1f fps, glerror %#x\n", w, h,
+          samples ? samples : 1, frames, s, frames / s, glGetError_());
+   return 0;
+}
+
 int
-main(void)
+main(int argc, char **argv)
 {
    void *egl = dlopen("libEGL.so.1", RTLD_NOW);
    if (!egl) {
@@ -319,6 +352,7 @@ main(void)
    GET(glBlitFramebuffer);
    GET(glDeleteFramebuffers);
    GET(glDeleteRenderbuffers);
+   GET(glFinish);
 
    GLint max = 0;
    glGetIntegerv_(GL_MAX_SAMPLES, &max);
@@ -327,6 +361,8 @@ main(void)
       check("max samples", 0, "GL_MAX_SAMPLES < 4");
       return 1;
    }
+   if (argc > 1 && !strcmp(argv[1], "bench"))
+      return bench(argc > 2 ? atoi(argv[2]) : 200, argc > 3 ? atoi(argv[3]) : 4);
    static const int sizes[][2] = {{720, 480}, {256, 256}};
    for (unsigned i = 0; i < 2; i++) {
       run(sizes[i][0], sizes[i][1], 0, 0);

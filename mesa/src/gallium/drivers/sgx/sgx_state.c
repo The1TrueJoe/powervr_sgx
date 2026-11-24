@@ -977,11 +977,44 @@ sgx_blit_zs(struct pipe_context *pctx, const struct pipe_blit_info *info)
    return true;
 }
 
+/* The colour of a blit out of a 4x buffer on the GPU: the buffer's memory is
+ * a one-sample image of the resolved pixels, so the blitter samples it as
+ * one, at any scale or format it draws.  The copy this replaces mapped the
+ * buffer on the CPU, waiting for the render and reading it back out of
+ * write-combined memory: about 21 ms a frame at 1024x600 (issue #43).
+ *
+ * The resource itself is presented as one-sample for the blit's length, not a
+ * copy of it: the draw marks what it samples (use_seq, the render's buffer
+ * list) on the resource it sees, and a later write to the 4x buffer must
+ * wait for this read.  Its render is flushed first, so no frame records
+ * into it while it reads as one-sample. */
+static bool
+sgx_blit_resolve_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   struct pipe_resource *src = info->src.resource;
+   unsigned samples = src->nr_samples, storage = src->nr_storage_samples;
+   bool ok;
+
+   if (sgx_drv_debug & SGX_DEBUG_CPU_RESOLVE)
+      return false;
+   sgx_flush_resource_writes(sgx_context(pctx), sgx_resource(src));
+   src->nr_samples = 0;
+   src->nr_storage_samples = 0;
+   ok = sgx_blit_gpu(pctx, info);
+   src->nr_samples = samples;
+   src->nr_storage_samples = storage;
+   if (ok)
+      sgx_context(pctx)->stats.blit_gpu++;
+   return ok;
+}
+
 /* A blit out of a 4x colour buffer: its memory holds the resolved pixels
  * (the PBE resolves each tile as it stores it, sgx_draw.c begin_frame), so
- * the resolve is a copy; a scaled or converting one copies into a
- * one-sample texture first and blits from that.  Depth and stencil go
- * through the CPU (sgx_blit_zs), from sample 0 of the ZLS buffer. */
+ * the resolve is a GPU blit from them (sgx_blit_resolve_gpu).  What that
+ * refuses (a scissored blit, a format the TPU can't sample) is a CPU copy;
+ * a scaled or converting one copies into a one-sample texture first and
+ * blits from that.  Depth and stencil go through the CPU (sgx_blit_zs),
+ * from sample 0 of the ZLS buffer. */
 static bool
 sgx_blit_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
@@ -999,6 +1032,8 @@ sgx_blit_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
       pctx->blit(pctx, &b);
       return true;
    }
+   if (sgx_blit_resolve_gpu(pctx, info))
+      return true;
    if (box.width < 0) {
       box.x += box.width;
       box.width = -box.width;
