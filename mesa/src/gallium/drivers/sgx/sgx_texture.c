@@ -50,6 +50,11 @@ sgx_tex_format(enum pipe_format format)
    case PIPE_FORMAT_R8_SINT:
    case PIPE_FORMAT_R8G8_UINT:
    case PIPE_FORMAT_R8G8_SINT:
+   /* snorm bytes stored offset binary (sgx_tex_snorm): an unsigned byte the
+    * TPU filters, the shader taking 128 off */
+   case PIPE_FORMAT_R8G8B8A8_SNORM:
+   case PIPE_FORMAT_R8_SNORM:
+   case PIPE_FORMAT_R8G8_SNORM:
       return 0x0d;
    case PIPE_FORMAT_B8G8R8A8_UNORM:
    case PIPE_FORMAT_B8G8R8X8_UNORM:
@@ -71,6 +76,7 @@ sgx_tex_format(enum pipe_format format)
    case PIPE_FORMAT_Z24X8_UNORM:
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
    case PIPE_FORMAT_Z32_FLOAT:
+   case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
    /* 32-bit words returned unchanged (docs/GL3.md, H2): R32 one a texel;
     * RG32 and RGBA32 as an R32 plane a channel (sgx_tex_raw32), the
     * compiler reading each */
@@ -81,6 +87,16 @@ sgx_tex_format(enum pipe_format format)
    case PIPE_FORMAT_R32G32_SINT:
    case PIPE_FORMAT_R32G32B32A32_UINT:
    case PIPE_FORMAT_R32G32B32A32_SINT:
+   /* float: F32 planes as for RGBA32, those that aren't F32 already
+    * converted on upload (sgx_tex_f32_conv) */
+   case PIPE_FORMAT_R32G32_FLOAT:
+   case PIPE_FORMAT_R32G32B32A32_FLOAT:
+   case PIPE_FORMAT_R16_FLOAT:
+   case PIPE_FORMAT_R16G16_FLOAT:
+   case PIPE_FORMAT_R16G16B16A16_FLOAT:
+   case PIPE_FORMAT_R11G11B10_FLOAT:
+   case PIPE_FORMAT_R9G9B9E5_FLOAT:
+   case PIPE_FORMAT_R10G10B10A2_UNORM:
       return 0x12;
    default:
       return 0;
@@ -99,16 +115,54 @@ sgx_tex_raw32(enum pipe_format format)
    case PIPE_FORMAT_R32_UINT:
    case PIPE_FORMAT_R32_SINT:
    case PIPE_FORMAT_R32_FLOAT:
+   case PIPE_FORMAT_R16_FLOAT:
       return 1;
    case PIPE_FORMAT_R32G32_UINT:
    case PIPE_FORMAT_R32G32_SINT:
+   case PIPE_FORMAT_R32G32_FLOAT:
+   case PIPE_FORMAT_R16G16_FLOAT:
       return 2;
    case PIPE_FORMAT_R32G32B32A32_UINT:
    case PIPE_FORMAT_R32G32B32A32_SINT:
+   case PIPE_FORMAT_R32G32B32A32_FLOAT:
+   case PIPE_FORMAT_R16G16B16A16_FLOAT:
+   case PIPE_FORMAT_R11G11B10_FLOAT:
+   case PIPE_FORMAT_R9G9B9E5_FLOAT:
+   case PIPE_FORMAT_R10G10B10A2_UNORM:
       return 4;
    default:
       return 0;
    }
+}
+
+/* A float (or 10-bit) format no sampler format is known for (docs/GL3.md,
+ * H2): stored as the F32 planes of its channels, converted from the CPU
+ * copy's format on upload and back on readback.  The TPU doesn't filter F32:
+ * LINEAR is four taps in the shader (lower_srgb_filter) */
+bool
+sgx_tex_f32_conv(enum pipe_format format)
+{
+   unsigned n = sgx_tex_raw32(format);
+
+   return n && util_format_get_blocksize(format) != n * 4;
+}
+
+/* float texels of a planar format, filtered in the shader when LINEAR */
+bool
+sgx_tex_float_planes(enum pipe_format format)
+{
+   return sgx_tex_raw32(format) && !util_format_is_pure_integer(format) &&
+          !util_format_is_depth_or_stencil(format);
+}
+
+/* An snorm format, stored offset binary (each byte XOR 0x80, so -1..1 is
+ * 1..255 and the TPU's filter, linear in the byte, stays right); the shader
+ * maps the unorm value back: max(v * 255 / 127 - 128 / 127, -1) */
+bool
+sgx_tex_snorm(enum pipe_format format)
+{
+   return format == PIPE_FORMAT_R8G8B8A8_SNORM ||
+          format == PIPE_FORMAT_R8_SNORM || format == PIPE_FORMAT_R8G8_SNORM;
 }
 
 /* stored as F32 words, sampled as T1 0x12 (sgx_tex_depth, sgx_tex_raw32) */
@@ -402,6 +456,11 @@ encode_rect(struct sgx_resource *res, unsigned level, const uint8_t *src,
    bool rgbx = prsc->format == PIPE_FORMAT_R8G8B8X8_UNORM;
    bool widen = cbpp != bpp; /* R8, RG8: the texel made RGBA8 */
    uint8_t alpha = util_format_is_pure_integer(prsc->format) ? 1 : 0xff;
+   /* snorm: offset binary, the channels it has and the missing (0) ones; a
+    * missing alpha stays 0xff, read as 1 */
+   uint32_t flip = !sgx_tex_snorm(prsc->format) ? 0
+                   : widen                       ? 0x00808080u
+                                                 : 0x80808080u;
 
    x1 = MIN2(x1, w);
    y1 = MIN2(y1, h);
@@ -422,6 +481,20 @@ encode_rect(struct sgx_resource *res, unsigned level, const uint8_t *src,
              ps = sgx_tex_plane_stride(prsc);
       unsigned n = sgx_tex_raw32(prsc->format);
 
+      if (sgx_tex_f32_conv(prsc->format)) {
+         /* channel c as an F32 into plane c */
+         for (unsigned y = y0; y < y1; y++)
+            for (unsigned x = x0; x < x1; x++) {
+               float f[4];
+
+               util_format_unpack_rgba(prsc->format, f,
+                                       src + y * src_stride + (size_t)x * cbpp,
+                                       1);
+               for (unsigned c = 0; c < n; c++)
+                  memcpy(dst + c * ps + y * pitch + (size_t)x * 4, &f[c], 4);
+            }
+         return;
+      }
       for (unsigned c = 0; c < n; c++)
          for (unsigned y = y0; y < y1; y++) {
             uint32_t *d = (uint32_t *)(dst + c * ps + y * pitch);
@@ -441,14 +514,22 @@ encode_rect(struct sgx_resource *res, unsigned level, const uint8_t *src,
                widen_texel(dst + y * pitch + (size_t)x * 4,
                            src + y * src_stride + (size_t)x * cbpp, cbpp,
                            alpha);
-            continue;
+         } else {
+            memcpy(dst + y * pitch + (size_t)x0 * bpp,
+                   src + y * src_stride + (size_t)x0 * bpp,
+                   (size_t)(x1 - x0) * bpp);
          }
-         memcpy(dst + y * pitch + (size_t)x0 * bpp,
-                src + y * src_stride + (size_t)x0 * bpp,
-                (size_t)(x1 - x0) * bpp);
          if (rgbx)
             for (unsigned x = x0; x < x1; x++)
                dst[y * pitch + x * 4 + 3] = 0xff;
+         if (flip)
+            for (unsigned x = x0; x < x1; x++) {
+               uint32_t v;
+
+               memcpy(&v, dst + y * pitch + (size_t)x * 4, 4);
+               v ^= flip;
+               memcpy(dst + y * pitch + (size_t)x * 4, &v, 4);
+            }
       }
       return;
    }
@@ -488,7 +569,7 @@ encode_rect(struct sgx_resource *res, unsigned level, const uint8_t *src,
                   uint32_t v;
 
                   memcpy(&v, s, 4);
-                  v |= set;
+                  v = (v | set) ^ flip;
                   memcpy(out + (size_t)(sy | spread[x - bx] << 1) * 4, &v, 4);
                }
             }
@@ -509,6 +590,13 @@ encode_rect(struct sgx_resource *res, unsigned level, const uint8_t *src,
                   memcpy(o, s + (size_t)x * bpp, bpp);
                if (rgbx)
                   o[3] = 0xff;
+               if (flip) {
+                  uint32_t v;
+
+                  memcpy(&v, o, 4);
+                  v ^= flip;
+                  memcpy(o, &v, 4);
+               }
             }
          }
          if (whole)
@@ -729,6 +817,20 @@ sgx_tex_decode_box(struct sgx_resource *res, unsigned level, unsigned layer,
              ps = sgx_tex_plane_stride(prsc);
       unsigned n = sgx_tex_raw32(prsc->format);
 
+      if (sgx_tex_f32_conv(prsc->format)) {
+         unsigned cbpp = util_format_get_blocksize(prsc->format);
+
+         for (unsigned y = y0; y < y1; y++)
+            for (unsigned x = x0; x < x1; x++) {
+               float f[4] = {0, 0, 0, 1};
+
+               for (unsigned c = 0; c < n; c++)
+                  memcpy(&f[c], src + c * ps + y * pitch + (size_t)x * 4, 4);
+               util_format_pack_rgba(prsc->format,
+                                     dst + y * stride + (size_t)x * cbpp, f, 1);
+            }
+         return;
+      }
       for (unsigned c = 0; c < n; c++)
          for (unsigned y = y0; y < y1; y++) {
             uint32_t *d = (uint32_t *)(dst + y * stride);
@@ -926,9 +1028,11 @@ sgx_tex_words(const struct pipe_sampler_view *view,
       {
          t0.pitch_lo = p & 7;
          t0.pitch_hi = p >> 3;
+         /* clamped: a fragment program wraps the coordinate itself
+          * (sgx_program.c lower_word32_wrap), the TPU doesn't here */
          if (sampler) {
-            t0.wrap_t = wrap(sampler->wrap_t);
-            t0.wrap_s = wrap(sampler->wrap_s);
+            t0.wrap_t = wrap(PIPE_TEX_WRAP_CLAMP_TO_EDGE);
+            t0.wrap_s = wrap(PIPE_TEX_WRAP_CLAMP_TO_EDGE);
          }
       }
       sgx_pack(&t[1], TEXSTATE_WORD1, t1)

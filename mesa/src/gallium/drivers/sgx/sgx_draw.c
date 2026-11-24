@@ -434,8 +434,10 @@ clear_one(struct pipe_context *pctx, unsigned buffers,
        * converts back to exactly k (the colour word is B, G, R, A bytes):
        * each channel's low byte for an 8-bit format (1 for a missing
        * alpha), an R32 value's four bytes */
+      /* (a float planar one too: its plane's F32 word, color->ui) */
       if (sgx_cbuf(ctx)->texture &&
-          util_format_is_pure_integer(sgx_cbuf(ctx)->format)) {
+          (util_format_is_pure_integer(sgx_cbuf(ctx)->format) ||
+           sgx_tex_raw32(sgx_cbuf(ctx)->format))) {
          enum pipe_format f = sgx_cbuf(ctx)->format;
          uint32_t v = color->ui[0];
 
@@ -2021,7 +2023,8 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       unsigned br = sgx_blend_rt(ctx->blend, ctx->rt_index);
 
       enum pipe_format cf = sgx_cbuf(ctx)->format;
-      bool int_rt = util_format_is_pure_integer(cf);
+      /* (a float planar target too: a word a plane, F32, not blended) */
+      bool int_rt = util_format_is_pure_integer(cf) || sgx_tex_raw32(cf);
 
       /* an integer target isn't blended (GL); its packed word is masked by
        * byte, an R32 word being all of R.  An sRGB one is blended by the

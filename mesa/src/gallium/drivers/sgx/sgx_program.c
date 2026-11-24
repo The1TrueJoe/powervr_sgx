@@ -937,6 +937,85 @@ lower_srgb_filter(nir_builder *b, nir_instr *instr, void *data)
    return true;
 }
 
+/* REPEAT and MIRRORED_REPEAT on a texture stored as F32 words
+ * (sgx_tex_word32: depth, R32, the RG32 / RGBA32 and float planes): it is
+ * read strided (T1 layout 6), and there the TPU doesn't wrap as the T0 codes
+ * say (measured: RGBA16F and RGBA32F sampled over [-0.5, 1.5] are wrong in
+ * every pixel outside [0, 1]; R32F in one axis), so the coordinate is
+ * wrapped here and the TPU clamps (sgx_texture.c).  After
+ * lower_srgb_filter, so each of a LINEAR filter's taps is wrapped on its
+ * own; exact for the texel a NEAREST read picks.  Projected, 1D and array
+ * samples, and units from 16, aren't wrapped: they keep the TPU's clamp.
+ * data: the shader variant (wrap_rep, wrap_mir). */
+static bool
+lower_word32_wrap(nir_builder *b, nir_instr *instr, void *data)
+{
+   const struct sgx_pipe_shader *so = data;
+
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   int ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   unsigned u = tex->texture_index;
+
+   if (u >= 16 || ci < 0 || tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
+       tex->is_array || nir_tex_instr_is_query(tex) ||
+       tex->op == nir_texop_txf || tex->op == nir_texop_txf_ms ||
+       nir_tex_instr_src_index(tex, nir_tex_src_projector) >= 0 ||
+       !((so->wrap_rep | so->wrap_mir) >> (2 * u) & 3))
+      return false;
+   b->cursor = nir_before_instr(instr);
+   nir_def *coord = tex->src[ci].src.ssa;
+   nir_def *c[NIR_MAX_VEC_COMPONENTS];
+
+   for (unsigned i = 0; i < coord->num_components; i++) {
+      c[i] = nir_channel(b, coord, i);
+      if (i > 1)
+         continue;
+      if (so->wrap_rep >> (2 * u + i) & 1) {
+         c[i] = nir_ffract(b, c[i]);
+      } else if (so->wrap_mir >> (2 * u + i) & 1) {
+         /* m in [0, 2): m below 1, 2 - m from there (1 itself the last
+          * texel: the TPU clamps it) */
+         nir_def *m = nir_fmul_imm(b, nir_ffract(b, nir_fmul_imm(b, c[i], 0.5)),
+                                   2.0);
+         c[i] = nir_bcsel(b, nir_flt_imm(b, m, 1.0), m,
+                          nir_fsub_imm(b, 2.0, m));
+      }
+   }
+   nir_src_rewrite(&tex->src[ci].src, nir_vec(b, c, coord->num_components));
+   return true;
+}
+
+/* A texel of an snorm texture (sgx_tex_snorm), stored offset binary: the
+ * unorm value v the TPU returns (filtered: the map is linear) is
+ * (v * 255 - 128) / 127, clamped to -1 as GL clamps -128.  After
+ * nir_lower_tex: the view's swizzle then reads the decoded texel, and its 0
+ * and 1 are GL's own.  data: the units. */
+static bool
+lower_snorm_texel(nir_builder *b, nir_instr *instr, void *data)
+{
+   uint32_t units = *(const uint32_t *)data;
+
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+
+   if (tex->texture_index >= 32 || !(units >> tex->texture_index & 1) ||
+       nir_tex_instr_is_query(tex) || tex->is_shadow)
+      return false;
+   b->cursor = nir_after_instr(instr);
+   unsigned bits = tex->def.bit_size;
+   nir_def *v = nir_fmax(
+      b,
+      nir_ffma(b, &tex->def, nir_imm_floatN_t(b, 255.0 / 127.0, bits),
+               nir_imm_floatN_t(b, -128.0 / 127.0, bits)),
+      nir_imm_floatN_t(b, -1.0, bits));
+
+   nir_def_rewrite_uses_after(&tex->def, v);
+   return true;
+}
+
 /* the units a shader takes shadow samples of */
 static uint32_t
 shadow_units(nir_shader *nir)
@@ -1563,10 +1642,18 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
       if (srgb_filter)
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_srgb_filter,
                   nir_metadata_control_flow, &srgb_filter);
+      if (so->wrap_rep | so->wrap_mir)
+         NIR_PASS(_, nir, nir_shader_instructions_pass, lower_word32_wrap,
+                  nir_metadata_control_flow, so);
       if (!(sgx_drv_debug & SGX_DEBUG_TEX3D))
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_tex_3d,
                   nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_lower_tex, &tex);
+      /* after it: the swizzle's uses of the texel become the decoded one's,
+       * its 0 and 1 stay GL's */
+      if (so->snorm)
+         NIR_PASS(_, nir, nir_shader_instructions_pass, lower_snorm_texel,
+                  nir_metadata_control_flow, &so->snorm);
    }
    if (dep_mip && !vertex) {
       nir_lower_tex_options txd = {.lower_txd_cb = sgx_txd_lowered,
@@ -2240,6 +2327,8 @@ struct tex_key {
    uint16_t swz[PIPE_MAX_SAMPLERS];
    uint32_t not_bgra, depth;
    uint32_t r32x4, r32x2;
+   uint32_t snorm;
+   uint32_t wrap_rep, wrap_mir;
    uint8_t compare[PIPE_MAX_SAMPLERS];
    uint32_t dep_mip;
 };
@@ -2281,6 +2370,33 @@ tex_key_of(const nir_shader *nir, uint32_t dep_lod,
 
       if (!sgx_tex_bgra(v->format) || plane)
          k->not_bgra |= 1u << unit;
+      if (sgx_tex_snorm(v->format))
+         k->snorm |= 1u << unit;
+      /* a strided F32 texture's REPEAT / MIRRORED_REPEAT axes
+       * (lower_word32_wrap) */
+      if (sgx_tex_word32(v->texture->format) && samplers[unit] && unit < 16) {
+         const struct pipe_sampler_state *ss = samplers[unit];
+         unsigned w[2] = {ss->wrap_s, ss->wrap_t};
+
+         for (unsigned i = 0; i < 2; i++) {
+            if (w[i] == PIPE_TEX_WRAP_REPEAT)
+               k->wrap_rep |= 1u << (2 * unit + i);
+            else if (w[i] == PIPE_TEX_WRAP_MIRROR_REPEAT)
+               k->wrap_mir |= 1u << (2 * unit + i);
+         }
+      }
+      /* float planes, which the TPU doesn't filter: LINEAR at one level is
+       * four taps in the shader, as for sRGB (lower_srgb_filter) */
+      if (sgx_tex_float_planes(v->format)) {
+         const struct pipe_sampler_state *ss = samplers[unit];
+
+         if (ss &&
+             (ss->mag_img_filter == PIPE_TEX_FILTER_LINEAR ||
+              ss->min_img_filter == PIPE_TEX_FILTER_LINEAR) &&
+             (ss->min_mip_filter == PIPE_TEX_MIPFILTER_NONE ||
+              v->u.tex.first_level == v->u.tex.last_level))
+            k->srgb_filter |= 1u << unit;
+      }
       /* one F32 word a texel (tex_f32): depth, and R32 (raw); RG32 and
        * RGBA32 a read a plane (tex_r32x2 / x4) */
       if (sgx_tex_raw32(v->format) == 1)
@@ -2336,8 +2452,8 @@ tex_key_of(const nir_shader *nir, uint32_t dep_lod,
       }
    }
    /* (depth alone, as before: a depth unit is not B, G, R, A either) */
-   return k->srgb || any_swz || k->not_bgra || k->r32x4 || k->r32x2 ||
-          k->dep_mip;
+   return k->srgb || k->srgb_filter || any_swz || k->not_bgra || k->r32x4 ||
+          k->r32x2 || k->snorm || k->wrap_rep || k->wrap_mir || k->dep_mip;
 }
 
 static bool
@@ -2346,6 +2462,8 @@ tex_key_is(const struct sgx_pipe_shader *v, const struct tex_key *k)
    return v->srgb == k->srgb && v->srgb_filter == k->srgb_filter &&
           v->not_bgra == k->not_bgra && v->depth == k->depth &&
           v->r32x4 == k->r32x4 && v->r32x2 == k->r32x2 &&
+          v->snorm == k->snorm && v->wrap_rep == k->wrap_rep &&
+          v->wrap_mir == k->wrap_mir &&
           !memcmp(v->compare, k->compare, sizeof(k->compare)) &&
           !memcmp(v->swz, k->swz, sizeof(k->swz)) && v->dep_mip == k->dep_mip;
 }
@@ -2360,6 +2478,9 @@ tex_key_set(struct sgx_pipe_shader *v, const struct tex_key *k)
    v->depth = k->depth;
    v->r32x4 = k->r32x4;
    v->r32x2 = k->r32x2;
+   v->snorm = k->snorm;
+   v->wrap_rep = k->wrap_rep;
+   v->wrap_mir = k->wrap_mir;
    memcpy(v->compare, k->compare, sizeof(k->compare));
    v->dep_mip = k->dep_mip;
 }
@@ -2445,9 +2566,11 @@ fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
 
    if (fs->kind != SGX_SHADER_COMPILED || !fs->nir)
       return fs;
-   /* an integer colour buffer takes its own packing (pack_int_outputs) */
+   /* an integer colour buffer takes its own packing (pack_int_outputs), and
+    * a float planar one its channel's F32 word a plane */
    if (sgx_cbuf(ctx)->texture &&
-       util_format_is_pure_integer(sgx_cbuf(ctx)->format))
+       (util_format_is_pure_integer(sgx_cbuf(ctx)->format) ||
+        sgx_tex_raw32(sgx_cbuf(ctx)->format)))
       rt_int = sgx_tex_raw32(sgx_cbuf(ctx)->format) > 1
                   ? 3 + ctx->rt_plane /* a plane: channel rt_plane */
                : sgx_tex_raw32(sgx_cbuf(ctx)->format) ? 2
