@@ -108,7 +108,10 @@ jobs:
             build-essential bc bison flex libelf-dev libdw-dev libssl-dev cpio ccache dpkg-dev fakeroot rsync kmod debhelper \
             qemu-system-x86 file
           if [ "$DEB_ARCH" = i386 ]; then
-            sudo apt-get install -y --no-install-recommends gcc-i686-linux-gnu libc6-dev-i386-cross
+            # the headers package's host tools (sign-file) link the i386 libcrypto
+            sudo dpkg --add-architecture i386
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends gcc-i686-linux-gnu libc6-dev-i386-cross libssl-dev:i386
           fi
 
       - name: Restore the kernel tarball
@@ -192,18 +195,18 @@ jobs:
             file -L $(find hroot -path '*/scripts/mod/modpost' -type f) | grep -q 'ELF 32-bit.*Intel 80386'
           fi
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: powervr-sgx-deb-cedarview-${{ matrix.flavor }}${{ env.ASUF }}${{ env.LOCKDEP }}
+          path: out/
+          retention-days: 30
+
       - name: Boot it in QEMU (no GPU there; the modules load, nothing binds)
         if: matrix.flavor == 'release'
         run: |
           set -eux
           sudo chmod 666 /dev/kvm || true
           sh drm/ci/qemu-boot.sh out/linux-image-$LINUX_VERSION-sgx${FLAVOR}_*_$DEB_ARCH.deb $DEB_ARCH
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: powervr-sgx-deb-cedarview-${{ matrix.flavor }}${{ env.ASUF }}${{ env.LOCKDEP }}
-          path: out/
-          retention-days: 30
 
       - uses: actions/upload-artifact@v4
         if: always() && matrix.flavor == 'release'

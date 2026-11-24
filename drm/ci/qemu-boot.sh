@@ -46,7 +46,7 @@ docker run --rm --platform "$PLAT" -v "$W:/w" debian:trixie sh -euc '
 	kv=$(ls /lib/modules)
 	cp /boot/vmlinuz-$kv /w/vmlinuz
 	depmod "$kv"
-	keep=$(modprobe -S "$kv" --show-depends gma500_gfx powervr_sgx | awk "\$1 == \"insmod\" {print \$2}")
+	keep=$(for m in gma500_gfx powervr_sgx; do modprobe -S "$kv" --show-depends $m; done | awk "\$1 == \"insmod\" {print \$2}")
 	echo "$keep"
 	mkdir /tmp/m
 	for f in $keep; do mkdir -p "/tmp/m$(dirname "$f")"; cp "$f" "/tmp/m$f"; done
