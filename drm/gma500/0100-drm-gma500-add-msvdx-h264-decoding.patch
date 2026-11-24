@@ -3986,7 +3986,7 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +
 +void cdv_msvdx_remove(struct drm_device *dev)
 +{
-+	if (enable_msvdx)
++	if (READ_ONCE(cdv_msvdx_dev) == dev)
 +		devm_release_action(dev->dev, cdv_msvdx_cleanup, dev);
 +}
 +
