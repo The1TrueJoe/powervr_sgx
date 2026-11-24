@@ -1,7 +1,8 @@
 # Mesa with the sgx driver for Debian 13 (trixie) users: built natively in a
 # trixie container (mesa/build.sh debian) for /opt/sgx, packed with the two files
 # that put it ahead of Debian's Mesa (mesa/debian/package.sh, etc.<arch>), for
-# amd64 and for i386 (32-bit games; Multi-Arch: same, installed beside amd64's).
+# amd64 and for i386 (32-bit games; Multi-Arch: same, installed beside amd64's,
+# or alone on an i386 system).
 # docs/INSTALL.md.
 name: mesa-debian
 
@@ -249,10 +250,33 @@ jobs:
           path: '*.deb'
           retention-days: 7
 
+  # mesa-sgx:i386 alone on an i386 trixie (a Cedarview whose BIOS turns 64-bit
+  # mode off), beside Debian's Mesa: mesa/debian/check.sh. A job container would
+  # need the runner's amd64 node, so docker run.
+  i386-alone:
+    needs: mesa-i386
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mesa-sgx-i386
+          path: debs
+      - name: Install on i386 alone and check
+        run: |
+          set -eux
+          docker run --rm --platform linux/386 -v "$PWD:/w" -w /w debian:trixie sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            [ -z "$(dpkg --print-foreign-architectures)" ]
+            apt-get update -qq
+            apt-get install -y --no-install-recommends libgbm1 libegl-mesa0 libglx-mesa0 mesa-utils ./debs/mesa-sgx_*_i386.deb
+            dpkg -l "mesa-sgx*" | grep "^ii.*i386"
+            sh mesa/debian/check.sh i386'
+
   # Both architectures in one trixie system, as a user installs them for a
   # 32-bit game, then the checksums and the artifact release.yml takes.
   packages:
-    needs: [mesa, mesa-i386]
+    needs: [mesa, mesa-i386, i386-alone]
     runs-on: ubuntu-24.04
     container: debian:trixie
     steps:
