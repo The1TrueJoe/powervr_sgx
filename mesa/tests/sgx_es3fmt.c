@@ -22,6 +22,7 @@
  *     every pixel against a CPU reference; RGBA8 as the control
  *
  *   MESA_GLES_VERSION_OVERRIDE=3.0 SGX_DEBUG=glsl130 DISPLAY=:0 sgx_es3fmt
+ *   (or EGL_PLATFORM=surfaceless in place of DISPLAY)
  *
  * zig cc -target x86-linux-gnu.2.36 -isystem <root>/usr/include -o sgx_es3fmt
  * sgx_es3fmt.c <root>/usr/lib/i386-linux-gnu/libEGL.so.1
@@ -195,7 +196,8 @@ main(void)
       return 1;
    }
    eglBindAPI(EGL_OPENGL_ES_API);
-   const EGLint ca[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE};
+   const EGLint ca[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                        EGL_SURFACE_TYPE, 0, EGL_NONE};
    EGLConfig cfg;
    EGLint n = 0;
    eglChooseConfig(d, ca, &cfg, 1, &n);

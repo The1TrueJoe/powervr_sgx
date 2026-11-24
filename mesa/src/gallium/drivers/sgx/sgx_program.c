@@ -944,8 +944,9 @@ lower_srgb_filter(nir_builder *b, nir_instr *instr, void *data)
  * every pixel outside [0, 1]; R32F in one axis), so the coordinate is
  * wrapped here and the TPU clamps (sgx_texture.c).  After
  * lower_srgb_filter, so each of a LINEAR filter's taps is wrapped on its
- * own; exact for the texel a NEAREST read picks.  data: the shader variant
- * (wrap_rep, wrap_mir). */
+ * own; exact for the texel a NEAREST read picks.  Projected, 1D and array
+ * samples, and units from 16, aren't wrapped: they keep the TPU's clamp.
+ * data: the shader variant (wrap_rep, wrap_mir). */
 static bool
 lower_word32_wrap(nir_builder *b, nir_instr *instr, void *data)
 {
@@ -1015,7 +1016,6 @@ lower_snorm_texel(nir_builder *b, nir_instr *instr, void *data)
    return true;
 }
 
-/* the units a fragment shader takes shadow samples of */
 /* the units a shader takes shadow samples of */
 static uint32_t
 shadow_units(nir_shader *nir)
