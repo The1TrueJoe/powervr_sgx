@@ -20,7 +20,7 @@ Published source inputs and hardware evidence:
   https://github.com/thomas001/cdv/tree/a0f0aa899a67cdd23adfd3a2fc0ab7956eb90cc9/imgv.
 - Hardware evidence on Atom N2800 / PCI 8086:0be2 includes exact decoded NV12
   against software, cropped/coded-1088 and multi-slice inputs, sequence wrap,
-  imported plane sampling, write rejection, and resource retirement.
+  imported plane sampling, writable DMA-BUF sharing, and resource retirement.
 - The 18 KiB runtime template contains command layout, patch indices and VLC
   tables. It contains no sample bitstream, reference image or firmware binary.
   Caller input and admitted picture/reference state are patched at submission.

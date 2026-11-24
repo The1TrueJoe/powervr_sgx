@@ -1,6 +1,6 @@
-From 728c81f64ee8ad83ca5fabafcacaeb7bcd8b94c3 Mon Sep 17 00:00:00 2001
+From 65da2ddf531be82704b9537859a846996eca0ea3 Mon Sep 17 00:00:00 2001
 From: Viktor Semykin <thesame.ml@gmail.com>
-Date: Mon, 23 Nov 2026 19:03:19 -0300
+Date: Mon, 23 Nov 2026 23:39:32 -0300
 Subject: [PATCH] drm/gma500: add opt-in Cedarview MSVDX H.264 decoding
 
 Host MSVDX beside its existing PCI/display owner. Admit bounded H.264
@@ -19,11 +19,12 @@ fix is necessary for correct GL2/GLES2 imported colors.
 
 Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
 ---
- Documentation/gpu/gma500-msvdx.rst            |  126 +
+ Documentation/gpu/gma500-msvdx.rst            |  127 +
+ Documentation/gpu/index.rst                   |    1 +
  drivers/gpu/drm/gma500/Kconfig                |   10 +
  drivers/gpu/drm/gma500/Makefile               |    2 +
  drivers/gpu/drm/gma500/cdv_h264_template.h    |  333 ++
- drivers/gpu/drm/gma500/cdv_msvdx.c            | 3492 +++++++++++++++++
+ drivers/gpu/drm/gma500/cdv_msvdx.c            | 3507 +++++++++++++++++
  drivers/gpu/drm/gma500/cdv_msvdx.h            |   21 +
  drivers/gpu/drm/gma500/cedar-msvdx-dma.h      |   51 +
  drivers/gpu/drm/gma500/cedar-msvdx.h          |  384 ++
@@ -32,7 +33,7 @@ Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
  .../drm/gma500/msvdx-template.json.license    |    1 +
  drivers/gpu/drm/gma500/power.c                |    7 +
  drivers/gpu/drm/gma500/psb_drv.c              |    8 +
- 13 files changed, 4996 insertions(+)
+ 14 files changed, 5013 insertions(+)
  create mode 100644 Documentation/gpu/gma500-msvdx.rst
  create mode 100644 drivers/gpu/drm/gma500/cdv_h264_template.h
  create mode 100644 drivers/gpu/drm/gma500/cdv_msvdx.c
@@ -45,10 +46,10 @@ Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
 
 diff --git a/Documentation/gpu/gma500-msvdx.rst b/Documentation/gpu/gma500-msvdx.rst
 new file mode 100644
-index 0000000000000000000000000000000000000000..c9069fd90702b73e022c3926775728f52aaee31e
+index 0000000000000000000000000000000000000000..2821e04dc1e61cb282d2bdce061fa3df6b0fc021
 --- /dev/null
 +++ b/Documentation/gpu/gma500-msvdx.rst
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,127 @@
 +.. SPDX-License-Identifier: GPL-2.0-only
 +
 +Cedarview MSVDX H.264 decoding
@@ -164,17 +165,30 @@ index 0000000000000000000000000000000000000000..c9069fd90702b73e022c3926775728f5
 +---------------------------
 +
 +At most 64 image/motion allocations exist globally, including detached exports
-+and independent initialized images used for format probes. Each owns
++and at most eight independent initialized images used for format probes.
++The probe limit leaves at least 56 global slots available for decoder storage. Each owns
 +1024 pages (4 MiB at 4 KiB pages); this bounds DMA32 image/motion storage to
 +256 MiB. Engine command, RENDEC and bitstream allocations are separate bounded
 +resources. Probe allocations retire with their last external reference; no
 +shared black allocation remains cached after all clients close.
 +
 +DMA-BUF release uses atomic reader accounting and never takes the mutex held
-+while firmware is polled. Quarantine prevents new work until reboot. Sleep may
-+retry a bounded reset/drain proof; after a successful proof it can proceed while
-+all quarantined allocations remain retained. An unsuccessful proof still refuses
-+power-down rather than risking DMA into released memory.
++while firmware is polled. Quarantine prevents new work until reboot. A failed sleep checkpoint refuses that sleep attempt and quarantines the engine.
++Subsequent power-down is allowed to stop DMA, while every quarantined allocation
++remains pinned. Resume does not clear quarantine or permit decoder work; reboot
++is required for recovery.
+diff --git a/Documentation/gpu/index.rst b/Documentation/gpu/index.rst
+index 65bf3b26e4f4c58df839732e16326bb19f34363e..2cc182edfcf744ac57b4f9b3859fd89d1b791cfc 100644
+--- a/Documentation/gpu/index.rst
++++ b/Documentation/gpu/index.rst
+@@ -17,6 +17,7 @@ GPU Driver Developer's Guide
+    drm-client
+    drm-compute
+    drivers
++   gma500-msvdx
+    backlight
+    vga-switcheroo
+    vgaarbiter
 diff --git a/drivers/gpu/drm/gma500/Kconfig b/drivers/gpu/drm/gma500/Kconfig
 index 2f88a4353b3db2d9896d2cb1aa1606c18c2660a6..7f3102482458866af6441c746af990d9320e0b40 100644
 --- a/drivers/gpu/drm/gma500/Kconfig
@@ -544,10 +558,10 @@ index 0000000000000000000000000000000000000000..10e1163e35d59f4984098e1fed944a59
 +};
 diff --git a/drivers/gpu/drm/gma500/cdv_msvdx.c b/drivers/gpu/drm/gma500/cdv_msvdx.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153dabc2b55
+index 0000000000000000000000000000000000000000..c8b21a3ac35fea8b55067f19da8761e97fbbe254
 --- /dev/null
 +++ b/drivers/gpu/drm/gma500/cdv_msvdx.c
-@@ -0,0 +1,3492 @@
+@@ -0,0 +1,3507 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Cedarview MSVDX H.264 decoder, hosted by the existing PCI/display owner.
@@ -670,6 +684,7 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +module_param_named(msvdx_surface_bindings, surface_bindings, uint, 0444);
 +static atomic64_t next_storage_id = ATOMIC64_INIT(0);
 +static atomic_t surface_objects = ATOMIC_INIT(0), surface_pages = ATOMIC_INIT(0);
++static atomic_t probe_objects = ATOMIC_INIT(0);
 +static atomic_t engine_contexts = ATOMIC_INIT(0);
 +static atomic_t bitstream_pages = ATOMIC_INIT(0);
 +
@@ -728,6 +743,7 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +	struct drm_device *dev;
 +	struct cdv_dma_page *pages;
 +	u32 allocated;
++	bool probe;
 +	atomic_t readers;
 +	u64 id;
 +};
@@ -741,12 +757,14 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +		cdv_surface_page_free(storage->dev, &storage->pages[i]);
 +	atomic_sub(storage->allocated, &surface_pages);
 +	atomic_dec(&surface_objects);
++	if (storage->probe)
++		atomic_dec(&probe_objects);
 +	drm_dev_put(storage->dev);
 +	kvfree(storage->pages);
 +	kfree(storage);
 +}
 +
-+static struct cdv_surface_storage *cdv_storage_alloc(struct drm_device *dev)
++static struct cdv_surface_storage *cdv_storage_alloc(struct drm_device *dev, bool probe)
 +{
 +	struct cdv_surface_storage *storage;
 +	u32 i;
@@ -756,10 +774,20 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +	storage = kzalloc_obj(*storage);
 +	if (!storage)
 +		return ERR_PTR(-ENOMEM);
++	/* Probes must leave room for real decoder surfaces. Count detached
++	 * probe exports until their final reference is released.
++	 */
++	if (probe && !atomic_add_unless(&probe_objects, 1, 8)) {
++		kfree(storage);
++		return ERR_PTR(-ENOSPC);
++	}
++	storage->probe = probe;
 +	/* Includes detached exports and format probes, not just file handles.
 +	 * Reserve before allocating any DMA32 pages; release on every unwind.
 +	 */
 +	if (!atomic_add_unless(&surface_objects, 1, 64)) {
++		if (probe)
++			atomic_dec(&probe_objects);
 +		kfree(storage);
 +		return ERR_PTR(-ENOSPC);
 +	}
@@ -866,7 +894,7 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +static struct cdv_engine_context *cdv_quarantine_engine;
 +static void __iomem *cdv_quarantine_regs;
 +static bool engine_power_retained;
-+static bool cdv_msvdx_registered, cdv_msvdx_quarantined, cdv_quarantine_quiescent;
++static bool cdv_msvdx_registered, cdv_msvdx_quarantined;
 +static atomic_t shared_frames = ATOMIC_INIT(0);
 +static unsigned int shared_acquires, shared_rejected_writes;
 +static atomic64_t next_frame_id = ATOMIC64_INIT(0);
@@ -2163,7 +2191,7 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +				storage = job->bound_output;
 +				kref_get(&storage->refs);
 +			} else {
-+				storage = cdv_storage_alloc(dev);
++				storage = cdv_storage_alloc(dev, false);
 +			}
 +			if (IS_ERR(storage)) {
 +				ret = PTR_ERR(storage);
@@ -2256,7 +2284,7 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +			for (i = 1; i < CDV_H264_SURFACES; i++) {
 +				if (engine->surfaces[i])
 +					continue;
-+				struct cdv_surface_storage *storage = cdv_storage_alloc(dev);
++				struct cdv_surface_storage *storage = cdv_storage_alloc(dev, false);
 +
 +				if (IS_ERR(storage)) {
 +					ret = PTR_ERR(storage);
@@ -3458,7 +3486,7 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +			ret = -ENOSPC;
 +			goto out;
 +		}
-+		storage = cdv_storage_alloc(cdv_msvdx_dev);
++		storage = cdv_storage_alloc(cdv_msvdx_dev, false);
 +		if (IS_ERR(storage)) {
 +			ret = PTR_ERR(storage);
 +			goto out;
@@ -3591,7 +3619,7 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +		ret = cdv_msvdx_dev ? -EUCLEAN : -ENODEV;
 +		goto unlock;
 +	}
-+	storage = cdv_storage_alloc(cdv_msvdx_dev);
++	storage = cdv_storage_alloc(cdv_msvdx_dev, true);
 +	if (IS_ERR(storage)) {
 +		ret = PTR_ERR(storage);
 +		goto unlock;
@@ -3831,10 +3859,10 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +	.release = cdv_frame_dma_release,
 +};
 +
-+static bool cdv_frame_request_valid(const struct cedar_frame_export *request, bool info)
++static bool cdv_frame_request_valid(const struct cedar_frame_export *request)
 +{
-+	return request->version == 1 && !(request->flags & ~(info ? 1U : 0U)) &&
-+	       !request->reserved && (info ? request->fd >= 0 : request->fd == -1) &&
++	return request->version == 1 && !request->flags &&
++	       !request->reserved && request->fd == -1 &&
 +	       !memchr_inv(&request->id, 0,
 +			   sizeof(*request) - offsetof(struct cedar_frame_export, id));
 +}
@@ -3864,7 +3892,7 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +
 +	if (copy_from_user(&request, data, sizeof(request)))
 +		return -EFAULT;
-+	if (blank ? !cedar_frame_blank_valid(&request) : !cdv_frame_request_valid(&request, false))
++	if (blank ? !cedar_frame_blank_valid(&request) : !cdv_frame_request_valid(&request))
 +		return -EINVAL;
 +	fd = get_unused_fd_flags(O_CLOEXEC);
 +	if (fd < 0)
@@ -3947,17 +3975,18 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +	 */
 +	if (READ_ONCE(cdv_msvdx_dev) != dev)
 +		return 0;
-+	if (READ_ONCE(cdv_msvdx_quarantined) && READ_ONCE(cdv_quarantine_quiescent))
++	/* A quarantined engine cannot restart. Power-down can stop its DMA;
++	 * all potentially referenced allocations remain pinned until reboot.
++	 */
++	if (READ_ONCE(cdv_msvdx_quarantined))
 +		return 0;
 +	if (!READ_ONCE(cdv_active_session) && !READ_ONCE(cdv_msvdx_quarantined))
 +		return 0;
 +	mutex_lock(&cdv_msvdx_lock);
 +	if (cdv_msvdx_dev != dev)
 +		goto done;
-+	if (cdv_msvdx_quarantined) {
-+		ret = -EBUSY;
++	if (cdv_msvdx_quarantined)
 +		goto done;
-+	}
 +	session = cdv_active_session;
 +	if (!session || !session->engine || session->engine->needs_restart)
 +		goto done;
@@ -3986,7 +4015,7 @@ index 0000000000000000000000000000000000000000..2f1268ba5b1dbbe765e2df9fd0a95153
 +
 +void cdv_msvdx_remove(struct drm_device *dev)
 +{
-+	if (READ_ONCE(cdv_msvdx_dev) == dev)
++	if (cdv_msvdx_registered)
 +		devm_release_action(dev->dev, cdv_msvdx_cleanup, dev);
 +}
 +

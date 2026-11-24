@@ -8,6 +8,10 @@ name: powervr-sgx-cedarview
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - drm/gma500/**
+      - .github/workflows/powervr-sgx-cedarview.yml
   push:
     branches: [m2-drm]
     paths:
