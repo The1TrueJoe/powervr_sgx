@@ -215,8 +215,8 @@ jobs:
           docker run --rm --platform linux/386 -v "$PWD:/w" -w /w debian:trixie sh tools/release/repo-test.sh site "$PREV" i386
 
       # The CE5300 path (docs/INSTALL.md): the driver built by DKMS, here against
-      # the release kernel's own headers, for each arch. --platform on every run:
-      # one pull of the other arch retags debian:trixie.
+      # the release kernel's own headers, for each arch. A pull of the other arch
+      # retags debian:trixie, and run --platform doesn't pull again: pull each time.
       - name: DKMS build of the driver
         env:
           VERSION: ${{ needs.version.outputs.version }}
@@ -224,6 +224,7 @@ jobs:
           set -eux
           for A in amd64 i386; do
           P=linux/$A X=; [ $A = i386 ] && P=linux/386 X=linux32
+          docker pull -q --platform $P debian:trixie
           docker run --rm --platform $P -v "$PWD:/w" -w /w -e VERSION -e A=$A debian:trixie $X sh -euxc '
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
