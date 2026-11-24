@@ -31,6 +31,19 @@ int main(void)
         assert(!ioctl(device, CEDAR_MSVDX_EXPORT_BLANK, &probes[i]));
     }
     assert(objects() == 8); /* Writable probes have separate backing. */
+    struct cedar_frame_export ninth = {.version=1,.fd=-1,.width=16,.height=16};
+    assert(ioctl(device, CEDAR_MSVDX_EXPORT_BLANK, &ninth) == -1 && errno == ENOSPC);
+    /* Holding the maximum probe count must leave a full decoder pool available. */
+    int pool = open("/dev/cedar-msvdx", O_RDWR | O_CLOEXEC);
+    assert(pool >= 0);
+    for (unsigned i = 0; i < 56; i++) {
+        struct cedar_surface_request request = {.version=1,.operation=CEDAR_SURFACE_CREATE,
+                                                 .slot=UINT32_MAX};
+        assert(!ioctl(pool, CEDAR_MSVDX_SURFACE, &request));
+    }
+    assert(objects() == 64);
+    close(pool);
+    assert(objects() == 8);
     for (unsigned i = 0; i < 8; i++) close(probes[i].fd);
     unsigned made = 0;
     for (; made < CEDAR_SURFACE_HANDLES; made++) {
