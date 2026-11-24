@@ -8,6 +8,11 @@
 #include <linux/err.h>
 #include <linux/mman.h>
 #include <linux/uaccess.h>
+#include <linux/vmalloc.h>
+
+#if IS_ENABLED(CONFIG_X86)
+#include <asm/set_memory.h>
+#endif
 
 #define R(f, o, sz, st, n) ((struct drm_powervr_sgx_cache_range){ .handle = 1, .flags = (f), \
 	.offset = (o), .size = (sz), .stride = (st), .rows = (n) })
@@ -109,11 +114,48 @@ static void prime_test_range_tail(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, job.nranges, 0);
 }
 
+#if IS_ENABLED(CONFIG_X86)
+/* An exporter's WC mapping skips the job flushes, a write-back one keeps them. */
+static void prime_test_kmap_uncached(struct kunit *test)
+{
+	struct page *wc[2], *wb[2];
+	void *v;
+
+	for (int i = 0; i < 2; i++) {
+		wc[i] = alloc_page(GFP_KERNEL);
+		wb[i] = alloc_page(GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, wc[i]);
+		KUNIT_ASSERT_NOT_NULL(test, wb[i]);
+	}
+	/* As gma500 exports them: the pages WC, then a WC kernel mapping. */
+	KUNIT_ASSERT_EQ(test, set_pages_array_wc(wc, 2), 0);
+	v = vmap(wc, 2, VM_MAP, pgprot_writecombine(PAGE_KERNEL));
+	KUNIT_ASSERT_NOT_NULL(test, v);
+	KUNIT_EXPECT_TRUE(test, kmap_uncached(v, 2 * PAGE_SIZE));
+	vunmap(v);
+	/* A shmem-style export: cached pages, a cached mapping. */
+	v = vmap(wb, 2, VM_MAP, PAGE_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, v);
+	KUNIT_EXPECT_FALSE(test, kmap_uncached(v, 2 * PAGE_SIZE));
+	vunmap(v);
+	/* The direct map of cached pages: cached. */
+	KUNIT_EXPECT_FALSE(test, kmap_uncached(page_address(wb[0]), PAGE_SIZE));
+	set_pages_array_wb(wc, 2);
+	for (int i = 0; i < 2; i++) {
+		__free_page(wc[i]);
+		__free_page(wb[i]);
+	}
+}
+#endif
+
 static struct kunit_case pvrsgx_prime_test_cases[] = {
 	KUNIT_CASE(prime_test_range_array),
 	KUNIT_CASE(prime_test_range_tail),
 	KUNIT_CASE(prime_test_range_accepts),
 	KUNIT_CASE(prime_test_range_refuses),
+#if IS_ENABLED(CONFIG_X86)
+	KUNIT_CASE(prime_test_kmap_uncached),
+#endif
 	{}
 };
 
