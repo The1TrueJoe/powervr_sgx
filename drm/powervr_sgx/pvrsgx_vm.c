@@ -234,17 +234,20 @@ static void vm_free_work(struct work_struct *work)
 		vm_unmap_all(f->vm, &f->vas);
 		mutex_unlock(&f->vm->lock);
 	}
-	/*
-	 * The BIF caches walks only of a directory a job ran on, and a restart or
-	 * power-off drops them: then there is nothing to wait for.
+	/* Serialize the power/generation check and waiter insertion with stop.
+	 * Otherwise runtime suspend can drain its last invalidate before this
+	 * worker queues a waiter for a command the powered-off GPU cannot take.
 	 */
-	if (!READ_ONCE(sdev->powered) ||
+	mutex_lock(&sdev->reset_lock);
+	if (!READ_ONCE(sdev->powered) || READ_ONCE(sdev->lost) ||
 	    READ_ONCE(f->vm->ran_gen) != READ_ONCE(sdev->fw_gen) + 1) {
+		mutex_unlock(&sdev->reset_lock);
 		vm_free_done(&f->inval);
 		return;
 	}
 	pvrsgx_ccb_after_invalidate(sdev, &f->inval, PVRSGX_CC_INVAL_BIF_PT |
 				    PVRSGX_CC_INVAL_BIF_PD | PVRSGX_CC_INVAL_DATA);
+	mutex_unlock(&sdev->reset_lock);
 }
 
 static void vm_free_cb(struct dma_fence *fence, struct dma_fence_cb *cb)
