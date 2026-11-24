@@ -41,6 +41,15 @@ lspci -nn | grep -i -E 'vga|display'
   Cedarview steps below.
 - `[8086:089b]`: a **CE5300** GPU. Follow the CE5300 steps below.
 
+On Cedarview, also check that the BIOS leaves 64-bit mode on:
+
+```bash
+grep -cw lm /proc/cpuinfo
+```
+
+If it prints `0`, the machine only runs 32-bit Linux: see "Cedarview without 64-bit mode"
+below.
+
 ## The apt repository
 
 On Cedarview you can install all three pieces from our apt repository, and `apt upgrade`
@@ -232,6 +241,47 @@ while a game runs, add the line `SGX_SLOTS=4` (or `3`) to `/etc/environment` and
 again. Games then run a little slower, and a game recording its screen slows down the most.
 Delete the line to go back to the default.
 
+## Cedarview without 64-bit mode
+
+Some Cedarview netbooks, such as the HP Mini 110-4300, have a BIOS that turns the CPU's
+64-bit mode off, so `grep -cw lm /proc/cpuinfo` prints `0`. They need the 32-bit (i386)
+packages. Our 32-bit kernel also needs PAE, which every Cedarview Atom has. This must print
+a number above `0`:
+
+```bash
+grep -cw pae /proc/cpuinfo
+```
+
+Debian 13 has no 32-bit kernel and no 32-bit installer, so install Debian 12 first:
+
+1. Install Debian 12 ("bookworm") from its i386 installer image
+   (`debian-12.…-i386-netinst.iso`). A light desktop such as Xfce or LXQt suits these
+   machines.
+2. Upgrade it to Debian 13 as Debian's release notes describe ("Upgrades from Debian 12").
+   In short: change `bookworm` to `trixie` in `/etc/apt/sources.list`, then run
+   `sudo apt update && sudo apt full-upgrade` and restart. Debian 12's kernel stays installed
+   and is the one you boot until ours is in; keep it as the fallback in the boot menu.
+3. Add our apt repository as in "The apt repository" above and install the same three
+   packages. On a 32-bit system apt picks the i386 ones:
+
+   ```bash
+   sudo apt install linux-image-7.3.3-sgx sgx545-firmware mesa-sgx
+   ```
+
+   From a release, take the `_i386.deb` files of the kernel and `mesa-sgx`, and the
+   firmware, and install them with `sudo apt install ./…`.
+4. Restart, and do the checks in "3. The firmware" and "4. Mesa". Mesa is in
+   `/opt/sgx/lib/i386-linux-gnu`.
+
+Debian supports Debian 13 on i386 only for 32-bit programs on 64-bit machines, and its
+release notes advise against this upgrade. It works on these machines because they meet
+its requirements (SSE2), but Debian builds fewer programs for i386, so the upgrade may
+remove a few.
+
+On a 32-bit kernel, all the GPU's memory comes from the first 896 MiB of RAM ("low memory"),
+which the kernel needs too. If programs get closed for lack of memory, lower `SGX_SLOTS` as
+described in "32-bit games".
+
 ## Upgrading
 
 The kernel, the firmware and Mesa change together: Mesa only works with a kernel from the
@@ -272,7 +322,8 @@ You can undo each piece on its own.
 - **Mesa:** `sudo apt remove mesa-sgx`. Programs use Debian's Mesa again. The 32-bit one is
   `sudo apt remove mesa-sgx:i386`.
 - **The firmware:** `sudo apt remove sgx545-firmware`. On its own, it does nothing anyway.
-- **The kernel (Cedarview):** pick Debian's kernel under "Advanced options" in the boot menu.
+- **The kernel (Cedarview):** pick Debian's kernel under "Advanced options" in the boot menu
+  (on a 32-bit system, Debian 12's).
   To uninstall ours, run `sudo apt remove linux-image-7.3.3-sgx`.
 - **DKMS (CE5300):** run `sudo dkms remove powervr_sgx/0.2 --all`. If you blocked
   `pvrsrvkm` and want it back, delete `/etc/modprobe.d/sgx-no-pvrsrvkm.conf`.
