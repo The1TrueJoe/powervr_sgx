@@ -12,13 +12,13 @@ all: build/cedar_drv_video.so build/cedar-decoder-broker
 build:
 	mkdir -p $@
 build/cedar_drv_video.so: src/va-driver.c $(TRANSPORT) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -Wno-unused-parameter -fPIC -shared -Iinclude $(VA_FLAGS) src/va-driver.c $(TRANSPORT) -o $@ $(LDFLAGS) -pthread -ldl
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -Wno-unused-parameter -fPIC -shared -Iinclude $(VA_FLAGS) src/va-driver.c $(TRANSPORT) -o $@ $(LDFLAGS) -pthread
 build/cedar-decoder-broker: src/decoder-broker.c src/broker-wire.c $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -Iinclude src/decoder-broker.c src/broker-wire.c -o $@ $(LDFLAGS)
 build/test-va-image: tests/test-va-image.c src/va-driver.c $(TRANSPORT) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -Wno-unused-parameter -Iinclude $(VA_FLAGS) tests/test-va-image.c $(TRANSPORT) -o $@ $(LDFLAGS) -pthread -ldl
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -Wno-unused-parameter -Iinclude $(VA_FLAGS) tests/test-va-image.c $(TRANSPORT) -o $@ $(LDFLAGS) -pthread
 build/test-broker: tests/test-broker.c $(TRANSPORT) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -Iinclude tests/test-broker.c $(TRANSPORT) -o $@ $(LDFLAGS) -ldl
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -Iinclude tests/test-broker.c $(TRANSPORT) -o $@ $(LDFLAGS)
 build/test-dmabuf-planes: tests/test-dmabuf-planes.c | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) $(shell $(PKG_CONFIG) --cflags egl glesv2 libdrm) $< -o $@ $(LDFLAGS) $(shell $(PKG_CONFIG) --libs egl glesv2)
 build/test-va-export-frames: tests/test-va-export-frames.c | build

@@ -48,7 +48,7 @@ typedef struct {
     VAProfile profile;
     unsigned width, height;
     unsigned next_id;
-    bool context, begun, have_picture, have_slice, render_failed, disable_submission;
+    bool context, begun, have_picture, have_slice, render_failed;
     bool dmabuf, broker, recovery_preroll;
     unsigned discarded_preroll;
     unsigned frame_exports, storage_replacements, storage_reuses, storage_allocations, cpu_downloads;
@@ -786,7 +786,7 @@ static VAStatus prepare_slice(Driver *d, VASliceParameterBufferH264 *s, bool for
     unsigned char *packet = calloc(1, packet_bytes);
     if (!packet) return VA_STATUS_ERROR_ALLOCATION_FAILED;
     memcpy(packet, "CDV2", 4);
-    const uint32_t header[] = { wide ? 14U : explicit_dpb ? 13U : dpb_packet ? 12U : stable_packet ? 11U : p_ref_packet ? 9U : weight_packet ? 8U : dynamic ? 7U : 6U, d->width, d->height, 1, 1, d->disable_submission ? 1U : 0U, (uint32_t)packet_bytes - 32 };
+    const uint32_t header[] = { wide ? 14U : explicit_dpb ? 13U : dpb_packet ? 12U : stable_packet ? 11U : p_ref_packet ? 9U : weight_packet ? 8U : dynamic ? 7U : 6U, d->width, d->height, 1, 1, 0, (uint32_t)packet_bytes - 32 };
     for (unsigned i = 0; i < 7; i++) word(packet, 4 + 4 * i, header[i]);
     const uint32_t control[] = { s->slice_data_bit_offset, (unsigned)qp, 0, packet_type,
         (unsigned)out, forward < 0 ? BAD : (unsigned)forward, backward < 0 ? BAD : (unsigned)backward,
@@ -877,7 +877,7 @@ static VAStatus prepare_picture(Driver *d, PreparedSlice *result) {
     unsigned char *packet = calloc(1,total);
     if (!packet) { status = VA_STATUS_ERROR_ALLOCATION_FAILED; goto cleanup; }
     memcpy(packet,"CDV2",4);
-    const uint32_t header[] = {10,d->width,d->height,d->slice_count,1,d->disable_submission ? 1U : 0U,(uint32_t)total-32};
+    const uint32_t header[] = {10,d->width,d->height,d->slice_count,1,0,(uint32_t)total-32};
     for (unsigned i=0;i<7;i++) word(packet,4+4*i,header[i]);
     size_t position=32;
     for (unsigned i=0;i<d->slice_count;i++) {
@@ -1120,8 +1120,6 @@ VAStatus CDV_VA_INIT_NAME(VA_MAJOR_VERSION, VA_MINOR_VERSION)(VADriverContextP c
     Driver *d = calloc(1, sizeof(*d));
     if (!d) return VA_STATUS_ERROR_ALLOCATION_FAILED;
     d->fd = -1;
-    const char *disable = getenv("CEDAR_VA_TEST_DISABLE_SUBMISSION");
-    d->disable_submission = disable && !strcmp(disable, "1");
     const char *dmabuf = getenv("CEDAR_VA_DMABUF");
     d->dmabuf = dmabuf && !strcmp(dmabuf, "1");
     int fd = cedar_decoder_open(&d->broker);
