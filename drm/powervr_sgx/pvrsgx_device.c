@@ -240,14 +240,15 @@ static irqreturn_t pvrsgx_irq(int irq, void *arg)
 		/* The display latches the SGX's line: clear it after the source. */
 		vdc_ack(sdev);
 		atomic_inc(&sdev->irq_count);
-		if (events)
+		/* Counted before the test below, which ends the loop without a latch. */
+		if (events++)
 			atomic_inc(&sdev->irq_late);
 		/*
 		 * An event between the two clears found the latch still set and
 		 * sent no MSI of its own: look again behind the display, a few
 		 * times at most.
 		 */
-		if (!sdev->vdc || ++events == 4)
+		if (!sdev->vdc || events == 4)
 			break;
 	}
 	if (!events)
