@@ -2,8 +2,10 @@
 /* Copyright © 2026 Joseph Telaak */
 /* sgx_submitbench: the per-submit CPU cost of the kernel driver. Each
  * iteration draws one small triangle into a small render target and flushes
- * it, so each one is a render job of its own (one SUBMIT_JOBS); every -k
- * iterations a glFinish keeps the queue short. Prints submits per second and
+ * it. With -t 2 or more each one is a render job of its own (one
+ * SUBMIT_JOBS: a target switch submits the frame); a lone target's glFlush is
+ * deferred, so -t 1 measures the draws alone. Every -k iterations a glFinish
+ * keeps the queue short. Prints submits per second and
  * the user and system CPU time per submit (getrusage), the system part being
  * the kernel's:
  *
