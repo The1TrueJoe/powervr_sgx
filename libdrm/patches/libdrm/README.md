@@ -11,12 +11,13 @@ This follows the explicit auxiliary model proposed by Alistair Popple for Nova:
 https://www.mail-archive.com/dri-devel@lists.freedesktop.org/msg625002.html.
 Stored child identities remain comparable after sysfs nodes disappear.
 
-Apply the two patches here to libdrm. Mesa's side is
-`mesa/patches/local/0011-libdrm-auxiliary-loader.patch`, which the normal Mesa
-build applies; it takes effect only when Mesa is built against the patched
-libdrm headers. It supports auxiliary render-node selection,
-parent metadata and distinct DRI_PRIME tags. Existing PCI-only applications may
-need equivalent handling; a new bus type is not transparent to every client.
+Apply the two patches here to libdrm. Mesa’s side is
+`mesa/patches/local/0011-libdrm-auxiliary-loader.patch`, applied
+to Mesa 26.2.5 with powervr_sgx's overlay patches. It builds with stock libdrm
+headers and normalizes either runtime discovery path to an internal
+platform-shaped descriptor. Stored child identities produce the same distinct
+auxiliary DRI_PRIME tags with either library; parent PCI IDs select the driver.
+Existing PCI-only applications may need equivalent handling; a new bus type is not transparent to every client.
 
 The topology test requires umockdev >= 0.19.9 for fstat interception. Debian 13
 ships an older version. `tools/build-test-umockdev.sh` builds the pinned upstream

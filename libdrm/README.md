@@ -35,20 +35,22 @@ Select the private library for both compositor and clients:
 LD_LIBRARY_PATH=/opt/cedar-libdrm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} command arguments
 ```
 
-The new bus type requires matching client handling. Rebuild Mesa against these
-libdrm headers, with `mesa/patches/local/0011-libdrm-auxiliary-loader.patch`
-applied by the normal Mesa build helper. Set PKG_CONFIG_PATH to the installed
-private libdrm's lib/pkgconfig directory before configuring a fresh Mesa build.
-The loader patch recognizes auxiliary render nodes and constructs distinct
-auxiliary DRI_PRIME tags. Applications with their own PCI-only switch need
-corresponding support; do not assume an enum addition updates them automatically.
+Mesa's `mesa/patches/local/0011-libdrm-auxiliary-loader.patch` uses stock
+libdrm headers and works with either the distribution or private runtime
+library. It normalizes auxiliary nodes to an internal platform-shaped
+compatibility descriptor, retaining the stored child identity. Both paths use
+`aux-<parent PCI address>-<child name>` DRI_PRIME tags. Parent PCI hardware IDs
+select the driver; the child is never represented as the parent PCI device.
+This internal representation does not change libdrm's public device API.
 
-The video decoding stack's `video/tools/cedar-with-libdrm` launcher applies this selection. Keep
-compositor and clients consistent. `cedar-labwc` passes LD_LIBRARY_PATH to its
-whole session: every inherited application receives the private library, not
-just the video player. This is opt-in and is not restricted to video. Installation neither changes `ld.so.conf`
-nor restarts a running desktop. Remove the environment selection to return to
-the system library.
+The regular Mesa CI and release builds use Debian's libdrm. The manual
+`mesa-debian` workflow's `aux_libdrm` input explicitly enables the private-library
+build. Other clients that interpret the new public bus type still need matching
+handling; an enum addition alone cannot update them.
+
+Select the private library consistently in compositor and client environments.
+Installation neither changes `ld.so.conf` nor restarts a desktop. Removing the
+environment selection returns applications to the system library.
 
 The discovery fix does not solve producer/consumer synchronization. The
 qualified SGX Wayland configuration still uses `SGX_DEBUG=serial` in compositor

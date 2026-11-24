@@ -1,55 +1,378 @@
 From: Viktor Semykin <thesame.ml@gmail.com>
-Subject: [PATCH] loader: recognize explicit auxiliary DRM identities
+Subject: [PATCH] loader: preserve auxiliary identity with either libdrm ABI
 
-Build against the companion libdrm auxiliary API. Include auxiliary SGX
-render nodes in render-only discovery, use parent metadata for driver
-selection, and give DRI_PRIME tags their own auxiliary identity.
+Normalize auxiliary nodes to an internal platform-shaped descriptor using
+only the public stock libdrm ABI. Store the child identity independently
+of its PCI parent, and use the same auxiliary DRI_PRIME tag whether libdrm
+recognizes the node or the sysfs fallback supplies it. Recover driver PCI
+IDs from the parent without representing the child as that PCI device.
+
+This follows the existing Cedarview sysfs fallback. No private bus enum or
+union layout is needed by Mesa. Test child identity, parent hardware IDs,
+node grouping and tag lifetime after removal with the fake sysfs tree.
 
 Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
 
 diff --git a/src/loader/loader.c b/src/loader/loader.c
 --- a/src/loader/loader.c
 +++ b/src/loader/loader.c
-@@ -274,7 +274,11 @@
+@@ -473,20 +473,6 @@
+    return true;
+ }
  
-       if ((device->available_nodes & (1 << DRM_NODE_RENDER)) &&
-           (device->bustype == DRM_BUS_PLATFORM ||
--           device->bustype == DRM_BUS_PCI)) {
-+           device->bustype == DRM_BUS_PCI
-+#ifdef DRM_BUS_AUXILIARY
-+           || device->bustype == DRM_BUS_AUXILIARY
-+#endif
-+           )) {
-          drmVersionPtr version;
-          bool found = false;
+-static bool
+-sysfs_hex(const char *dir, const char *file, unsigned *value)
+-{
+-   char path[PATH_MAX];
+-   FILE *f;
+-   bool ok;
+-
+-   snprintf(path, sizeof(path), "%s/%s", dir, file);
+-   if (!(f = fopen(path, "r")))
+-      return false;
+-   ok = fscanf(f, "%x", value) == 1;
+-   fclose(f);
+-   return ok;
+-}
+ #endif
  
-@@ -758,6 +762,13 @@
-                    device->businfo.pci->func) < 0) {
-          return NULL;
-       }
-+#ifdef DRM_BUS_AUXILIARY
-+   } else if (device->bustype == DRM_BUS_AUXILIARY) {
-+      const drmPciBusInfo *pci = &device->businfo.aux->parent;
-+      if (asprintf(&tag, "aux-%04x_%02x_%02x_%u-%s", pci->domain,
-+                   pci->bus, pci->dev, pci->func, device->businfo.aux->name) < 0)
-+         return NULL;
-+#endif
-    } else if (device->bustype == DRM_BUS_PLATFORM ||
-               device->bustype == DRM_BUS_HOST1X) {
-       char *fullname, *name, *address;
-@@ -1024,6 +1035,15 @@
-       return false;
+ drmDevicePtr
+@@ -494,8 +480,7 @@
+ {
+ #ifdef __linux__
+    char path[PATH_MAX], dev[PATH_MAX], parent[PATH_MAX], name[NAME_MAX + 1];
+-   unsigned domain, bus, slot, func, vendor, device, sub_vendor = 0,
+-            sub_device = 0, revision = 0;
++   unsigned domain, bus, slot, func;
+    char nodes[DRM_NODE_MAX][32] = {{0}};
+    int available = 0;
+    struct dirent *ent;
+@@ -511,13 +496,8 @@
+        !sysfs_link_name(parent, "subsystem", name, sizeof(name)) ||
+        strcmp(name, "pci") != 0 || !strrchr(parent, '/') ||
+        sscanf(strrchr(parent, '/') + 1, "%x:%x:%x.%u", &domain, &bus, &slot,
+-              &func) != 4 ||
+-       !sysfs_hex(parent, "vendor", &vendor) ||
+-       !sysfs_hex(parent, "device", &device))
++              &func) != 4)
+       return NULL;
+-   sysfs_hex(parent, "subsystem_vendor", &sub_vendor);
+-   sysfs_hex(parent, "subsystem_device", &sub_device);
+-   sysfs_hex(parent, "revision", &revision);
+ 
+    /* the auxiliary device's own nodes */
+    snprintf(path, sizeof(path), "%s/drm", dev);
+@@ -540,8 +520,8 @@
+ 
+    /* one block, as libdrm allocates it: drmFreeDevice frees it */
+    size_t size = sizeof(drmDevice) + DRM_NODE_MAX * sizeof(char *) +
+-                 sizeof(nodes) + sizeof(drmPciBusInfo) +
+-                 sizeof(drmPciDeviceInfo);
++                 sizeof(nodes) + sizeof(drmPlatformBusInfo) +
++                 sizeof(drmPlatformDeviceInfo);
+    drmDevicePtr d = calloc(1, size);
+    if (!d)
+       return NULL;
+@@ -555,19 +535,16 @@
     }
+    p += sizeof(nodes);
+    d->available_nodes = available;
+-   d->bustype = DRM_BUS_PCI;
+-   d->businfo.pci = (drmPciBusInfoPtr)p;
+-   d->businfo.pci->domain = domain;
+-   d->businfo.pci->bus = bus;
+-   d->businfo.pci->dev = slot;
+-   d->businfo.pci->func = func;
+-   p += sizeof(drmPciBusInfo);
+-   d->deviceinfo.pci = (drmPciDeviceInfoPtr)p;
+-   d->deviceinfo.pci->vendor_id = vendor;
+-   d->deviceinfo.pci->device_id = device;
+-   d->deviceinfo.pci->subvendor_id = sub_vendor;
+-   d->deviceinfo.pci->subdevice_id = sub_device;
+-   d->deviceinfo.pci->revision_id = revision;
++   /* Internal compatibility representation, using only stock libdrm ABI.
++    * Keep the child identity separate from its parent PCI display device.
++    */
++   d->bustype = DRM_BUS_PLATFORM;
++   d->businfo.platform = (drmPlatformBusInfoPtr)p;
++   snprintf(d->businfo.platform->fullname, sizeof(d->businfo.platform->fullname),
++            "auxiliary:aux-%04x_%02x_%02x_%u-%s", domain, bus, slot, func,
++            strrchr(dev, '/') + 1);
++   p += sizeof(drmPlatformBusInfo);
++   d->deviceinfo.platform = (drmPlatformDeviceInfoPtr)p;
+    return d;
+ #else
+    return NULL;
+@@ -579,15 +556,21 @@
+ {
+    struct stat st;
  
-+#ifdef DRM_BUS_AUXILIARY
-+   if (device->bustype == DRM_BUS_AUXILIARY) {
-+      *vendor_id = device->deviceinfo.aux->vendor_id;
-+      *chip_id = device->deviceinfo.aux->device_id;
-+      drmFreeDevice(&device);
-+      return true;
+-   if (drmGetDevice2(fd, 0, device) == 0)
++   int ret = drmGetDevice2(fd, 0, device);
++#ifdef __linux__
++   drmDevicePtr auxiliary = NULL;
++   if (!fstat(fd, &st) && S_ISCHR(st.st_mode))
++      auxiliary = loader_drm_device_from_sysfs("/sys", major(st.st_rdev),
++                                               minor(st.st_rdev));
++   if (auxiliary) {
++      if (!ret)
++         drmFreeDevice(device);
++      *device = auxiliary;
+       return 0;
+-#ifdef __linux__
+-   if (!fstat(fd, &st) && S_ISCHR(st.st_mode) &&
+-       (*device = loader_drm_device_from_sysfs("/sys", major(st.st_rdev),
+-                                               minor(st.st_rdev))))
+-      return 0;
+-#endif
+-   return -ENODEV;
 +   }
 +#endif
++   return ret;
 +
-    if (device->bustype != DRM_BUS_PCI) {
-       drmFreeDevice(&device);
-       log_(_LOADER_DEBUG, "MESA-LOADER: device is not located on the PCI bus\n");
+ }
+ 
+ /* the render nodes in sysfs/class/drm that none of devices[0..n) has, as
+@@ -648,6 +631,26 @@
+ 
+    if (n < 0)
+       n = 0;
++#ifdef __linux__
++   /* Normalize recognized auxiliary nodes too: a private libdrm may describe
++    * them with an extended bus type unknown to the headers used here.
++    */
++   for (int i = 0; devices && i < n; i++) {
++      for (int node = 0; node < DRM_NODE_MAX; node++) {
++         struct stat st;
++         if (!(devices[i]->available_nodes & (1 << node)) ||
++             stat(devices[i]->nodes[node], &st) || !S_ISCHR(st.st_mode))
++            continue;
++         drmDevicePtr auxiliary = loader_drm_device_from_sysfs(
++            "/sys", major(st.st_rdev), minor(st.st_rdev));
++         if (auxiliary) {
++            drmFreeDevice(&devices[i]);
++            devices[i] = auxiliary;
++         }
++         break;
++      }
++   }
++#endif
+    return loader_drm_add_sysfs_devices("/sys", devices, n, max_devices);
+ }
+ 
+@@ -746,7 +749,7 @@
+ }
+ #endif
+ 
+-static char *drm_construct_id_path_tag(drmDevicePtr device)
++char *loader_drm_device_id(drmDevicePtr device)
+ {
+    char *tag = NULL;
+ 
+@@ -767,6 +770,10 @@
+       else
+          fullname = device->businfo.host1x->fullname;
+ 
++      if (device->bustype == DRM_BUS_PLATFORM &&
++          !strncmp(fullname, "auxiliary:", 10))
++         return strdup(fullname + 10);
++
+       name = strrchr(fullname, '/');
+       if (!name)
+          name = strdup(fullname);
+@@ -791,7 +798,7 @@
+ 
+ static bool drm_device_matches_tag(drmDevicePtr device, const char *prime_tag)
+ {
+-   char *tag = drm_construct_id_path_tag(device);
++   char *tag = loader_drm_device_id(device);
+    int ret;
+ 
+    if (tag == NULL)
+@@ -811,7 +818,7 @@
+    if (loader_drm_get_device(fd, &device) != 0)
+        return NULL;
+ 
+-   tag = drm_construct_id_path_tag(device);
++   tag = loader_drm_device_id(device);
+    drmFreeDevice(&device);
+    return tag;
+ }
+@@ -884,7 +891,7 @@
+             log_(_LOADER_WARNING, "not a render node -> not usable\n");
+             continue;
+          }
+-         char *tag = drm_construct_id_path_tag(devices[i]);
++         char *tag = loader_drm_device_id(devices[i]);
+          if (tag) {
+             log_(_LOADER_WARNING, " %s", tag);
+             free(tag);
+@@ -950,7 +957,7 @@
+                /* Update prime for the "different_device"
+                 * determination below. */
+                free(prime.str);
+-               prime.str = drm_construct_id_path_tag(devices[i]);
++               prime.str = loader_drm_device_id(devices[i]);
+                log_(debug ? _LOADER_WARNING : _LOADER_INFO,
+                     " - vid:did match -> ");
+                break;
+@@ -1037,12 +1044,22 @@
+ }
+ 
+ #ifdef __linux__
+-static int loader_get_linux_pci_field(int maj, int min, const char *field)
++static int loader_get_linux_pci_field(const char *sysfs, int maj, int min,
++                                      const char *field)
+ {
+    char path[PATH_MAX + 1];
+-   snprintf(path, sizeof(path), "/sys/dev/char/%d:%d/device/%s", maj, min, field);
++   snprintf(path, sizeof(path), "%s/dev/char/%d:%d/device/%s", sysfs, maj, min, field);
+ 
+    char *field_str = os_read_file(path, NULL);
++   if (!field_str) {
++      char dev[PATH_MAX], bus[NAME_MAX + 1];
++      snprintf(dev, sizeof(dev), "%s/dev/char/%d:%d/device", sysfs, maj, min);
++      if (sysfs_link_name(dev, "subsystem", bus, sizeof(bus)) &&
++          !strcmp(bus, "auxiliary")) {
++         snprintf(path, sizeof(path), "%s/../%s", dev, field);
++         field_str = os_read_file(path, NULL);
++      }
++   }
+    if (!field_str) {
+       /* Probably non-PCI device. */
+       return 0;
+@@ -1052,6 +1069,15 @@
+    free(field_str);
+ 
+    return value;
++}
++
++bool
++loader_drm_pci_id_from_sysfs(const char *sysfs, unsigned maj, unsigned min,
++                           int *vendor_id, int *chip_id)
++{
++   *vendor_id = loader_get_linux_pci_field(sysfs, maj, min, "vendor");
++   *chip_id = loader_get_linux_pci_field(sysfs, maj, min, "device");
++   return *vendor_id && *chip_id;
+ }
+ 
+ static bool
+@@ -1066,10 +1092,7 @@
+    int maj = major(sbuf.st_rdev);
+    int min = minor(sbuf.st_rdev);
+ 
+-   *vendor_id = loader_get_linux_pci_field(maj, min, "vendor");
+-   *chip_id = loader_get_linux_pci_field(maj, min, "device");
+-
+-   return *vendor_id && *chip_id;
++   return loader_drm_pci_id_from_sysfs("/sys", maj, min, vendor_id, chip_id);
+ }
+ #endif /* __linux__ */
+ 
+diff --git a/src/loader/loader.h b/src/loader/loader.h
+--- a/src/loader/loader.h
++++ b/src/loader/loader.h
+@@ -73,8 +73,8 @@
+ 
+ /* drmGetDevice2 and drmGetDevices2, and the DRM devices libdrm can't
+  * describe: a node of an auxiliary device of a PCI function (gma500 puts the
+- * Cedarview SGX there) is described as that PCI function, with its own
+- * nodes.  Free the devices with drmFreeDevice. */
++ * Cedarview SGX there) keeps its own identity, using a platform-shaped
++ * descriptor and an auxiliary DRI_PRIME tag with either libdrm ABI.  Free the devices with drmFreeDevice. */
+ int
+ loader_drm_get_device(int fd, struct _drmDevice **device);
+ 
+@@ -83,6 +83,13 @@
+ 
+ /* (their sysfs part, for a sysfs tree at sysfs: the device of the node
+  * maj:min; the nodes /sys/class/drm has that libdrm's list doesn't) */
++#ifdef __linux__
++bool loader_drm_pci_id_from_sysfs(const char *sysfs, unsigned maj, unsigned min,
++                                int *vendor_id, int *chip_id);
++#endif
++
++char *loader_drm_device_id(struct _drmDevice *device);
++
+ struct _drmDevice *
+ loader_drm_device_from_sysfs(const char *sysfs, unsigned maj, unsigned min);
+ 
+diff --git a/src/loader/tests/cedarview_sysfs_test.c b/src/loader/tests/cedarview_sysfs_test.c
+--- a/src/loader/tests/cedarview_sysfs_test.c
++++ b/src/loader/tests/cedarview_sysfs_test.c
+@@ -2,20 +2,9 @@
+  * Copyright © 2026 Joseph Telaak
+  * SPDX-License-Identifier: MIT
+  *
+- * The loader on the sysfs layout of a real Cedarview (D2500) with gma500 and
+- * powervr_sgx: the display's card0 on the PCI function 0000:00:02.0
+- * (8086:0be1, subsystem 1558:2100, rev 0b), the SGX's card1 and renderD128 on
+- * gma500's auxiliary device gma500_gfx.sgx.16, beside ACPI's
+- * acpi.video_bus.0.  libdrm describes no auxiliary device (drmGetDevice2
+- * fails on renderD128), so the loader describes it as the PCI function:
+- *  - kmsro's pick: card0's child render node is renderD128;
+- *  - loader_drm_device_from_sysfs: renderD128 and card1 are a PCI device
+- *    0000:00:02.0, 8086:0be1, with nodes /dev/dri/card1 and
+- *    /dev/dri/renderD128; card0 (the PCI function's own node) is left to
+- *    libdrm;
+- *  - loader_drm_add_sysfs_devices: libdrm's list (gma500 alone, no render
+- *    node) gets the SGX added once, which is the EGLDevice that X11, gbm and
+- *    surfaceless displays find.
++ * Auxiliary nodes retain a distinct, stable DRI_PRIME identity using a
++ * platform-shaped descriptor that works with stock libdrm headers and ABI.
++ * The parent PCI display and its child render device must never share a tag.
+  */
+ 
+ #include <limits.h>
+@@ -175,20 +164,21 @@
+    CHECK(loader_find_child_render_node(p, parent, name, sizeof(name)));
+    CHECK(!strcmp(name, "renderD128"));
+ 
+-   /* the SGX's nodes are described as the PCI function */
++   /* Both SGX nodes describe the child, independently of parent identity. */
+    for (unsigned min = 1; min <= 128; min += 127) {
+       d = loader_drm_device_from_sysfs(root, 226, min);
+       CHECK(d);
+       if (!d)
+          continue;
+-      CHECK(d->bustype == DRM_BUS_PCI);
+-      CHECK(d->businfo.pci->domain == 0 && d->businfo.pci->bus == 0 &&
+-            d->businfo.pci->dev == 2 && d->businfo.pci->func == 0);
+-      CHECK(d->deviceinfo.pci->vendor_id == 0x8086 &&
+-            d->deviceinfo.pci->device_id == 0x0be1);
+-      CHECK(d->deviceinfo.pci->subvendor_id == 0x1558 &&
+-            d->deviceinfo.pci->subdevice_id == 0x2100 &&
+-            d->deviceinfo.pci->revision_id == 0x0b);
++      CHECK(d->bustype == DRM_BUS_PLATFORM);
++      CHECK(!strcmp(d->businfo.platform->fullname,
++                    "auxiliary:aux-0000_00_02_0-gma500_gfx.sgx.16"));
++      int vendor, chip;
++      CHECK(loader_drm_pci_id_from_sysfs(root, 226, min, &vendor, &chip));
++      CHECK(vendor == 0x8086 && chip == 0x0be1);
++      char *tag = loader_drm_device_id(d);
++      CHECK(tag && !strcmp(tag, "aux-0000_00_02_0-gma500_gfx.sgx.16"));
++      free(tag);
+       CHECK(d->available_nodes ==
+             ((1 << DRM_NODE_PRIMARY) | (1 << DRM_NODE_RENDER)));
+       CHECK(!strcmp(d->nodes[DRM_NODE_PRIMARY], "/dev/dri/card1"));
+@@ -216,6 +206,20 @@
+    free(list[0]->nodes[DRM_NODE_PRIMARY]);
+    drmFreeDevice(&list[0]);
+ 
++   /* An unplug after discovery cannot change the stored tag or collapse
++    * the child into its parent. No live sysfs lookup belongs in equality.
++    */
++   d = loader_drm_device_from_sysfs(root, 226, 128);
++   CHECK(d);
++   snprintf(p, sizeof(p), "%s/dev/char/226:128", root);
++   CHECK(!unlink(p));
++   if (d) {
++      char *tag = loader_drm_device_id(d);
++      CHECK(tag && !strcmp(tag, "aux-0000_00_02_0-gma500_gfx.sgx.16"));
++      free(tag);
++      drmFreeDevice(&d);
++   }
++
+    if (!failures)
+       printf("cedarview sysfs: all passed\n");
+    return failures != 0;
