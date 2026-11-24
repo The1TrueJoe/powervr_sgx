@@ -46,6 +46,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "blits into a texture through the CPU, as 0.2.0 did (only render targets on the GPU)"},
    {"nomerge", SGX_DEBUG_NO_MERGE,
     "the draws of one call drawn one by one, not merged into one draw of their triangles or lines"},
+   {"cpuresolve", SGX_DEBUG_CPU_RESOLVE,
+    "a 4x colour buffer's resolve copied on the CPU, as 0.2.2 did, not blitted on the GPU"},
    {"nolazyscanout", SGX_DEBUG_NO_LAZY_SCANOUT,
     "scanout buffers on a dumb-buffer display (kmsro) are the display's from the start, not when a KMS handle is asked for"},
    {"nophasesplit", SGX_DEBUG_NO_PHASE_SPLIT,
