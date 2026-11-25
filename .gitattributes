@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: MIT
+
+# Kernel patch context retains leading spaces before tabs.
+drm/gma500/*.patch -whitespace
