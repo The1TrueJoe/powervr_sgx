@@ -1473,7 +1473,9 @@ dep_lod_sample(nir_tex_instr *tex)
 {
    return (tex->op == nir_texop_tex || tex->op == nir_texop_txb) &&
           (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
-           (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE && !tex->is_array)) &&
+           ((tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE ||
+             tex->sampler_dim == GLSL_SAMPLER_DIM_3D) &&
+            !tex->is_array)) &&
           nir_tex_instr_src_index(tex, nir_tex_src_coord) >= 0 &&
           nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0 &&
           nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) < 0 &&
@@ -1521,7 +1523,9 @@ dep_lod_units(nir_shader *nir)
  * over 2|ma|, the face's major axis.  That leaves out the change of ma
  * across the quad, which nir_lower_tex's exact cube gradients keep; it
  * takes half their instructions (25 against 50 for a textureCube), and
- * dEQP-GLES2's 557 cube cases give the same result with either. */
+ * dEQP-GLES2's 557 cube cases give the same result with either.  A volume's
+ * sample also becomes a txl, its LOD from the derivatives scaled by the
+ * base level's size (grad_lod): smp takes no 3D gradients. */
 /* the base level's size along axis c as a float: the draw's float
  * constant when the unit is known and it has one (txs's would go through an
  * integer and back) */
@@ -1530,10 +1534,10 @@ tex_size_f(nir_builder *b, nir_tex_instr *tex, unsigned c)
 {
    if (c < 2 && tex->texture_index < SGX_K_TEXSIZE_UNITS &&
        nir_tex_instr_src_index(tex, nir_tex_src_texture_deref) < 0)
-      return nir_load_uniform(b, 1, 32, nir_imm_int(b, 0),
-                              .base = SGX_K_TEXSIZE + 2 * tex->texture_index +
-                                      c,
-                              .range = 1, .dest_type = nir_type_float32);
+      return nir_load_uniform(
+         b, 1, 32, nir_imm_int(b, 0),
+         .base = SGX_K_TEXSIZE + 2 * tex->texture_index + c, .range = 1,
+         .dest_type = nir_type_float32);
    return nir_i2f32(b, nir_channel(b, nir_get_texture_size(b, tex), c));
 }
 
@@ -1544,15 +1548,32 @@ cube_lod(nir_builder *b, nir_tex_instr *tex, nir_def *coord, nir_def *dx,
          nir_def *dy)
 {
    nir_def *a = nir_fabs(b, coord);
-   nir_def *ma = nir_fmax(
-      b, nir_fmax(b, nir_channel(b, a, 0), nir_channel(b, a, 1)),
-      nir_channel(b, a, 2));
+   nir_def *ma =
+      nir_fmax(b, nir_fmax(b, nir_channel(b, a, 0), nir_channel(b, a, 1)),
+               nir_channel(b, a, 2));
    nir_def *rho = nir_fmax(b, nir_fdot(b, dx, dx), nir_fdot(b, dy, dy));
-   nir_def *k = nir_fmul(b, tex_size_f(b, tex, 0),
-                         nir_frcp(b, nir_fmul_imm(b, ma, 2.0)));
+   nir_def *k =
+      nir_fmul(b, tex_size_f(b, tex, 0), nir_frcp(b, nir_fmul_imm(b, ma, 2.0)));
 
    return nir_fmul_imm(b, nir_flog2(b, nir_fmul(b, rho, nir_fmul(b, k, k))),
                        0.5);
+}
+
+/* a 2D or 3D sample's LOD from the coordinate's derivatives dx, dy
+ * (32-bit): log2 of the longer one scaled by the base level's size */
+static nir_def *
+grad_lod(nir_builder *b, nir_tex_instr *tex, nir_def *dx, nir_def *dy)
+{
+   nir_def *size[3];
+
+   for (unsigned c = 0; c < dx->num_components; c++)
+      size[c] = tex_size_f(b, tex, c);
+   nir_def *s = nir_vec(b, size, dx->num_components);
+   nir_def *sx = nir_fmul(b, dx, s), *sy = nir_fmul(b, dy, s);
+
+   return nir_fmul_imm(
+      b, nir_flog2(b, nir_fmax(b, nir_fdot(b, sx, sx), nir_fdot(b, sy, sy))),
+      0.5);
 }
 
 static bool
@@ -1566,11 +1587,13 @@ lower_dep_lod(nir_builder *b, nir_tex_instr *tex, void *data)
    b->cursor = nir_before_instr(&tex->instr);
    int ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
    bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
-   nir_def *coord = nir_trim_vector(b, tex->src[ci].src.ssa, cube ? 3 : 2);
+   bool vol = tex->sampler_dim == GLSL_SAMPLER_DIM_3D;
+   nir_def *coord =
+      nir_trim_vector(b, tex->src[ci].src.ssa, cube || vol ? 3 : 2);
 
-   /* (a cube's maths in 32 bits: a mediump direction's would mix 16-bit
-    * constants into 32-bit instructions) */
-   if (cube && coord->bit_size != 32) {
+   /* (a cube's or volume's maths in 32 bits: a mediump direction's would
+    * mix 16-bit constants into 32-bit instructions) */
+   if ((cube || vol) && coord->bit_size != 32) {
       coord = nir_f2f32(b, coord);
       nir_src_rewrite(&tex->src[ci].src, coord);
    }
@@ -1584,10 +1607,11 @@ lower_dep_lod(nir_builder *b, nir_tex_instr *tex, void *data)
       dy = nir_fmul(b, dy, s);
       nir_tex_instr_remove_src(tex, bi);
    }
-   if (cube) {
+   if (cube || vol) {
       tex->op = nir_texop_txl;
-      nir_tex_instr_add_src(tex, nir_tex_src_lod,
-                            cube_lod(b, tex, coord, dx, dy));
+      nir_tex_instr_add_src(
+         tex, nir_tex_src_lod,
+         cube ? cube_lod(b, tex, coord, dx, dy) : grad_lod(b, tex, dx, dy));
       return true;
    }
    tex->op = nir_texop_txd;
@@ -1598,14 +1622,27 @@ lower_dep_lod(nir_builder *b, nir_tex_instr *tex, void *data)
 
 /* A unit whose sampler asks for a LOD bias, MIN_LOD or MAX_LOD the texture
  * words can't give (STATE.md: T0 b21-26 biases down only, and nothing
- * clamps): a mipmapped view (lower_lod_ctl) */
+ * clamps): a mipmapped view (lower_lod_ctl).  Also a cube or volume view
+ * whose MAX_LEVEL is short of the chain the TPU takes from the size (2D
+ * textures get a tail instead, sgx_resource_tail), and a cube view from a
+ * later BASE_LEVEL (its words start at level 0: sgx_tex_words) */
 static bool
 lod_ctl_unit(const struct pipe_sampler_view *v,
              const struct pipe_sampler_state *s)
 {
    if (!v || !s || s->min_mip_filter == PIPE_TEX_MIPFILTER_NONE ||
-       v->target == PIPE_BUFFER || v->u.tex.last_level <= v->u.tex.first_level)
+       v->target == PIPE_BUFFER)
       return false;
+   const struct pipe_resource *t = v->texture;
+   bool cube = t->target == PIPE_TEXTURE_CUBE;
+   if (cube && v->u.tex.first_level)
+      return true;
+   if (v->u.tex.last_level <= v->u.tex.first_level)
+      return false;
+   if ((cube || t->target == PIPE_TEXTURE_3D) &&
+       v->u.tex.last_level <
+          util_logbase2(MAX3(t->width0, t->height0, t->depth0)))
+      return true;
    return s->lod_bias != 0.0f || s->min_lod > 0.0f ||
           s->max_lod < (float)(v->u.tex.last_level - v->u.tex.first_level);
 }
@@ -1615,7 +1652,8 @@ lod_ctl_unit(const struct pipe_sampler_view *v,
  * derivatives scaled by the base level's size (as lower_dep_lod), plus the
  * shader's bias; then the sampler's bias, clamped to [MIN_LOD, MAX_LOD]
  * from SGX_K_LOD + 3u (fill_consts; MAX_LOD no further than the view's last
- * level).  A vertex sample's implicit LOD is 0. */
+ * level, all three a cube view's BASE_LEVEL on).  A vertex sample's implicit
+ * LOD is 0. */
 static bool
 lower_lod_ctl(nir_builder *b, nir_tex_instr *tex, void *data)
 {
@@ -1649,8 +1687,8 @@ lower_lod_ctl(nir_builder *b, nir_tex_instr *tex, void *data)
       nir_def *c = tex->src[ci].src.ssa, *comp[4];
 
       for (unsigned i = 0; i < tex->coord_components; i++)
-         comp[i] = i < n ? nir_fmul(b, nir_channel(b, c, i), q)
-                         : nir_channel(b, c, i);
+         comp[i] =
+            i < n ? nir_fmul(b, nir_channel(b, c, i), q) : nir_channel(b, c, i);
       nir_src_rewrite(&tex->src[ci].src, nir_vec(b, comp, c->num_components));
       int si = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
       if (si >= 0)
@@ -1670,8 +1708,8 @@ lower_lod_ctl(nir_builder *b, nir_tex_instr *tex, void *data)
    } else if (vertex && implicit) {
       lod = nir_imm_float(b, 0.0f);
    } else {
-      nir_def *coord = nir_f2fN(
-         b, nir_trim_vector(b, tex->src[ci].src.ssa, MIN2(n, 3)), 32);
+      nir_def *coord =
+         nir_f2fN(b, nir_trim_vector(b, tex->src[ci].src.ssa, MIN2(n, 3)), 32);
       nir_def *dx, *dy;
 
       if (tex->op == nir_texop_txd) {
@@ -1684,19 +1722,7 @@ lower_lod_ctl(nir_builder *b, nir_tex_instr *tex, void *data)
          dx = nir_ddx_coarse(b, coord);
          dy = nir_ddy_coarse(b, coord);
       }
-      if (cube) {
-         lod = cube_lod(b, tex, coord, dx, dy);
-      } else {
-         nir_def *size[3];
-
-         for (unsigned c = 0; c < dx->num_components; c++)
-            size[c] = tex_size_f(b, tex, c);
-         nir_def *s = nir_vec(b, size, dx->num_components);
-         nir_def *sx = nir_fmul(b, dx, s), *sy = nir_fmul(b, dy, s);
-         nir_def *rho = nir_fmax(b, nir_fdot(b, sx, sx), nir_fdot(b, sy, sy));
-
-         lod = nir_fmul_imm(b, nir_flog2(b, rho), 0.5);
-      }
+      lod = cube ? cube_lod(b, tex, coord, dx, dy) : grad_lod(b, tex, dx, dy);
       int bi = nir_tex_instr_src_index(tex, nir_tex_src_bias);
       if (bi >= 0)
          lod = nir_fadd(b, lod, nir_f2fN(b, tex->src[bi].src.ssa, 32));
@@ -2837,9 +2863,10 @@ fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
    memcpy(&(*slot)->rt_blend, &rt_blend, sizeof(rt_blend));
    memcpy((*slot)->rt_blend_color, rt_blend_color, sizeof(rt_blend_color));
    if (k.lod_ctl)
-      SGX_DBG(DRAW,
-              "fragment variant: units %#x take an explicit LOD for their sampler's bias and clamps (lower_lod_ctl)\n",
-              k.lod_ctl);
+      SGX_DBG(
+         DRAW,
+         "fragment variant: units %#x take an explicit LOD for their sampler's bias and clamps (lower_lod_ctl)\n",
+         k.lod_ctl);
    if (k.dep_mip)
       SGX_DBG(DRAW,
               "fragment variant: units %#x take their LOD from derivatives (lower_dep_lod)\n",

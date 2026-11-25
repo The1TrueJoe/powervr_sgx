@@ -71,8 +71,8 @@ struct sgx_const {
 #define SGX_K_LEVELS       2120
 /* unit u's sampler LOD bias, MIN_LOD and MAX_LOD as floats at SGX_K_LOD +
  * 3u (lower_lod_ctl; past 2304, the 2D arrays' and transform feedback's) */
-#define SGX_K_LOD          2304
-#define SGX_K_LOD_UNITS    16
+#define SGX_K_LOD       2304
+#define SGX_K_LOD_UNITS 16
 
 static_assert(SGX_MAX_VS_CONST_DWORDS <= SGX_K_TEXSIZE,
               "the driver's constants are past every uniform");
