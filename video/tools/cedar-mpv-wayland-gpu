@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# SGX native Wayland output with a producer-completion workaround.
+# The asynchronous shared-buffer path still tears without this wait.
+export SGX_DEBUG=${SGX_DEBUG:+$SGX_DEBUG,}serial
+# Bound decode-ahead so short decode/readback stalls do not starve presentation.
+exec cedar-with-libdrm cedar-mpv --gpu-context=wayland \
+    --vd-queue-enable=yes --vd-queue-max-samples=8 \
+    --vd-queue-max-bytes=32MiB --vd-queue-max-secs=0.5 "$@"

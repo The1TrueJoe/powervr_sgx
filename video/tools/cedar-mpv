@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Bounded progressive H.264: MSVDX decode, CPU download, SGX GLES2 presentation.
+# Decoder failure is an error, never a silent software-decoding fallback.
+# Keep the SGX producer-completion workaround for X11 as well as Wayland.
+case ",${SGX_DEBUG-}," in
+    *,serial,*) ;;
+    *) export SGX_DEBUG=${SGX_DEBUG:+$SGX_DEBUG,}serial ;;
+esac
+exec cedar-vaapi mpv --no-config \
+    --hwdec=vaapi-copy --hwdec-software-fallback=no \
+    --vaapi-device=/dev/dri/card0 \
+    --vo=gpu --gpu-api=opengl --gpu-context=x11egl --opengl-es=yes \
+    --audio-channels=stereo --mute=yes \
+    "$@"

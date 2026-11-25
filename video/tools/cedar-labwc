@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Match the qualified compositor/client producer-completion configuration.
+case ",${SGX_DEBUG-}," in
+    *,serial,*) ;;
+    *) export SGX_DEBUG=${SGX_DEBUG:+$SGX_DEBUG,}serial ;;
+esac
+exec cedar-with-libdrm labwc "$@"

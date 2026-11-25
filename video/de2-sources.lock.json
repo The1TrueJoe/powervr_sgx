@@ -1,0 +1,60 @@
+{
+  "commit": "fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4",
+  "files": [
+    {
+      "path": "src/psb_cmdbuf.c",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/psb_cmdbuf.c",
+      "sha256": "c189d53bf6141765eb2f1c6ddca7b34832c45bb9478a722fb7ab629270622f16"
+    },
+    {
+      "path": "src/psb_cmdbuf.h",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/psb_cmdbuf.h",
+      "sha256": "ec17ef3b5b9d6a052f5dba5e66e0a6fb3231d35d1e567e7c59ce8c44955fb14c"
+    },
+    {
+      "path": "src/hwdefs/dxva_fw_ctrl.h",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/hwdefs/dxva_fw_ctrl.h",
+      "sha256": "8ee348915e00206cd1b48b5d3ead261a64e0a37bb012640b412cfd8345ec8e8f"
+    },
+    {
+      "path": "src/hwdefs/dxva_cmdseq_msg.h",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/hwdefs/dxva_cmdseq_msg.h",
+      "sha256": "4c47b95c5ea2dfe92288fcd9546ec0083b580febc8a2efabf69b02862cc78918"
+    },
+    {
+      "path": "src/hwdefs/msvdx_cmds_io2.h",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/hwdefs/msvdx_cmds_io2.h",
+      "sha256": "0e4c7e6b292a214e280099d42773baf60e3ea9e57e498b9928f2f26bd202ce66"
+    },
+    {
+      "path": "src/hwdefs/msvdx_vec_reg_io2.h",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/hwdefs/msvdx_vec_reg_io2.h",
+      "sha256": "a1b56580afced421a6b24a666175462f98986db172f349cdb24defd92cc41d6f"
+    },
+    {
+      "path": "src/hwdefs/msvdx_offsets.h",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/hwdefs/msvdx_offsets.h",
+      "sha256": "7e1ec984b95ecfb6222791b7252eedf8fe5c72632204b223db9b3162b7077e10"
+    },
+    {
+      "path": "src/hwdefs/msvdx_defs.h",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/hwdefs/msvdx_defs.h",
+      "sha256": "24aba95384489201544bda208dcd3a58072405761b826a4074c8011ef3402f9d"
+    },
+    {
+      "path": "src/pnw_H264.c",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/pnw_H264.c",
+      "sha256": "843686b4790c8a214759ccda12fa5e74bcac73f5c30171417a8c465c38ef61d5"
+    },
+    {
+      "path": "src/pnw_H264.h",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/pnw_H264.h",
+      "sha256": "ce4a60e7f7aa58d21adc9873f18188f1c275b46a8601a5af6c25d94b39748cc6"
+    },
+    {
+      "path": "src/hwdefs/msvdx_vec_h264_reg_io2.h",
+      "url": "https://raw.githubusercontent.com/aosp-mirror-neo/platform_hardware_intel_img_psb_video/fa6f2e9012a890942a47eae9f6f1a0ddcd97e9a4/src/hwdefs/msvdx_vec_h264_reg_io2.h",
+      "sha256": "f953a2873183b2d484f251e7901c0b0442512ea4aebf56fbc881d12a6e25a11b"
+    }
+  ]
+}

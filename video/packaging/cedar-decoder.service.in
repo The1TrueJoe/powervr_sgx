@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Cedarview MSVDX decoder broker
+After=systemd-modules-load.service
+
+[Service]
+CapabilityBoundingSet=CAP_SYS_RAWIO CAP_CHOWN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
+DevicePolicy=closed
+DeviceAllow=/dev/cedar-msvdx rw
+SystemCallFilter=@system-service
+SystemCallFilter=~@raw-io
+SystemCallArchitectures=native
+RuntimeDirectory=cedar-decoder
+RuntimeDirectoryMode=0711
+ExecStart=/opt/cedar-msvdx/cedar-decoder-broker --socket /run/cedar-decoder/decoder.sock --uid @UID@
+
+[Install]
+WantedBy=multi-user.target
