@@ -331,7 +331,7 @@ static struct dma_fence *pvrsgx_run_job(struct drm_sched_job *sched_job)
 	job->hw_fence_mem = NULL;
 	spin_lock_irqsave(&sdev->fence_lock, flags);
 	dma_fence_init(fence, &pvrsgx_fence_ops, &sdev->fence_lock, sdev->fence_context,
-		       ++sdev->fence_seqno);
+		       ++sdev->fence_seqno, 0);
 	spin_unlock_irqrestore(&sdev->fence_lock, flags);
 	job->hw_fence = dma_fence_get(fence);
 
