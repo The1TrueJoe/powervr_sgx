@@ -250,9 +250,8 @@ struct sgx_context {
     * set_framebuffer_state to the framebuffer, with its depth buffer's
     * samples. */
    struct pipe_resource *dummy_cb;
-   /* occlusion queries (SGX_DEBUG=occlusion, sgx_state.c): the one counting
-    * (NULL when none is, or st has turned queries off around its own
-    * draws), and the slots their draws store to, one a begin, taken in turn
+   /* occlusion queries (sgx_state.c): the one counting (NULL when none is),
+    * and the slots their draws store to, one a begin, taken in turn
     * (query_seq: the last frame each was drawn in; query_last: the last any
     * was, once query_pending) */
    struct sgx_query *occlusion;
@@ -379,10 +378,11 @@ struct pipe_context *sgx_context_create(struct pipe_screen *pscreen, void *priv,
 
 void sgx_state_init(struct sgx_context *ctx);
 /* while an occlusion query counts: its slot's address less 4, for
- * sa[SGXWS_VISIBLE_SA] (0 when none counts); and, once the draw is in the
- * frame it renders in, the frame noted and the slots listed */
+ * sa[SGXWS_VISIBLE_SA] (0 when none does); and, once a draw is in the frame
+ * it renders in while one counts, the draw noted (with stored, the draw
+ * stores to the slot: the frame noted and the slot listed) */
 uint32_t sgx_query_va(const struct sgx_context *ctx);
-void sgx_query_drawn(struct sgx_context *ctx);
+void sgx_query_drawn(struct sgx_context *ctx, bool stored);
 void sgx_draw_init(struct sgx_context *ctx);
 void sgx_draw_fini(struct sgx_context *ctx);
 void sgx_program_init(struct sgx_context *ctx);

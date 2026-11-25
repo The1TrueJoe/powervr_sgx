@@ -72,8 +72,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "vertex texture fetch: 16 sampler units in the vertex stage (with glsl130 only, as the compiler samples in a vertex program with native integers): until it passes on a board"},
    {"tex3d", SGX_DEBUG_TEX3D,
     "3D textures up to 256 on a side, in the volume layout (docs/TEX.md section 14): until piglit and dEQP pass them"},
-   {"occlusion", SGX_DEBUG_OCCLUSION,
-    "occlusion queries: a store from every pixel a draw shades while one counts, in a translucent pass (ANY_SAMPLES_PASSED; SAMPLES_PASSED counts 1): until piglit and dEQP pass them"},
+   {"noocclusion", SGX_DEBUG_NO_OCCLUSION,
+    "no occlusion queries: Mesa's stand-ins, which count 0 (0.2.3 and earlier; ARB_occlusion_query stays, with no counter bits)"},
    {"flushrt", SGX_DEBUG_FLUSH_RT,
     "send SGX_FLUSH_HW_RENDER_TARGET at a target's destruction (hangs a srvinit microkernel)"},
    DEBUG_NAMED_VALUE_END};
@@ -257,8 +257,10 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    if (sgx_ubos())
       caps->max_constant_buffer_size = SGX_UBO_BYTES;
    caps->constant_buffer_offset_alignment = 16;
-   /* ARB_occlusion_query2, EXT_occlusion_query_boolean (sgx_state.c) */
-   caps->occlusion_query = !!(sgx_drv_debug & SGX_DEBUG_OCCLUSION);
+   /* occlusion queries, ARB_occlusion_query2, EXT_occlusion_query_boolean
+    * (sgx_state.c).  Without the cap Mesa still exposes ARB_occlusion_query
+    * and answers every query 0 itself, and an engine culls what it sees */
+   caps->occlusion_query = !(sgx_drv_debug & SGX_DEBUG_NO_OCCLUSION);
    /* a pass a colour buffer (sgx_draw_vbo); SGX_DEBUG=nomrt for one */
    caps->max_render_targets = sgx_drv_debug & SGX_DEBUG_NO_MRT ? 1 : 4;
    /* each target's pass has its own colour epilogue (sgx_blend_rt): its own

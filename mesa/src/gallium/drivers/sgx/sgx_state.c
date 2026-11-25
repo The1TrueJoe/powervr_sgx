@@ -558,13 +558,18 @@ sgx_texture_barrier(struct pipe_context *pctx, unsigned flags)
 }
 
 /*
- * Queries.  Occlusion queries (SGX_DEBUG=occlusion, docs/GL3.md H5): no
- * counter is known in the hardware, so while one counts, each draw's
- * fragment program stores 1 to the query's slot from every pixel it shades
- * (sgxws_blend.visible), past the depth and stencil tests and a discard, in
- * a translucent pass, which shades in submission order: a pixel a later
- * draw hides has still counted.  ANY_SAMPLES_PASSED is exact; SAMPLES_PASSED
- * gets 1 for any number.  The other queries return 0.
+ * Queries.  Occlusion queries (docs/GL3.md H5): while one counts, each
+ * draw's fragment program stores 1 to the query's slot from every pixel it
+ * shades (sgxws_blend.visible), past the depth and stencil tests and a
+ * discard, in a translucent pass, which shades in submission order: a pixel
+ * a later draw hides has still counted.  ANY_SAMPLES_PASSED is exact.  No
+ * counter is known in the hardware, so SAMPLES_PASSED is conservative: when
+ * the slot is set, the most samples any of the query's draws' framebuffers
+ * has (width x height x samples, what a draw covering it once passes), else
+ * 0.  An engine that culls what passes fewer than some number of samples
+ * (Red Eclipse's oqfrags, 8) then draws what it can see.  Without a kernel
+ * context nothing is stored, and a query with a draw counts as visible.
+ * The other queries return 0.
  */
 #define SGX_QUERY_SLOTS 4096
 
@@ -574,16 +579,18 @@ struct sgx_query {
    /* the frame its result waits for: the last it was drawn in, or (results
     * come in order) the last an earlier query was */
    uint32_t seq;
-   bool pending, drawn;
+   uint64_t samples; /* the count it reports when visible */
+   /* exact: its draws store to its slot; drawn: a draw was recorded since
+    * its begin; stored: one of them stores */
+   bool exact, pending, drawn, stored;
 };
 
 static bool
 occlusion(unsigned type)
 {
-   return (sgx_drv_debug & SGX_DEBUG_OCCLUSION) &&
-          (type == PIPE_QUERY_OCCLUSION_COUNTER ||
-           type == PIPE_QUERY_OCCLUSION_PREDICATE ||
-           type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE);
+   return type == PIPE_QUERY_OCCLUSION_COUNTER ||
+          type == PIPE_QUERY_OCCLUSION_PREDICATE ||
+          type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE;
 }
 
 static struct pipe_query *
@@ -613,20 +620,26 @@ sgx_begin_query(struct pipe_context *pctx, struct pipe_query *pq)
    struct sgx_screen *screen = sgx_screen(pctx->screen);
    struct sgx_query *q = (struct sgx_query *)pq;
 
-   if (!occlusion(q->type) || !ctx->hw)
+   if (!occlusion(q->type))
+      return true;
+   q->samples = 0;
+   q->drawn = q->stored = false;
+   q->exact = ctx->hw != NULL;
+   ctx->occlusion = q;
+   if (!q->exact)
       return true;
    if (!sgxws_bo_valid(&ctx->query_bo)) {
       int e;
 
       ctx->query_seq = calloc(SGX_QUERY_SLOTS, sizeof(*ctx->query_seq));
       if (!ctx->query_seq)
-         return false;
+         goto fail;
       simple_mtx_lock(&screen->lock);
       e = sgxws_bo_alloc(screen->dev, &ctx->query_bo, SGXWS_MEM_VERTEX,
                          SGX_QUERY_SLOTS * 4, 0x1000);
       simple_mtx_unlock(&screen->lock);
       if (e)
-         return false;
+         goto fail;
    }
    q->slot = ctx->query_next++ % SGX_QUERY_SLOTS;
    /* a slot a frame in flight may still store to: that frame first */
@@ -635,9 +648,10 @@ sgx_begin_query(struct pipe_context *pctx, struct pipe_query *pq)
    ctx->query_bo.map[q->slot] = 0;
    q->pending = ctx->query_pending;
    q->seq = ctx->query_last;
-   q->drawn = false;
-   ctx->occlusion = q;
    return true;
+fail:
+   ctx->occlusion = NULL;
+   return false;
 }
 
 static bool
@@ -653,19 +667,26 @@ sgx_end_query(struct pipe_context *pctx, struct pipe_query *q)
 uint32_t
 sgx_query_va(const struct sgx_context *ctx)
 {
-   if (!ctx->occlusion || ctx->queries_off)
+   if (!ctx->occlusion || !ctx->occlusion->exact || ctx->queries_off)
       return 0;
    return ctx->query_bo.va + ctx->occlusion->slot * 4 - 4;
 }
 
 void
-sgx_query_drawn(struct sgx_context *ctx)
+sgx_query_drawn(struct sgx_context *ctx, bool stored)
 {
    struct sgx_query *q = ctx->occlusion;
+   const struct pipe_framebuffer_state *fb = &ctx->framebuffer;
+   uint64_t samples = (uint64_t)MAX2(fb->width, 1) * MAX2(fb->height, 1) *
+                      MAX2(fb->samples, 1);
 
+   q->samples = MAX2(q->samples, samples);
+   q->drawn = true;
+   if (!stored)
+      return;
    q->seq = ctx->query_seq[q->slot] = ctx->query_last =
       sgxws_next_seq(ctx->hw);
-   q->pending = q->drawn = ctx->query_pending = true;
+   q->pending = q->stored = ctx->query_pending = true;
    sgxws_use_bo(ctx->hw, &ctx->query_bo, true);
 }
 
@@ -675,24 +696,30 @@ sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *pq,
 {
    struct sgx_context *ctx = sgx_context(pctx);
    struct sgx_query *q = (struct sgx_query *)pq;
-   uint32_t v;
+   bool visible;
 
    memset(result, 0, sizeof(*result));
-   if (!occlusion(q->type) || !q->pending)
+   if (!occlusion(q->type))
       return true;
-   if (sgxws_seq_after(q->seq, sgxws_done_seq(ctx->hw))) {
-      /* its frame: still recorded, or in flight */
-      if (q->seq == sgxws_next_seq(ctx->hw))
-         sgx_flush_frame(ctx);
-      if (!wait)
-         return false;
-      sgx_finish(ctx);
+   if (!q->exact) {
+      visible = q->drawn;
+   } else if (!q->pending) {
+      visible = false;
+   } else {
+      if (sgxws_seq_after(q->seq, sgxws_done_seq(ctx->hw))) {
+         /* its frame: still recorded, or in flight */
+         if (q->seq == sgxws_next_seq(ctx->hw))
+            sgx_flush_frame(ctx);
+         if (!wait)
+            return false;
+         sgx_finish(ctx);
+      }
+      visible = q->stored && ctx->query_bo.map[q->slot];
    }
-   v = q->drawn ? ctx->query_bo.map[q->slot] : 0;
    if (q->type == PIPE_QUERY_OCCLUSION_COUNTER)
-      result->u64 = v;
+      result->u64 = visible ? q->samples : 0;
    else
-      result->b = v != 0;
+      result->b = visible;
    return true;
 }
 
