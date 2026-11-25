@@ -771,6 +771,44 @@ section 14; a CE5300 board, 2026-11-20):
   `occlusion_query_conform@GetObjivAval_multi2` fails with the cap and
   without. `nv_conditional_render` stays off.
 
+**LOD bias and clamps** (a CE5300 board, 2026-11-25; on by default):
+
+- A sampler's LOD bias, MIN_LOD and MAX_LOD have no texture-word field: T0
+  b21-26 only biases down (STATE.md), and nothing clamps. A sample on a unit
+  whose sampler sets one of them takes an explicit LOD (smp's LOD mode 2,
+  `lower_lod_ctl`): the shader's (textureLod), or log2 of the coordinate's
+  coarse derivatives scaled by the base level's size, plus the shader's
+  bias; then the sampler's bias, clamped to [MIN_LOD, MAX_LOD], MAX_LOD no
+  further than the view's last level (driver constants `SGX_K_LOD` + 3u).
+  The same goes for a cube or volume view whose MAX_LEVEL is short of the
+  chain the TPU takes from the size, and for a cube view from a later
+  BASE_LEVEL (a cube's words start at level 0; its constants are offset by
+  the base level). A 2D view keeps its MAX_LEVEL tail.
+- The tail: a 2D view of levels l..m with mipmaps has the device's levels
+  past m box-filtered from m (`sgx_resource_tail`). A later view that
+  samples one of those levels gets it back now; before, a draw at
+  BASE = MAX = 4 left level 5 of a 32x32 texture level 4's texels for a
+  later BASE_LEVEL 5 (piglit `tex-miplevel-selection`, `-nobias -nolod`),
+  and the tail never went back once it reached the chain's end.
+- A volume's dependent implicit-LOD sample takes its LOD from the
+  derivatives, as 2D and cube ones did (`lower_dep_lod`).
+- piglit, the 711 tests with miplevel, lod, mipmap, base or max level in
+  their names, against dev: 19 fail → pass (`tex-miplevel-selection`,
+  `-lod` and `-lod-bias`, `levelclamp`, `lodclamp`, `lodclamp-between`,
+  `lodclamp-between-max`, `mipmap-setup`, `fbo-mipmap-copypix`,
+  `sampler-objects`, six `arb_shader_texture_lod` and three GLSL 1.20
+  `tex-miplevel-selection` 2D cases), none pass → fail. Six `textureProj` 1D variants went from
+  fail to crash in that run, fixed since (log entry).
+- dEQP-GLES3 `texture.mipmap` (236 cases, on dev with 2D arrays and
+  transform feedback merged in for an ES 3.0 context): 149 → 183 pass,
+  nothing from pass to fail. Fail → pass: 2D, 3D and cube `min_lod` and
+  `max_lod`, 2D and 3D `max_level`, 3D `bias`, cube `base_level` and
+  `max_level` with NEAREST minification. Still failing: NPOT mipmaps (the
+  base level only), and every cube case with LINEAR minification, `basic`
+  among them (not LOD control: not looked at).
+- `mesa/tests/sgx_baselevel`: BASE_LEVEL and MAX_LEVEL at every level of
+  uploaded chains (TEX.md "A chain from any level"), and the tail case.
+
 Provoking vertex first waits for flat shading, which the driver doesn't do
 yet (DOUTI b25-26, STATE.md §3).
 

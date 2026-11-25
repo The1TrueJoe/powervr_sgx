@@ -1522,6 +1522,39 @@ dep_lod_units(nir_shader *nir)
  * across the quad, which nir_lower_tex's exact cube gradients keep; it
  * takes half their instructions (25 against 50 for a textureCube), and
  * dEQP-GLES2's 557 cube cases give the same result with either. */
+/* the base level's size along axis c as a float: the draw's float
+ * constant when the unit is known and it has one (txs's would go through an
+ * integer and back) */
+static nir_def *
+tex_size_f(nir_builder *b, nir_tex_instr *tex, unsigned c)
+{
+   if (c < 2 && tex->texture_index < SGX_K_TEXSIZE_UNITS &&
+       nir_tex_instr_src_index(tex, nir_tex_src_texture_deref) < 0)
+      return nir_load_uniform(b, 1, 32, nir_imm_int(b, 0),
+                              .base = SGX_K_TEXSIZE + 2 * tex->texture_index +
+                                      c,
+                              .range = 1, .dest_type = nir_type_float32);
+   return nir_i2f32(b, nir_channel(b, nir_get_texture_size(b, tex), c));
+}
+
+/* a cube sample's LOD from the direction's derivatives dx, dy (32-bit):
+ * log2 of the longer one times the face's width over 2|ma| (lower_dep_lod) */
+static nir_def *
+cube_lod(nir_builder *b, nir_tex_instr *tex, nir_def *coord, nir_def *dx,
+         nir_def *dy)
+{
+   nir_def *a = nir_fabs(b, coord);
+   nir_def *ma = nir_fmax(
+      b, nir_fmax(b, nir_channel(b, a, 0), nir_channel(b, a, 1)),
+      nir_channel(b, a, 2));
+   nir_def *rho = nir_fmax(b, nir_fdot(b, dx, dx), nir_fdot(b, dy, dy));
+   nir_def *k = nir_fmul(b, tex_size_f(b, tex, 0),
+                         nir_frcp(b, nir_fmul_imm(b, ma, 2.0)));
+
+   return nir_fmul_imm(b, nir_flog2(b, nir_fmul(b, rho, nir_fmul(b, k, k))),
+                       0.5);
+}
+
 static bool
 lower_dep_lod(nir_builder *b, nir_tex_instr *tex, void *data)
 {
@@ -1552,31 +1585,139 @@ lower_dep_lod(nir_builder *b, nir_tex_instr *tex, void *data)
       nir_tex_instr_remove_src(tex, bi);
    }
    if (cube) {
-      nir_def *a = nir_fabs(b, coord);
-      nir_def *ma = nir_fmax(b, nir_fmax(b, nir_channel(b, a, 0),
-                                         nir_channel(b, a, 1)),
-                             nir_channel(b, a, 2));
-      /* level 0's width: the draw's float constant when the unit is known
-       * (txs's would go through an integer and back) */
-      nir_def *size =
-         tex->texture_index < SGX_K_TEXSIZE_UNITS &&
-               nir_tex_instr_src_index(tex, nir_tex_src_texture_deref) < 0
-            ? nir_load_uniform(b, 1, 32, nir_imm_int(b, 0),
-                               .base = SGX_K_TEXSIZE + 2 * tex->texture_index,
-                               .range = 1, .dest_type = nir_type_float32)
-            : nir_i2f32(b, nir_channel(b, nir_get_texture_size(b, tex), 0));
-      nir_def *rho = nir_fmax(b, nir_fdot(b, dx, dx), nir_fdot(b, dy, dy));
-      nir_def *k = nir_fmul(b, size, nir_frcp(b, nir_fmul_imm(b, ma, 2.0)));
-      nir_def *lod = nir_fmul_imm(
-         b, nir_flog2(b, nir_fmul(b, rho, nir_fmul(b, k, k))), 0.5);
-
       tex->op = nir_texop_txl;
-      nir_tex_instr_add_src(tex, nir_tex_src_lod, lod);
+      nir_tex_instr_add_src(tex, nir_tex_src_lod,
+                            cube_lod(b, tex, coord, dx, dy));
       return true;
    }
    tex->op = nir_texop_txd;
    nir_tex_instr_add_src(tex, nir_tex_src_ddx, dx);
    nir_tex_instr_add_src(tex, nir_tex_src_ddy, dy);
+   return true;
+}
+
+/* A unit whose sampler asks for a LOD bias, MIN_LOD or MAX_LOD the texture
+ * words can't give (STATE.md: T0 b21-26 biases down only, and nothing
+ * clamps): a mipmapped view (lower_lod_ctl) */
+static bool
+lod_ctl_unit(const struct pipe_sampler_view *v,
+             const struct pipe_sampler_state *s)
+{
+   if (!v || !s || s->min_mip_filter == PIPE_TEX_MIPFILTER_NONE ||
+       v->target == PIPE_BUFFER || v->u.tex.last_level <= v->u.tex.first_level)
+      return false;
+   return s->lod_bias != 0.0f || s->min_lod > 0.0f ||
+          s->max_lod < (float)(v->u.tex.last_level - v->u.tex.first_level);
+}
+
+/* A sample on a lod_ctl_unit takes an explicit LOD (smp's LOD mode 2): the
+ * shader's (textureLod), else log2 of the longer of the coordinate's coarse
+ * derivatives scaled by the base level's size (as lower_dep_lod), plus the
+ * shader's bias; then the sampler's bias, clamped to [MIN_LOD, MAX_LOD]
+ * from SGX_K_LOD + 3u (fill_consts; MAX_LOD no further than the view's last
+ * level).  A vertex sample's implicit LOD is 0. */
+static bool
+lower_lod_ctl(nir_builder *b, nir_tex_instr *tex, void *data)
+{
+   uint32_t units = *(const uint32_t *)data;
+   bool vertex = b->shader->info.stage == MESA_SHADER_VERTEX;
+   int ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+
+   if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
+        tex->op != nir_texop_txl && tex->op != nir_texop_txd) ||
+       ci < 0 || tex->texture_index >= SGX_K_LOD_UNITS ||
+       !(units >> tex->texture_index & 1) ||
+       nir_tex_instr_src_index(tex, nir_tex_src_texture_deref) >= 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_texture_offset) >= 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) >= 0 ||
+       tex->sampler_dim == GLSL_SAMPLER_DIM_BUF ||
+       tex->sampler_dim == GLSL_SAMPLER_DIM_MS ||
+       tex->sampler_dim == GLSL_SAMPLER_DIM_RECT)
+      return false;
+   /* (implicit derivatives are undefined in divergent flow) */
+   bool implicit = tex->op == nir_texop_tex || tex->op == nir_texop_txb;
+   if (implicit && !vertex && tex->instr.block->divergent)
+      return false;
+   b->cursor = nir_before_instr(&tex->instr);
+
+   /* (an explicit LOD makes the sample dependent, and a dependent one has
+    * no projection: the divide here) */
+   int pi = nir_tex_instr_src_index(tex, nir_tex_src_projector);
+   if (pi >= 0) {
+      nir_def *q = nir_frcp(b, tex->src[pi].src.ssa);
+      unsigned n = tex->coord_components - tex->is_array;
+      nir_def *c = tex->src[ci].src.ssa, *comp[4];
+
+      for (unsigned i = 0; i < tex->coord_components; i++)
+         comp[i] = i < n ? nir_fmul(b, nir_channel(b, c, i), q)
+                         : nir_channel(b, c, i);
+      nir_src_rewrite(&tex->src[ci].src, nir_vec(b, comp, c->num_components));
+      int si = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
+      if (si >= 0)
+         nir_src_rewrite(&tex->src[si].src,
+                         nir_fmul(b, tex->src[si].src.ssa, q));
+      nir_tex_instr_remove_src(tex, pi);
+      ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   }
+
+   bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
+   unsigned n = cube ? 3 : tex->coord_components - tex->is_array;
+   nir_def *lod;
+   int li = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+
+   if (tex->op == nir_texop_txl) {
+      lod = nir_f2fN(b, tex->src[li].src.ssa, 32);
+   } else if (vertex && implicit) {
+      lod = nir_imm_float(b, 0.0f);
+   } else {
+      nir_def *coord = nir_f2fN(
+         b, nir_trim_vector(b, tex->src[ci].src.ssa, MIN2(n, 3)), 32);
+      nir_def *dx, *dy;
+
+      if (tex->op == nir_texop_txd) {
+         int xi = nir_tex_instr_src_index(tex, nir_tex_src_ddx),
+             yi = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
+
+         dx = nir_f2fN(b, tex->src[xi].src.ssa, 32);
+         dy = nir_f2fN(b, tex->src[yi].src.ssa, 32);
+      } else {
+         dx = nir_ddx_coarse(b, coord);
+         dy = nir_ddy_coarse(b, coord);
+      }
+      if (cube) {
+         lod = cube_lod(b, tex, coord, dx, dy);
+      } else {
+         nir_def *size[3];
+
+         for (unsigned c = 0; c < dx->num_components; c++)
+            size[c] = tex_size_f(b, tex, c);
+         nir_def *s = nir_vec(b, size, dx->num_components);
+         nir_def *sx = nir_fmul(b, dx, s), *sy = nir_fmul(b, dy, s);
+         nir_def *rho = nir_fmax(b, nir_fdot(b, sx, sx), nir_fdot(b, sy, sy));
+
+         lod = nir_fmul_imm(b, nir_flog2(b, rho), 0.5);
+      }
+      int bi = nir_tex_instr_src_index(tex, nir_tex_src_bias);
+      if (bi >= 0)
+         lod = nir_fadd(b, lod, nir_f2fN(b, tex->src[bi].src.ssa, 32));
+   }
+   nir_def *k[3];
+   for (unsigned i = 0; i < 3; i++)
+      k[i] = nir_load_uniform(b, 1, 32, nir_imm_int(b, 0),
+                              .base = SGX_K_LOD + 3 * tex->texture_index + i,
+                              .range = 1, .dest_type = nir_type_float32);
+   lod = nir_fmin(b, nir_fmax(b, nir_fadd(b, lod, k[0]), k[1]), k[2]);
+
+   nir_tex_src_type drop[] = {nir_tex_src_bias, nir_tex_src_ddx,
+                              nir_tex_src_ddy, nir_tex_src_lod,
+                              nir_tex_src_min_lod};
+   for (unsigned i = 0; i < ARRAY_SIZE(drop); i++) {
+      int j = nir_tex_instr_src_index(tex, drop[i]);
+      if (j >= 0)
+         nir_tex_instr_remove_src(tex, j);
+   }
+   tex->op = nir_texop_txl;
+   nir_tex_instr_add_src(tex, nir_tex_src_lod, lod);
    return true;
 }
 
@@ -1699,6 +1840,14 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_snorm_texel,
                   nir_metadata_control_flow, &so->snorm);
    }
+   /* a sampler's LOD bias and clamps, and on the other units the dependent
+    * samples' LOD from derivatives */
+   if (so->lod_ctl) {
+      nir_divergence_analysis(nir);
+      NIR_PASS(_, nir, nir_shader_tex_pass, lower_lod_ctl,
+               nir_metadata_control_flow, &so->lod_ctl);
+   }
+   dep_mip &= ~so->lod_ctl;
    if (dep_mip && !vertex) {
       nir_lower_tex_options txd = {.lower_txd_cb = sgx_txd_lowered,
                                    .lower_txd_clamp = true};
@@ -2374,7 +2523,7 @@ struct tex_key {
    uint32_t snorm;
    uint32_t wrap_rep, wrap_mir;
    uint8_t compare[PIPE_MAX_SAMPLERS];
-   uint32_t dep_mip;
+   uint32_t dep_mip, lod_ctl;
 };
 
 /* false when every unit reads as a variant-free program does; dep_lod the
@@ -2398,6 +2547,9 @@ tex_key_of(const nir_shader *nir, uint32_t dep_lod,
           samplers[unit]->min_mip_filter != PIPE_TEX_MIPFILTER_NONE &&
           v->u.tex.last_level > v->u.tex.first_level)
          k->dep_mip |= 1u << unit;
+      /* a LOD bias or clamp: lower_lod_ctl's units */
+      if (unit < SGX_K_LOD_UNITS && lod_ctl_unit(v, samplers[unit]))
+         k->lod_ctl |= 1u << unit;
       if (util_format_is_srgb(v->format)) {
          const struct pipe_sampler_state *ss = samplers[unit];
 
@@ -2497,7 +2649,8 @@ tex_key_of(const nir_shader *nir, uint32_t dep_lod,
    }
    /* (depth alone, as before: a depth unit is not B, G, R, A either) */
    return k->srgb || k->srgb_filter || any_swz || k->not_bgra || k->r32x4 ||
-          k->r32x2 || k->snorm || k->wrap_rep || k->wrap_mir || k->dep_mip;
+          k->r32x2 || k->snorm || k->wrap_rep || k->wrap_mir || k->dep_mip ||
+          k->lod_ctl;
 }
 
 static bool
@@ -2509,7 +2662,8 @@ tex_key_is(const struct sgx_pipe_shader *v, const struct tex_key *k)
           v->snorm == k->snorm && v->wrap_rep == k->wrap_rep &&
           v->wrap_mir == k->wrap_mir &&
           !memcmp(v->compare, k->compare, sizeof(k->compare)) &&
-          !memcmp(v->swz, k->swz, sizeof(k->swz)) && v->dep_mip == k->dep_mip;
+          !memcmp(v->swz, k->swz, sizeof(k->swz)) && v->dep_mip == k->dep_mip &&
+          v->lod_ctl == k->lod_ctl;
 }
 
 static void
@@ -2527,6 +2681,7 @@ tex_key_set(struct sgx_pipe_shader *v, const struct tex_key *k)
    v->wrap_mir = k->wrap_mir;
    memcpy(v->compare, k->compare, sizeof(k->compare));
    v->dep_mip = k->dep_mip;
+   v->lod_ctl = k->lod_ctl;
 }
 
 /* vs_for: the vertex shader for fs's sets (NULL: its own), these input
@@ -2681,6 +2836,10 @@ fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
    (*slot)->rt_srgb = rt_srgb;
    memcpy(&(*slot)->rt_blend, &rt_blend, sizeof(rt_blend));
    memcpy((*slot)->rt_blend_color, rt_blend_color, sizeof(rt_blend_color));
+   if (k.lod_ctl)
+      SGX_DBG(DRAW,
+              "fragment variant: units %#x take an explicit LOD for their sampler's bias and clamps (lower_lod_ctl)\n",
+              k.lod_ctl);
    if (k.dep_mip)
       SGX_DBG(DRAW,
               "fragment variant: units %#x take their LOD from derivatives (lower_dep_lod)\n",

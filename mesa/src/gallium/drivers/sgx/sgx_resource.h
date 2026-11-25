@@ -157,6 +157,6 @@ void sgx_resource_zls_for_sampling(struct sgx_context *ctx,
 bool sgx_resource_cube0(struct sgx_context *ctx, struct sgx_resource *res);
 
 void sgx_resource_tail(struct sgx_context *ctx, struct sgx_resource *res,
-                       unsigned last);
+                       unsigned first, unsigned last, bool mips);
 
 #endif

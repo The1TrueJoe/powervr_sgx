@@ -69,11 +69,17 @@ struct sgx_const {
 /* unit u's level count (textureQueryLevels, and the compiler's own level
  * choice for word-by-word fetches) at SGX_K_LEVELS + u, a raw integer */
 #define SGX_K_LEVELS       2120
+/* unit u's sampler LOD bias, MIN_LOD and MAX_LOD as floats at SGX_K_LOD +
+ * 3u (lower_lod_ctl; past 2304, the 2D arrays' and transform feedback's) */
+#define SGX_K_LOD          2304
+#define SGX_K_LOD_UNITS    16
 
 static_assert(SGX_MAX_VS_CONST_DWORDS <= SGX_K_TEXSIZE,
               "the driver's constants are past every uniform");
 static_assert(SGX_K_LEVELS + SGX_K_SIZE_UNITS <= SGX_MAX_CONST_K,
               "and under the compiler's limit");
+static_assert(SGX_K_LOD + 3 * SGX_K_LOD_UNITS <= SGX_MAX_CONST_K,
+              "the LOD controls too");
 
 /* a fragment program's dependent samples, and their texture state blocks
  * (the compiler's sgx_sample_info.state: one per way a unit is read, 4 SA
@@ -188,6 +194,9 @@ struct sgx_pipe_shader {
     * mipmapped view and sampler: this variant's samples there take their
     * LOD from the coordinate's derivatives (lower_dep_lod) */
    uint32_t dep_lod_units, dep_mip;
+   /* the units whose sampler has a LOD bias, MIN_LOD or MAX_LOD: this
+    * variant's samples there take an explicit LOD (lower_lod_ctl) */
+   uint32_t lod_ctl;
    struct sgx_pipe_shader *variants_srgb[8];
    unsigned next_variant_srgb;
 };
