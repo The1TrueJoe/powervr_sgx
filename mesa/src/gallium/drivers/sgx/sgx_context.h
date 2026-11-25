@@ -40,28 +40,40 @@ struct sgx_const {
 };
 
 #define SGX_MAX_CONSTS 256 /* SA dwords of constants (sa127 ends them) */
-/* fragment constants the driver fills: texture unit u's level-0 width and
- * height at SGX_K_TEXSIZE + 2u (st's textureSize, as its rectangle lookups
- * scale by it); past every uniform (128 vec4) and under the compiler's 1024 */
-#define SGX_K_TEXSIZE       1000
+/* a vertex program's uniforms, in vec4 (GL_MAX_VERTEX_UNIFORM_VECTORS), and
+ * the 9 st keeps on top for lowered clip planes and point size: room for
+ * Direct3D 9's 256 float constants and for skinning with 64 bones and
+ * lights (librw's gl3 skin shader needs about 304, issue #5) */
+#define SGX_MAX_VS_UNIFORMS 384
+#define SGX_MAX_VS_CONST_DWORDS ((SGX_MAX_VS_UNIFORMS + 9) * 4)
+/* constants the driver fills: texture unit u's level-0 width and height at
+ * SGX_K_TEXSIZE + 2u (st's textureSize, as its rectangle lookups scale by
+ * it); past every uniform's number (a uniform is its dword in constant
+ * buffer 0) */
+#define SGX_K_TEXSIZE       2024
 #define SGX_K_TEXSIZE_UNITS 8
 /* the vertex constant the draw fills with gl_InstanceID, as a float
  * (sgx_program.c lower_instance_id) */
-#define SGX_K_INSTANCE 1016
+#define SGX_K_INSTANCE 2040
 /* The driver's block of constant numbers for programs compiled with the
  * compiler's native integers (docs/GL3.md, "Crossing the driver/compiler
  * line"): unit u's base-level width, height and depth at SGX_K_SIZE + 3u,
  * gl_InstanceID at SGX_K_INSTANCE_INT, all raw integers; uniform block n's
  * GPU address at SGX_K_UBO + n */
-#define SGX_K_SIZE         1024
+#define SGX_K_SIZE         2048
 #define SGX_K_SIZE_UNITS   16
-#define SGX_K_INSTANCE_INT 1072
-#define SGX_K_UBO          1080
+#define SGX_K_INSTANCE_INT 2096
+#define SGX_K_UBO          2104
 #define SGX_UBO_BYTES      65536 /* a block's size, GL_MAX_UNIFORM_BLOCK_SIZE */
 #define SGX_MAX_UBOS       12 /* load_ubo's blocks 0-11: constant buffers 1-12 */
 /* unit u's level count (textureQueryLevels, and the compiler's own level
  * choice for word-by-word fetches) at SGX_K_LEVELS + u, a raw integer */
-#define SGX_K_LEVELS       1096
+#define SGX_K_LEVELS       2120
+
+static_assert(SGX_MAX_VS_CONST_DWORDS <= SGX_K_TEXSIZE,
+              "the driver's constants are past every uniform");
+static_assert(SGX_K_LEVELS + SGX_K_SIZE_UNITS <= SGX_MAX_CONST_K,
+              "and under the compiler's limit");
 
 /* a fragment program's dependent samples, and their texture state blocks
  * (the compiler's sgx_sample_info.state: one per way a unit is read, 4 SA

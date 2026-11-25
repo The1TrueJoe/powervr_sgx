@@ -1865,11 +1865,9 @@ spec@glsl-1.20@execution@fs-nan-builtin-min,Fail
 spec@glsl-1.20@execution@vs-nan-builtin-max,Fail
 spec@glsl-1.20@execution@vs-nan-builtin-min,Fail
 
-# uniform limits: arrays larger than the 120-vec4 vertex limit (ARB vp params 1021 > 119; GLSL arrays not found after linking)
-spec@arb_shader_objects@getuniformlocation-array-of-struct-of-array,Fail
+# uniform limits: arrays larger than the limits, 384 vec4 in a vertex program and 128 in a
+# fragment program (ARB vp params 1021 > 384; a vertex vec4 array[500]; a fragment array past 128)
 spec@arb_vertex_program@big-param,Fail
-spec@glsl-1.10@built-in constants,Fail
-spec@glsl-1.10@built-in constants@gl_MaxVertexUniformComponents,Fail
 spec@glsl-1.10@execution@glsl-fs-uniform-array-7,Fail
 spec@glsl-1.10@execution@glsl-vs-large-uniform-array,Fail
 

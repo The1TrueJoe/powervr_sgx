@@ -1362,6 +1362,32 @@ TEST_F(sgx_compile_test, vertex_indexed_memory_constants_to_varying)
    EXPECT_TRUE(moved) << s;
 }
 
+/* a vertex array as large as the driver's limit (384 + 9 vec4, 1572 dwords)
+ * indexed by an attribute: past the 12 memory windows the compiler had, so
+ * it needs 13 (librw's skinning is about 304 vec4) */
+TEST_F(sgx_compile_test, vertex_indexed_array_past_twelve_windows)
+{
+   start(MESA_SHADER_VERTEX);
+   nir_variable *arr =
+      var(nir_var_uniform, glsl_array_type(glsl_vec4_type(), 393, 0), "vc", -1);
+   nir_variable *in =
+      var(nir_var_shader_in, glsl_float_type(), "i", VERT_ATTRIB_GENERIC0);
+   nir_variable *pos = var(nir_var_shader_out, glsl_vec4_type(), "gl_Position",
+                           VARYING_SLOT_POS);
+   nir_def *ix = nir_f2i32(&b, nir_load_var(&b, in));
+   nir_store_var(
+      &b, pos,
+      nir_load_deref(&b, nir_build_deref_array(&b, nir_build_deref_var(&b, arr),
+                                               ix)),
+      0xf);
+
+   ASSERT_TRUE(compile()) << out.log;
+   expect_decodes();
+   EXPECT_NE(disasm().find("ld.a.d"), std::string::npos) << disasm();
+   EXPECT_GE(out.n_mem_bases, 13u);
+   EXPECT_GE(out.mem_dwords, 393u * 4);
+}
+
 /* what feeds a derivative runs on helper instances too: skipinv clear */
 TEST_F(sgx_compile_test, fragment_derivative_source_no_skipinv)
 {
@@ -2314,7 +2340,7 @@ TEST_F(sgx_compile_test, int_varying_as_halves)
 TEST_F(sgx_compile_test, vertex_ubo_loads)
 {
    native = true;
-   ubo_base_k = 1080;
+   ubo_base_k = 2104;
    int_vertex([](nir_builder *b, nir_def *x, nir_def *y) {
       nir_def *a = nir_load_ubo(b, 4, 32, nir_imm_int(b, 1), nir_imm_int(b, 16),
                                 .align_mul = 16, .range = ~0u);
@@ -2332,8 +2358,8 @@ TEST_F(sgx_compile_test, vertex_ubo_loads)
    EXPECT_TRUE(has("wdf")) << disasm();
    bool k0 = false, k1 = false;
    for (unsigned n = 0; n < out.n_consts; n++) {
-      k0 |= out.consts[n].k == 1080;
-      k1 |= out.consts[n].k == 1081;
+      k0 |= out.consts[n].k == 2104;
+      k1 |= out.consts[n].k == 2105;
    }
    EXPECT_TRUE(k0 && k1);
 }
