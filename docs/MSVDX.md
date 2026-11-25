@@ -45,8 +45,11 @@ Backing has stride 1920 and UV offset 2088960. Completed exports retain image
 storage independently of the engine session, prevent output reuse while read,
 and allow conventional writable sharing. Consumers must finish external writes
 before decoder use, including reference reads. CPU access requires DMA-BUF sync.
-Only image pages are exposed; motion/command allocations stay private. Initialized format-probe exports use
-separate storage and never mark an undecoded surface ready.
+Only image pages are exposed; motion/command allocations stay private.
+Initialized format-probe exports use separate storage and never mark an
+undecoded surface ready. At most eight probes exist at once, across all
+processes, so a client that exports a whole surface pool before decoding gets
+an error from the ninth undecoded export. mpv exports after decoding.
 
 Submission is synchronous with bounded completion polling. Shutdown/suspend
 must prove quiescence before DMA mappings are released. Failure quarantines the

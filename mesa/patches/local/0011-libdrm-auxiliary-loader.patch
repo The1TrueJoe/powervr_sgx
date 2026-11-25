@@ -103,7 +103,7 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
     return d;
  #else
     return NULL;
-@@ -579,15 +556,21 @@
+@@ -579,15 +556,20 @@
  {
     struct stat st;
  
@@ -129,11 +129,10 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
 +   }
 +#endif
 +   return ret;
-+
  }
  
  /* the render nodes in sysfs/class/drm that none of devices[0..n) has, as
-@@ -648,6 +631,26 @@
+@@ -648,6 +630,26 @@
  
     if (n < 0)
        n = 0;
@@ -160,7 +159,7 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
     return loader_drm_add_sysfs_devices("/sys", devices, n, max_devices);
  }
  
-@@ -746,7 +749,7 @@
+@@ -746,7 +748,7 @@
  }
  #endif
  
@@ -169,7 +168,7 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
  {
     char *tag = NULL;
  
-@@ -767,6 +770,10 @@
+@@ -767,6 +769,10 @@
        else
           fullname = device->businfo.host1x->fullname;
  
@@ -180,7 +179,7 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
        name = strrchr(fullname, '/');
        if (!name)
           name = strdup(fullname);
-@@ -791,7 +798,7 @@
+@@ -791,7 +797,7 @@
  
  static bool drm_device_matches_tag(drmDevicePtr device, const char *prime_tag)
  {
@@ -189,7 +188,7 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
     int ret;
  
     if (tag == NULL)
-@@ -811,7 +818,7 @@
+@@ -811,7 +817,7 @@
     if (loader_drm_get_device(fd, &device) != 0)
         return NULL;
  
@@ -198,7 +197,7 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
     drmFreeDevice(&device);
     return tag;
  }
-@@ -884,7 +891,7 @@
+@@ -884,7 +890,7 @@
              log_(_LOADER_WARNING, "not a render node -> not usable\n");
              continue;
           }
@@ -207,7 +206,7 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
           if (tag) {
              log_(_LOADER_WARNING, " %s", tag);
              free(tag);
-@@ -950,7 +957,7 @@
+@@ -950,7 +956,7 @@
                 /* Update prime for the "different_device"
                  * determination below. */
                 free(prime.str);
@@ -216,7 +215,7 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
                 log_(debug ? _LOADER_WARNING : _LOADER_INFO,
                      " - vid:did match -> ");
                 break;
-@@ -1037,12 +1044,22 @@
+@@ -1037,12 +1043,22 @@
  }
  
  #ifdef __linux__
@@ -241,7 +240,7 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
     if (!field_str) {
        /* Probably non-PCI device. */
        return 0;
-@@ -1052,6 +1069,15 @@
+@@ -1052,6 +1068,15 @@
     free(field_str);
  
     return value;
@@ -257,7 +256,7 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
  }
  
  static bool
-@@ -1066,10 +1092,7 @@
+@@ -1066,10 +1091,7 @@
     int maj = major(sbuf.st_rdev);
     int min = minor(sbuf.st_rdev);
  
@@ -272,18 +271,19 @@ diff --git a/src/loader/loader.c b/src/loader/loader.c
 diff --git a/src/loader/loader.h b/src/loader/loader.h
 --- a/src/loader/loader.h
 +++ b/src/loader/loader.h
-@@ -73,8 +73,8 @@
+@@ -73,8 +73,9 @@
  
  /* drmGetDevice2 and drmGetDevices2, and the DRM devices libdrm can't
   * describe: a node of an auxiliary device of a PCI function (gma500 puts the
 - * Cedarview SGX there) is described as that PCI function, with its own
 - * nodes.  Free the devices with drmFreeDevice. */
 + * Cedarview SGX there) keeps its own identity, using a platform-shaped
-+ * descriptor and an auxiliary DRI_PRIME tag with either libdrm ABI.  Free the devices with drmFreeDevice. */
++ * descriptor and an auxiliary DRI_PRIME tag with either libdrm ABI.  Free
++ * the devices with drmFreeDevice. */
  int
  loader_drm_get_device(int fd, struct _drmDevice **device);
  
-@@ -83,6 +83,13 @@
+@@ -83,6 +84,13 @@
  
  /* (their sysfs part, for a sysfs tree at sysfs: the device of the node
   * maj:min; the nodes /sys/class/drm has that libdrm's list doesn't) */
