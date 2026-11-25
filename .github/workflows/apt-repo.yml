@@ -1,5 +1,6 @@
 # The apt repository: when a release is published (not a draft), rebuild a
-# signed repository for Debian 13 (trixie, amd64 and i386) from the .debs of every
+# signed repository for Debian 13 (trixie, amd64 and i386, the kernel and Mesa for
+# each) from the .debs of every
 # published release and publish it to GitHub Pages:
 #
 #   https://<owner>.github.io/<repo>/        dists/trixie, pool/main

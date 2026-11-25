@@ -1,5 +1,5 @@
 # After a release is published: install it from the live apt repository in a clean
-# Debian 13 container, amd64 and i386, and check every SHA256SUMS entry against
+# Debian 13 container, amd64 with i386 beside it, and i386 alone; and check every SHA256SUMS entry against
 # the release's served files. docs/RELEASING.md.
 name: apt-smoke
 
@@ -38,6 +38,32 @@ jobs:
           [ "$(grep -c "$v" installed.txt)" = 4 ]
           test -e /opt/sgx/lib/dri/gma500_dri.so
           test -e /opt/sgx/lib/i386-linux-gnu/dri/gma500_dri.so
+
+  # A Cedarview whose BIOS turns 64-bit mode off: Debian 13 i386 with no amd64.
+  # The job container would need the runner's amd64 node, so docker run.
+  install-i386:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install from https://telaak.dev/powervr_sgx on i386 alone
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eux
+          docker run --rm --platform linux/386 -e TAG debian:trixie sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            v=$(printf "%s" "${TAG#v}" | tr - "~")
+            apt-get update -qq
+            apt-get install -y --no-install-recommends ca-certificates curl gnupg kmod
+            curl -fsSLo /usr/share/keyrings/powervr-sgx.gpg https://telaak.dev/powervr_sgx/powervr-sgx.gpg
+            gpg --show-keys --with-colons /usr/share/keyrings/powervr-sgx.gpg | grep -q "^fpr:*5C26DC64CAEC63910424E220E0DD2B7AD794C167:"
+            printf "Types: deb\nURIs: https://telaak.dev/powervr_sgx\nSuites: trixie\nComponents: main\nSigned-By: /usr/share/keyrings/powervr-sgx.gpg\n" \
+              > /etc/apt/sources.list.d/powervr-sgx.sources
+            apt-get update
+            apt-get install -y linux-image-7.3.3-sgx sgx545-firmware mesa-sgx
+            dpkg -l linux-image-7.3.3-sgx sgx545-firmware mesa-sgx | grep "^ii" | tee installed.txt
+            [ "$(grep -c "$v" installed.txt)" = 3 ]
+            [ "$(grep -c " i386 " installed.txt)" = 2 ]
+            test -e /opt/sgx/lib/i386-linux-gnu/dri/gma500_dri.so'
 
   assets:
     runs-on: ubuntu-24.04

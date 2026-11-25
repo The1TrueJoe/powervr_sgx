@@ -3,6 +3,9 @@
 #   release  linux-image-<v>-sgx      artifact powervr-sgx-deb-cedarview-release  (what people install)
 #   kit      linux-image-<v>-sgx-kit  artifact powervr-sgx-deb-cedarview-kit      (test-kit sticks only:
 #            adds drm/ci/kit's display register dump and cdv_sr/cdv_dsparb switches)
+# The release flavor is also built for i386 (artifact powervr-sgx-deb-cedarview-release-i386):
+# the same package names, _i386.deb, for Cedarview machines whose BIOS turns 64-bit mode
+# off, from Debian 12's 686-pae config plus drm/ci/i386.fragment.
 # Each installs next to Debian's kernel, so the stock kernel stays in GRUB for rollback.
 # release.yml calls this (workflow_call) with flavor release and its own pkg_version.
 name: powervr-sgx-deb
@@ -17,12 +20,16 @@ on:
         description: release, kit, or empty for both
         type: string
         default: ''
+      arch:
+        description: amd64, i386, or empty for both (i386 has the release flavor only)
+        type: string
+        default: ''
       pkg_version:
         description: Debian package version (KDEB_PKGVERSION); empty for a snapshot, <linux>-sgx0~git<date>.<commit>
         type: string
         default: ''
       suite:
-        description: Debian suite whose kernel config to start from
+        description: Debian suite whose amd64 kernel config to start from (i386 starts from bookworm, the last with one)
         type: string
         default: trixie
       lockdep:
@@ -34,11 +41,14 @@ on:
       flavor:
         description: release, kit, or empty for both
         default: ''
+      arch:
+        description: amd64, i386, or empty for both (i386 has the release flavor only)
+        default: ''
       pkg_version:
         description: Debian package version (KDEB_PKGVERSION); empty for a snapshot, <linux>-sgx0~git<date>.<commit>
         default: ''
       suite:
-        description: Debian suite whose kernel config to start from
+        description: Debian suite whose amd64 kernel config to start from (i386 starts from bookworm, the last with one)
         default: trixie
       lockdep:
         description: Lock checking (drm/ci/lockdep.fragment); its own artifact
@@ -49,6 +59,8 @@ on:
     paths:
       - drm/ci/deb-kernel.sh
       - drm/ci/deb.fragment
+      - drm/ci/i386.fragment
+      - drm/ci/qemu-boot.sh
       - drm/gma500/**
       - drm/shmem/**
       - drm/ci/kit/**
@@ -65,8 +77,12 @@ jobs:
       fail-fast: false
       matrix:
         flavor: ${{ fromJSON(inputs.flavor && format('["{0}"]', inputs.flavor) || '["release","kit"]') }}
+        arch: ${{ fromJSON(inputs.arch && format('["{0}"]', inputs.arch) || '["amd64","i386"]') }}
+        exclude:
+          - flavor: kit
+            arch: i386
     concurrency:
-      group: powervr-sgx-deb-${{ github.ref }}-${{ matrix.flavor }}-${{ inputs.lockdep && 'lockdep' || 'plain' }}
+      group: powervr-sgx-deb-${{ github.ref }}-${{ matrix.flavor }}-${{ matrix.arch }}-${{ inputs.lockdep && 'lockdep' || 'plain' }}
       cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 340
@@ -76,6 +92,12 @@ jobs:
       # -sgx for release, -sgx-kit for the kit; -lockdep after either.
       FLAVOR: ${{ matrix.flavor == 'kit' && '-kit' || '' }}${{ inputs.lockdep && '-lockdep' || '' }}
       PKGTAG: ${{ matrix.flavor == 'kit' && 'sgxkit' || 'sgx' }}
+      DEB_ARCH: ${{ matrix.arch }}
+      KARCH: ${{ matrix.arch == 'i386' && 'i386' || 'x86_64' }}
+      # i386 is cross-built, so the headers package's tools (modpost, fixdep) run on i386
+      CROSS_COMPILE: ${{ matrix.arch == 'i386' && 'i686-linux-gnu-' || '' }}
+      # artifact suffix: none for amd64, as before
+      ASUF: ${{ matrix.arch == 'i386' && '-i386' || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -83,7 +105,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            build-essential bc bison flex libelf-dev libdw-dev libssl-dev cpio ccache dpkg-dev fakeroot rsync kmod debhelper
+            build-essential bc bison flex libelf-dev libdw-dev libssl-dev cpio ccache dpkg-dev fakeroot rsync kmod debhelper \
+            qemu-system-x86 file
+          if [ "$DEB_ARCH" = i386 ]; then
+            # the headers package's host tools (sign-file) link the i386 libcrypto
+            sudo dpkg --add-architecture i386
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends gcc-i686-linux-gnu libc6-dev-i386-cross libssl-dev:i386
+          fi
 
       - name: Restore the kernel tarball
         uses: actions/cache@v4
@@ -93,7 +122,7 @@ jobs:
 
       - name: Lay out the kernel
         env:
-          DEB_SUITE: ${{ inputs.suite || 'trixie' }}
+          DEB_SUITE: ${{ matrix.arch == 'i386' && 'bookworm' || inputs.suite || 'trixie' }}
           EXTRA_FRAGMENTS: ${{ inputs.lockdep && format('{0}/drm/ci/lockdep.fragment', github.workspace) || '' }}
         run: |
           set -eux
@@ -112,7 +141,7 @@ jobs:
           # moves from a CI build to the next release without --allow-downgrades.
           v=$(git rev-parse --short HEAD)
           d=$(git log -1 --format=%cd --date=format:%Y%m%d)
-          make -C linux-$LINUX_VERSION ARCH=x86_64 -j"$(nproc)" LOCALVERSION=-sgx$FLAVOR \
+          make -C linux-$LINUX_VERSION ARCH=$KARCH -j"$(nproc)" LOCALVERSION=-sgx$FLAVOR \
             KDEB_PKGVERSION=${PKG_VERSION:-$LINUX_VERSION-${PKGTAG}0~git$d.$v} bindeb-pkg
           mkdir -p out
           mv linux-image-*.deb linux-headers-*.deb out/
@@ -155,10 +184,34 @@ jobs:
               echo "kit patches in the release flavor"; exit 1
             fi
           fi
-          ls out/linux-image-$LINUX_VERSION-sgx${FLAVOR}_*.deb
+          # i386: the same package names as amd64, for the other architecture
+          for p in image headers; do
+            f=$(ls out/linux-$p-$LINUX_VERSION-sgx${FLAVOR}_*_$DEB_ARCH.deb)
+            [ "$(dpkg-deb -f $f Architecture)" = "$DEB_ARCH" ]
+          done
+          if [ "$DEB_ARCH" = i386 ]; then
+            file g.ko | grep -q 'ELF 32-bit.*Intel 80386'
+            rm -rf hroot && mkdir hroot && dpkg-deb -x out/linux-headers-*.deb hroot
+            file -L $(find hroot -path '*/scripts/mod/modpost' -type f) | grep -q 'ELF 32-bit.*Intel 80386'
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: powervr-sgx-deb-cedarview-${{ matrix.flavor }}${{ env.LOCKDEP }}
+          name: powervr-sgx-deb-cedarview-${{ matrix.flavor }}${{ env.ASUF }}${{ env.LOCKDEP }}
           path: out/
           retention-days: 30
+
+      - name: Boot it in QEMU (no GPU there; the modules load, nothing binds)
+        if: matrix.flavor == 'release'
+        run: |
+          set -eux
+          sudo chmod 666 /dev/kvm || true
+          sh drm/ci/qemu-boot.sh out/linux-image-$LINUX_VERSION-sgx${FLAVOR}_*_$DEB_ARCH.deb $DEB_ARCH
+
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.flavor == 'release'
+        with:
+          name: qemu-console-${{ matrix.arch }}${{ env.LOCKDEP }}
+          path: qemu-console.log
+          if-no-files-found: ignore
+          retention-days: 14
