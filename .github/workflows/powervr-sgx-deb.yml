@@ -55,7 +55,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [m2-drm]
+    branches: [dev]
     paths:
       - drm/ci/deb-kernel.sh
       - drm/ci/deb.fragment

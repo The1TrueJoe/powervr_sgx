@@ -38,29 +38,36 @@ and the package inside still says `0.2.0~rc1`.
 
 ## Steps
 
-0. When the kernel isn't on `dev` yet, cut a release branch from `dev` and merge the
-   kernel branch into it (`release/v0.2` is `dev` plus `m2-drm`), then run every workflow
-   on it from the Actions tab (`gh workflow run <file> --ref release/vX.Y`). Rehearse the
-   release on the branch: run `release` by hand with a version such as `0.2.0~rc0`. It builds
-   the packages under that version, signs a throwaway apt repository and runs
+0. Put the notes in `docs/releases/v<version>.md` on `dev`; the tag's draft takes them.
+   Then bring the series' release branch up to date: merge `dev` into `release/vX.Y` with
+   a merge commit, so the branch's tree is `dev`'s. Releases are cut there, not on `main`:
+   `main` still holds the 0.1 line, and `dev` doesn't merge into it cleanly. If the branch
+   was deleted, start it again from the series' last tag; a new series starts from `dev`.
+
+   ```bash
+   git fetch origin && git checkout -B release/v0.2 origin/release/v0.2 && git merge --no-ff origin/dev && git push origin release/v0.2
+   ```
+
+   Rehearse the release on the branch: run `release` by hand with a version such as
+   `0.2.0~rc0`:
+
+   ```bash
+   gh workflow run release.yml --ref release/v0.2 -f version=0.2.0~rc0
+   ```
+
+   It builds the packages under that version, signs a throwaway apt repository and runs
    `tools/release/repo-test.sh` in Debian 13: the upgrade from the last published release,
    `mesa-sgx:i386` alone, a fresh install, and the way off CI-built packages; then, in an
    i386 Debian 13 with no amd64, a fresh install of the i386 kernel, the firmware and
    `mesa-sgx`. It also builds the driver with DKMS against the release kernel's headers.
    Nothing is tagged or published. `kernel_run` reuses a finished release-flavor
    `powervr-sgx-deb` run (both architectures) with the same version instead of building
-   the kernels again. Put the notes in
-   `docs/releases/v<version>.md`; the tag's draft takes them.
+   the kernels again.
 
-1. Merge `dev` into `main` (a merge commit) once `dev`'s CI is green, then tag `main`
-   and push the tag:
+1. Once the rehearsal passes, tag the commit it ran on and push the tag:
 
    ```bash
-   git checkout main && git merge --no-ff dev && git push origin main
-   ```
-
-   ```bash
-   git tag -a v0.1.0 -m "powervr_sgx 0.1.0" && git push origin v0.1.0
+   git tag -a v0.2.0 -m "powervr_sgx 0.2.0" origin/release/v0.2 && git push origin v0.2.0
    ```
 
 2. Wait for the `release` run to finish. The kernel build takes several hours.

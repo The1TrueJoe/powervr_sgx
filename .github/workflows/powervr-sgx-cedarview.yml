@@ -9,7 +9,7 @@ name: powervr-sgx-cedarview
 on:
   workflow_dispatch:
   push:
-    branches: [m2-drm]
+    branches: [dev]
     paths:
       - drm/**
       - docs/uapi/**

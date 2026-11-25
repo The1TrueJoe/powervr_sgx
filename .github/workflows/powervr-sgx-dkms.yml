@@ -9,7 +9,7 @@ name: powervr-sgx-dkms
 on:
   workflow_dispatch:
   push:
-    branches: [m2-drm, 'wip/**']
+    branches: [dev, 'wip/**']
     paths:
       - drm/dkms/**
       - drm/powervr_sgx/**

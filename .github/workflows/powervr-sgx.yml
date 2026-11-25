@@ -20,7 +20,7 @@ on:
         description: Kernel version (default 7.3.3)
         default: ''
   push:
-    branches: [dev, m2-drm]
+    branches: [dev]
     paths:
       - drm/**
       - docs/uapi/**
@@ -32,7 +32,7 @@ on:
       - .github/workflows/powervr-sgx.yml
   # pull requests run it themselves (no test branches)
   pull_request:
-    branches: [dev, m2-drm, main]
+    branches: [dev, main]
     paths:
       - drm/**
       - docs/uapi/**

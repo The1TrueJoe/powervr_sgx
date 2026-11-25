@@ -2,8 +2,8 @@
 # with the packages docs/INSTALL.md installs (the kernel .deb, sgx545-firmware,
 # mesa-sgx), the GPU tests, the blit variants and a desktop smoke test, as one
 # USB image; booted in QEMU (BIOS and UEFI) before it is kept. Open code only.
-# The kernel and tests come from m2-drm and Mesa from dev; on a release/* branch
-# all three come from that branch, so the stick pairs the release's kernel and Mesa.
+# The kernel, the tests and Mesa come from dev; on a release/* branch they come
+# from that branch, so the stick pairs the release's kernel and Mesa.
 name: cedarview-live
 
 on:
@@ -42,7 +42,7 @@ jobs:
             gh run download "$id" -R "$GITHUB_REPOSITORY" -n "$1" -D "$3"
             echo "$1: run $id" | tee -a sources.txt
           }
-          k=m2-drm m=dev
+          k=dev m=dev
           case $GITHUB_REF_NAME in release/*) k=$GITHUB_REF_NAME m=$GITHUB_REF_NAME ;; esac
           get powervr-sgx-deb-cedarview-kit $k debs
           get mesa-sgx-trixie $m debs

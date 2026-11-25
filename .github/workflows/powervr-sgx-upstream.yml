@@ -10,7 +10,7 @@ permissions:
 on:
   workflow_dispatch:
   push:
-    branches: [m2-drm]
+    branches: [dev]
     paths:
       - drm/powervr_sgx/**
       - drm/gma500/**
