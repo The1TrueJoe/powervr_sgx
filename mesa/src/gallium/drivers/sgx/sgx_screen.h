@@ -34,18 +34,34 @@
 #define SGX_DEBUG_NO_PDS_MERGE       (1 << 17)
 #define SGX_DEBUG_NO_DEP_F16_SAMPLES (1 << 18)
 #define SGX_DEBUG_ZLS_DUMP           (1 << 19)
-#define SGX_DEBUG_GLSL130            (1 << 20)
+#define SGX_DEBUG_NO_GLSL130         (1 << 20)
 #define SGX_DEBUG_NO_MRT             (1 << 21)
-#define SGX_DEBUG_UBO                (1 << 22)
+#define SGX_DEBUG_NO_UBO             (1 << 22)
 #define SGX_DEBUG_NO_VBO_SLABS       (1 << 23)
 #define SGX_DEBUG_NO_TEX_BLITS       (1 << 24)
 #define SGX_DEBUG_NO_MERGE           (1 << 25)
-#define SGX_DEBUG_VTF                (1 << 26)
-#define SGX_DEBUG_TEX3D              (1 << 27)
+#define SGX_DEBUG_NO_VTF             (1 << 26)
+#define SGX_DEBUG_NO_TEX3D           (1 << 27)
 #define SGX_DEBUG_NO_OCCLUSION       (1 << 28)
 #define SGX_DEBUG_CPU_RESOLVE        (1 << 29)
 
 extern uint32_t sgx_drv_debug;
+
+/* The ES 3.0 pieces, on unless SGX_DEBUG turns them off: GLSL 1.30 and the
+ * compiler's native integers (noglsl130), and with them uniform blocks
+ * (noubo), vertex texture fetch (novtf); 3D textures in the volume layout
+ * (notex3d) */
+static inline bool
+sgx_glsl130(void)
+{
+   return !(sgx_drv_debug & SGX_DEBUG_NO_GLSL130);
+}
+
+static inline bool
+sgx_tex3d(void)
+{
+   return !(sgx_drv_debug & SGX_DEBUG_NO_TEX3D);
+}
 bool sgx_vtf(void);
 /* SGX_DUMP_CODE=dir: every compiled program's instructions written there */
 const char *sgx_dump_code_dir(void);

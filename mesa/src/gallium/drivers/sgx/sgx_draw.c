@@ -1082,7 +1082,7 @@ dep_states(struct sgx_context *ctx, const struct sgx_pipe_shader *so,
    return true;
 }
 
-/* the views bound to a stage's units (the vertex stage's: SGX_DEBUG=vtf) */
+/* the views bound to a stage's units (the vertex stage's: sgx_vtf) */
 static struct pipe_sampler_view **
 stage_views(struct sgx_context *ctx, mesa_shader_stage stage)
 {
@@ -1961,7 +1961,7 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * Only the units the shader samples: a view left bound to another unit
     * is not this draw's */
    for (unsigned stage = 0; stage < 2; stage++) {
-      /* the fragment units, then the vertex ones (SGX_DEBUG=vtf) */
+      /* the fragment units, then the vertex ones (sgx_vtf) */
       bool vtx = stage == 1;
       uint32_t used = sgx_fs_textures_used(vtx ? ctx->vs : ctx->fs);
       struct pipe_sampler_view **views = vtx ? ctx->vs_views : ctx->views;
