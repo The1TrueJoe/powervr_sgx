@@ -32,6 +32,12 @@ struct pvrsgx_bo {
 	atomic_t code_unmapping;
 	/** @import_map: An import's CPU mapping, from its exporter, for the cache flushes. */
 	struct iosys_map import_map;
+	/**
+	 * @import_uncached: The exporter maps the import write-combined or
+	 * uncached, so no CPU cache holds its bytes and the flushes around a
+	 * job are skipped (pvrsgx_prime.c).
+	 */
+	bool import_uncached;
 };
 
 static inline struct pvrsgx_bo *to_pvrsgx_bo(struct drm_gem_object *obj)

@@ -280,13 +280,18 @@ sgx_context_destroy(struct pipe_context *pctx)
       for (unsigned n = 0; n < SGX_MAX_UBOS; n++)
          pipe_resource_reference(&ctx->ubos[i][n].buffer, NULL);
    }
-   for (unsigned i = 0; i < PIPE_MAX_SHADER_SAMPLER_VIEWS; i++)
+   for (unsigned i = 0; i < PIPE_MAX_SHADER_SAMPLER_VIEWS; i++) {
       pipe_sampler_view_reference(&ctx->views[i], NULL);
+      pipe_sampler_view_reference(&ctx->vs_views[i], NULL);
+   }
    if (pctx->stream_uploader)
       u_upload_destroy(pctx->stream_uploader);
 
    pipe_resource_reference(&ctx->dummy_cb, NULL);
    simple_mtx_lock(&screen->lock);
+   if (sgxws_bo_valid(&ctx->query_bo))
+      sgxws_bo_free(screen->dev, &ctx->query_bo); /* (finished above) */
+   free(ctx->query_seq);
    if (ctx->hw) {
       for (unsigned i = 0; i < ctx->num_rts; i++)
          sgxws_rt_destroy(ctx->hw,

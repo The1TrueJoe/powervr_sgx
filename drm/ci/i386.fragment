@@ -1,0 +1,14 @@
+# On top of Debian 12's 686-pae config (deb-kernel.sh, DEB_ARCH=i386): Cedarview
+# machines whose BIOS turns 64-bit mode off.
+# Tuned for the Atom (in-order); -march=atom uses MOVBE, so it boots Atoms only.
+CONFIG_MATOM=y
+# CONFIG_M686 is not set
+# CONFIG_X86_GENERIC is not set
+# These machines have 1 or 2 GiB: HIGHMEM for what lowmem can't map.
+CONFIG_HIGHMEM4G=y
+# PAE, as Debian's 686-pae: for NX (the N2600 has both). It doesn't widen what
+# the GPU sees: with no ZONE_DMA32 on 32-bit, the driver's __GFP_DMA32 pages
+# are lowmem, below 896 MiB (docs/porting/cores/clovertrail.md).
+CONFIG_X86_PAE=y
+# Debian's 3G/1G split: a bigger lowmem (2G/2G) would shrink programs' address space.
+CONFIG_VMSPLIT_3G=y

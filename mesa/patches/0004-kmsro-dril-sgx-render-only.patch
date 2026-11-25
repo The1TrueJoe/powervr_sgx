@@ -13,7 +13,10 @@ and an auxiliary device of gma500's PCI function on Cedarview:
   child of its own device, when that node's driver is in kmsro's list.
   libdrm's device list leaves out the auxiliary bus, so the loader finds the
   child through /sys/class/drm (loader_find_child_render_node, with a unit
-  test on fake sysfs trees).
+  test on fake sysfs trees);
+- failing that, it gets the render node of another device on its own bus
+  (loader_find_sibling_render_node, in the same test): the CE5300's display
+  controller (ce5300, KMS only) and the SGX are two PCI functions on one bus.
 
 libdrm describes no auxiliary device: drmGetDevice2 fails on the Cedarview
 SGX's nodes and drmGetDevices2 leaves them out, so EGL had no EGLDevice for
@@ -26,13 +29,13 @@ find the SGX (a unit test on the sysfs layout of a real Cedarview). A render
 node neither describes still leaves the display the software EGLDevice.
 
 An X server's GLX (AIGLX) loads <display driver>_dri.so: dril stubs for
-simpledrm, gma500 and sgx.
+simpledrm, gma500, ce5300 and sgx.
 
 diff --git a/meson.build b/meson.build
-index 916b72b..c1d56a0 100644
+index 4d7a363..6baab45 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -266,6 +266,7 @@ with_gallium_drm = system_has_kms_drm and [
+@@ -267,6 +267,7 @@ with_gallium_drm = system_has_kms_drm and [
    with_gallium_panfrost,
    with_gallium_v3d,
    with_gallium_vc4,
@@ -110,7 +113,7 @@ index a4a13c0..4faf414 100644
    renderonly_drivers_c_args += '-DGALLIUM_ZINK'
  endif
 diff --git a/src/gallium/auxiliary/pipe-loader/pipe_loader_drm.c b/src/gallium/auxiliary/pipe-loader/pipe_loader_drm.c
-index 7d19303..649091a 100644
+index 7d19303..d140cc9 100644
 --- a/src/gallium/auxiliary/pipe-loader/pipe_loader_drm.c
 +++ b/src/gallium/auxiliary/pipe-loader/pipe_loader_drm.c
 @@ -397,6 +397,9 @@ pipe_loader_get_compatible_render_capable_device_fds(int kms_only_fd, unsigned i
@@ -123,7 +126,7 @@ index 7d19303..649091a 100644
  #if defined GALLIUM_ZINK
        "zink",
  #endif
-@@ -408,9 +411,22 @@ pipe_loader_get_compatible_render_capable_device_fds(int kms_only_fd, unsigned i
+@@ -408,9 +411,28 @@ pipe_loader_get_compatible_render_capable_device_fds(int kms_only_fd, unsigned i
     pipe_loader_release(&dev, 1);
  
     /* For display-only devices that are not on the platform bus, we can't assume
@@ -131,11 +134,17 @@ index 7d19303..649091a 100644
 -   if (!is_platform_device)
 -      return NULL;
 +    * that any of the rendering devices are compatible, except one the display
-+    * device's driver made a child of its own device (gma500 and the SGX). */
++    * device's driver made a child of its own device (gma500 and the SGX), or
++    * one on the display device's own bus (the CE5300's display controller
++    * and the SGX, two PCI functions on one bus). */
 +   if (!is_platform_device) {
 +      int fd = loader_open_child_render_node(kms_only_fd, drivers,
 +                                             ARRAY_SIZE(drivers));
 +      int *fds;
++
++      if (fd < 0)
++         fd = loader_open_sibling_render_node(kms_only_fd, drivers,
++                                              ARRAY_SIZE(drivers));
 +
 +      if (fd < 0 || !(fds = malloc(sizeof(*fds)))) {
 +         if (fd >= 0)
@@ -150,18 +159,21 @@ index 7d19303..649091a 100644
     /* For platform display-only devices, we try to find a render-capable device
      * on the platform bus and that should be compatible with the display-only
 diff --git a/src/gallium/targets/dril/dril_target.c b/src/gallium/targets/dril/dril_target.c
-index b5ba518..f3969ac 100644
+index b5ba518..f8b5bb5 100644
 --- a/src/gallium/targets/dril/dril_target.c
 +++ b/src/gallium/targets/dril/dril_target.c
-@@ -652,6 +652,7 @@ DEFINE_LOADER_DRM_ENTRYPOINT(tegra)
+@@ -650,8 +650,10 @@ DEFINE_LOADER_DRM_ENTRYPOINT(asahi)
+ DEFINE_LOADER_DRM_ENTRYPOINT(etnaviv)
+ DEFINE_LOADER_DRM_ENTRYPOINT(tegra)
  DEFINE_LOADER_DRM_ENTRYPOINT(armada_drm)
++DEFINE_LOADER_DRM_ENTRYPOINT(ce5300)
  DEFINE_LOADER_DRM_ENTRYPOINT(exynos)
  DEFINE_LOADER_DRM_ENTRYPOINT(gm12u320)
 +DEFINE_LOADER_DRM_ENTRYPOINT(gma500)
  DEFINE_LOADER_DRM_ENTRYPOINT(hdlcd)
  DEFINE_LOADER_DRM_ENTRYPOINT(hx8357d)
  DEFINE_LOADER_DRM_ENTRYPOINT(ili9163)
-@@ -676,6 +677,7 @@ DEFINE_LOADER_DRM_ENTRYPOINT(rcar_du)
+@@ -676,6 +678,7 @@ DEFINE_LOADER_DRM_ENTRYPOINT(rcar_du)
  DEFINE_LOADER_DRM_ENTRYPOINT(repaper)
  DEFINE_LOADER_DRM_ENTRYPOINT(rockchip)
  DEFINE_LOADER_DRM_ENTRYPOINT(rzg2l_du)
@@ -169,24 +181,27 @@ index b5ba518..f3969ac 100644
  DEFINE_LOADER_DRM_ENTRYPOINT(ssd130x)
  DEFINE_LOADER_DRM_ENTRYPOINT(st7586)
  DEFINE_LOADER_DRM_ENTRYPOINT(st7735r)
-@@ -687,3 +689,4 @@ DEFINE_LOADER_DRM_ENTRYPOINT(zynqmp_dpsub)
+@@ -687,3 +690,4 @@ DEFINE_LOADER_DRM_ENTRYPOINT(zynqmp_dpsub)
  DEFINE_LOADER_DRM_ENTRYPOINT(lima)
  DEFINE_LOADER_DRM_ENTRYPOINT(d3d12)
  DEFINE_LOADER_DRM_ENTRYPOINT(zink)
 +DEFINE_LOADER_DRM_ENTRYPOINT(sgx)
 diff --git a/src/gallium/targets/dril/meson.build b/src/gallium/targets/dril/meson.build
-index 55f10dc..7252df0 100644
+index 55f10dc..902b990 100644
 --- a/src/gallium/targets/dril/meson.build
 +++ b/src/gallium/targets/dril/meson.build
-@@ -67,6 +67,7 @@ foreach d : [[with_gallium_kmsro, [
+@@ -65,8 +65,10 @@ dril_dri = shared_library(
+ foreach d : [[with_gallium_kmsro, [
+                'apple',
                 'armada-drm',
++               'ce5300',
                 'exynos',
                 'gm12u320',
 +               'gma500',
                 'hdlcd',
                 'hx8357d',
                 'ili9163',
-@@ -91,6 +92,7 @@ foreach d : [[with_gallium_kmsro, [
+@@ -91,6 +93,7 @@ foreach d : [[with_gallium_kmsro, [
                 'repaper',
                 'rockchip',
                 'rzg2l-du',
@@ -194,7 +209,7 @@ index 55f10dc..7252df0 100644
                 'ssd130x',
                 'st7586',
                 'st7735r',
-@@ -124,6 +126,7 @@ foreach d : [[with_gallium_kmsro, [
+@@ -124,6 +127,7 @@ foreach d : [[with_gallium_kmsro, [
               [with_gallium_lima, ['lima']],
               [with_gallium_d3d12, ['d3d12']],
               [with_gallium_zink, ['zink']],
@@ -203,7 +218,7 @@ index 55f10dc..7252df0 100644
    if d[0]
      foreach name : d[1]
 diff --git a/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c b/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
-index 2ead5db..dc0563a 100644
+index 2ead5db..d71008f 100644
 --- a/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
 +++ b/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
 @@ -33,6 +33,7 @@
@@ -214,7 +229,7 @@ index 2ead5db..dc0563a 100644
  #include "zink/drm/zink_drm_public.h"
  #include "xf86drm.h"
  
-@@ -126,6 +127,14 @@ struct pipe_screen *kmsro_drm_screen_create(int kms_fd,
+@@ -126,6 +127,15 @@ struct pipe_screen *kmsro_drm_screen_create(int kms_fd,
           */
           ro->create_for_resource = renderonly_create_gpu_import_for_resource;
           screen = vc4_drm_screen_create_renderonly(ro->gpu_fd, ro, config);
@@ -222,15 +237,16 @@ index 2ead5db..dc0563a 100644
 +      } else if (strcmp(render_dev_name, "powervr_sgx") == 0) {
 +#if defined(GALLIUM_SGX)
 +         /* the display's dumb buffer, imported: simpledrm's (read with the
-+          * CPU: cached pages; powervr_sgx flushes them around each job) or
-+          * gma500's (exported through PRIME) */
++          * CPU: cached pages; powervr_sgx flushes them around each job),
++          * gma500's or the CE5300's (exported through PRIME, scanned out
++          * as they are) */
 +         ro->create_for_resource = renderonly_create_kms_dumb_buffer_for_resource;
 +         screen = sgx_drm_screen_create_renderonly(ro->gpu_fd, ro, config);
  #endif
        }
  
 diff --git a/src/loader/loader.c b/src/loader/loader.c
-index fcaa6be..dfe7c93 100644
+index fcaa6be..48727c1 100644
 --- a/src/loader/loader.c
 +++ b/src/loader/loader.c
 @@ -26,6 +26,7 @@
@@ -267,22 +283,15 @@ index fcaa6be..dfe7c93 100644
           for (j = 0; j < n_drivers; j++) {
              /* Always try to open the render device with Zink if requested */
              if (strcmp("zink", drivers[j]) == 0 ||
-@@ -313,13 +324,286 @@ loader_open_render_node_platform_devices(const char * const drivers[],
+@@ -313,13 +324,340 @@ loader_open_render_node_platform_devices(const char * const drivers[],
     return result;
  }
  
-+/**
-+ * Find the render node of a device whose parent is \p parent (a resolved
-+ * sysfs path): a render-only GPU that a display driver creates as a device
-+ * of its own, as gma500 does for the SGX on an auxiliary device of its PCI
-+ * function.  libdrm's device list leaves out devices on the auxiliary bus,
-+ * so this reads \p sysfs_drm (/sys/class/drm) directly.
-+ *
-+ * \p name gets the node's name (renderD128); the lowest numbered one wins.
-+ */
-+bool
-+loader_find_child_render_node(const char *sysfs_drm, const char *parent,
-+                              char *name, size_t size)
++/* The lowest numbered render node in sysfs_drm whose device's parent is
++ * parent, other than the device exclude (resolved sysfs paths). */
++static bool
++find_render_node(const char *sysfs_drm, const char *parent,
++                 const char *exclude, char *name, size_t size)
 +{
 +   char path[PATH_MAX], real[PATH_MAX];
 +   struct dirent *ent;
@@ -297,6 +306,11 @@ index fcaa6be..dfe7c93 100644
 +      if (strncmp(ent->d_name, "renderD", 7) != 0)
 +         continue;
 +      n = strtol(ent->d_name + 7, NULL, 10);
++      if (exclude) {
++         snprintf(path, sizeof(path), "%s/%s/device", sysfs_drm, ent->d_name);
++         if (!realpath(path, real) || strcmp(real, exclude) == 0)
++            continue;
++      }
 +      snprintf(path, sizeof(path), "%s/%s/device/..", sysfs_drm, ent->d_name);
 +      if (!realpath(path, real) || strcmp(real, parent) != 0)
 +         continue;
@@ -310,16 +324,46 @@ index fcaa6be..dfe7c93 100644
 +}
 +
 +/**
-+ * Open the render node of a child device of \p kms_fd's device
-+ * (loader_find_child_render_node) when its kernel driver is one of
-+ * \p drivers.  Returns the fd, or -1.
++ * Find the render node of a device whose parent is \p parent (a resolved
++ * sysfs path): a render-only GPU that a display driver creates as a device
++ * of its own, as gma500 does for the SGX on an auxiliary device of its PCI
++ * function.  libdrm's device list leaves out devices on the auxiliary bus,
++ * so this reads \p sysfs_drm (/sys/class/drm) directly.
++ *
++ * \p name gets the node's name (renderD128); the lowest numbered one wins.
 + */
-+int
-+loader_open_child_render_node(int kms_fd, const char * const drivers[],
-+                              unsigned int n_drivers)
++bool
++loader_find_child_render_node(const char *sysfs_drm, const char *parent,
++                              char *name, size_t size)
++{
++   return find_render_node(sysfs_drm, parent, NULL, name, size);
++}
++
++/**
++ * Find the render node of another device with the same parent as \p dev (a
++ * resolved sysfs path): a render-only GPU that is a PCI function of its own
++ * on the display's bus, as the SGX545 is beside the CE5300's display
++ * controller.  \p name gets the node's name; the lowest numbered one wins.
++ */
++bool
++loader_find_sibling_render_node(const char *sysfs_drm, const char *dev,
++                                char *name, size_t size)
++{
++   char path[PATH_MAX], parent[PATH_MAX];
++
++   snprintf(path, sizeof(path), "%s/..", dev);
++   return realpath(path, parent) &&
++          find_render_node(sysfs_drm, parent, dev, name, size);
++}
++
++/* The render node a find_*_render_node gives for kms_fd's device, opened
++ * when its kernel driver is one of drivers; or -1. */
++static int
++open_related_render_node(int kms_fd, const char * const drivers[],
++                         unsigned int n_drivers, bool sibling)
 +{
 +#ifdef __linux__
-+   char path[PATH_MAX], parent[PATH_MAX], name[32];
++   char path[PATH_MAX], dev[PATH_MAX], name[32];
 +   drmVersionPtr version;
 +   struct stat st;
 +   bool found = false;
@@ -329,9 +373,11 @@ index fcaa6be..dfe7c93 100644
 +      return -1;
 +   snprintf(path, sizeof(path), "/sys/dev/char/%u:%u/device",
 +            major(st.st_rdev), minor(st.st_rdev));
-+   if (!realpath(path, parent) ||
-+       !loader_find_child_render_node("/sys/class/drm", parent, name,
-+                                      sizeof(name)))
++   if (!realpath(path, dev) ||
++       !(sibling ? loader_find_sibling_render_node("/sys/class/drm", dev, name,
++                                                   sizeof(name))
++                 : loader_find_child_render_node("/sys/class/drm", dev, name,
++                                                 sizeof(name))))
 +      return -1;
 +   snprintf(path, sizeof(path), "%s/%s", DRM_DIR_NAME, name);
 +   fd = loader_open_device(path);
@@ -349,6 +395,30 @@ index fcaa6be..dfe7c93 100644
 +#else
 +   return -1;
 +#endif
++}
++
++/**
++ * Open the render node of a child device of \p kms_fd's device
++ * (loader_find_child_render_node) when its kernel driver is one of
++ * \p drivers.  Returns the fd, or -1.
++ */
++int
++loader_open_child_render_node(int kms_fd, const char * const drivers[],
++                              unsigned int n_drivers)
++{
++   return open_related_render_node(kms_fd, drivers, n_drivers, false);
++}
++
++/**
++ * Open the render node of a sibling device of \p kms_fd's device
++ * (loader_find_sibling_render_node) when its kernel driver is one of
++ * \p drivers.  Returns the fd, or -1.
++ */
++int
++loader_open_sibling_render_node(int kms_fd, const char * const drivers[],
++                                unsigned int n_drivers)
++{
++   return open_related_render_node(kms_fd, drivers, n_drivers, true);
 +}
 +
 +#ifdef __linux__
@@ -555,7 +625,7 @@ index fcaa6be..dfe7c93 100644
        return false;
  
     ret = (dev_ptr->available_nodes & (1 << DRM_NODE_RENDER));
-@@ -470,7 +754,7 @@ static char *drm_get_id_path_tag_for_fd(int fd)
+@@ -470,7 +808,7 @@ static char *drm_get_id_path_tag_for_fd(int fd)
     drmDevicePtr device;
     char *tag;
  
@@ -564,7 +634,7 @@ index fcaa6be..dfe7c93 100644
         return NULL;
  
     tag = drm_construct_id_path_tag(device);
-@@ -534,7 +818,7 @@ bool loader_get_user_preferred_fd(int *fd_render_gpu, int *original_fd)
+@@ -534,7 +872,7 @@ bool loader_get_user_preferred_fd(int *fd_render_gpu, int *original_fd)
     if (default_tag == NULL)
        goto err;
  
@@ -573,7 +643,7 @@ index fcaa6be..dfe7c93 100644
     if (num_devices <= 0)
        goto err;
  
-@@ -681,7 +965,7 @@ drm_get_pci_id_for_fd(int fd, int *vendor_id, int *chip_id)
+@@ -681,7 +1019,7 @@ drm_get_pci_id_for_fd(int fd, int *vendor_id, int *chip_id)
  {
     drmDevicePtr device;
  
@@ -583,10 +653,10 @@ index fcaa6be..dfe7c93 100644
        return false;
     }
 diff --git a/src/loader/loader.h b/src/loader/loader.h
-index 6748cb5..eb66a52 100644
+index 6748cb5..3e957ca 100644
 --- a/src/loader/loader.h
 +++ b/src/loader/loader.h
-@@ -53,6 +53,35 @@ loader_open_render_node_platform_devices(const char * const drivers[],
+@@ -53,6 +53,43 @@ loader_open_render_node_platform_devices(const char * const drivers[],
                                           unsigned int n_drivers,
                                           unsigned int *n_devices);
  
@@ -597,6 +667,14 @@ index 6748cb5..eb66a52 100644
 +int
 +loader_open_child_render_node(int kms_fd, const char * const drivers[],
 +                              unsigned int n_drivers);
++
++bool
++loader_find_sibling_render_node(const char *sysfs_drm, const char *dev,
++                                char *name, size_t size);
++
++int
++loader_open_sibling_render_node(int kms_fd, const char * const drivers[],
++                                unsigned int n_drivers);
 +
 +struct _drmDevice;
 +
@@ -885,17 +963,19 @@ index 0000000..a12f0f0
 +}
 diff --git a/src/loader/tests/child_render_node_test.c b/src/loader/tests/child_render_node_test.c
 new file mode 100644
-index 0000000..8bc0155
+index 0000000..367610e
 --- /dev/null
 +++ b/src/loader/tests/child_render_node_test.c
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,163 @@
 +/*
 + * Copyright © 2026 Joseph Telaak
 + * SPDX-License-Identifier: MIT
 + *
 + * loader_find_child_render_node on fake sysfs trees: a render node on an
 + * auxiliary device of the display's PCI function is found, render nodes of
-+ * other devices are not.
++ * other devices are not.  loader_find_sibling_render_node: a render node of
++ * another PCI function on the display's bus is found (the CE5300), the
++ * display's own and other buses' are not.
 + */
 +
 +#include <limits.h>
@@ -954,23 +1034,38 @@ index 0000000..8bc0155
 +}
 +
 +static void
-+expect(const char *rel_parent, const char *want)
++check(const char *rel_dev, bool sibling, const char *want)
 +{
-+   char parent[PATH_MAX], p[PATH_MAX], name[32] = "";
++   char dev[PATH_MAX], p[PATH_MAX], name[32] = "";
 +   bool found;
 +
-+   snprintf(p, sizeof(p), "%s/%s", root, rel_parent);
-+   if (!realpath(p, parent)) {
++   snprintf(p, sizeof(p), "%s/%s", root, rel_dev);
++   if (!realpath(p, dev)) {
 +      perror(p);
 +      exit(1);
 +   }
 +   snprintf(p, sizeof(p), "%s/class/drm", root);
-+   found = loader_find_child_render_node(p, parent, name, sizeof(name));
++   found = sibling
++              ? loader_find_sibling_render_node(p, dev, name, sizeof(name))
++              : loader_find_child_render_node(p, dev, name, sizeof(name));
 +   if (want ? !found || strcmp(name, want) != 0 : found) {
-+      fprintf(stderr, "%s: got %s, want %s\n", rel_parent,
++      fprintf(stderr, "%s %s: got %s, want %s\n",
++              sibling ? "sibling of" : "child of", rel_dev,
 +              found ? name : "none", want ? want : "none");
 +      failures++;
 +   }
++}
++
++static void
++expect(const char *rel_parent, const char *want)
++{
++   check(rel_parent, false, want);
++}
++
++static void
++expect_sibling(const char *rel_dev, const char *want)
++{
++   check(rel_dev, true, want);
 +}
 +
 +int
@@ -1008,7 +1103,30 @@ index 0000000..8bc0155
 +   node("devices/pci0000:00/0000:00:02.0/third.0", "renderD130");
 +   expect(gma, "renderD129");
 +
++   /* the CE5300: the display controller (01:08.0, KMS only) and the SGX
++    * (01:02.0) are PCI functions on the bus behind one bridge */
++   const char *vdc = "devices/pci0000:00/0000:00:01.0/0000:01:08.0";
++   const char *sgx = "devices/pci0000:00/0000:00:01.0/0000:01:02.0";
++
++   node(vdc, "card4");
++   node(sgx, "card5");
++   node(sgx, "renderD140");
++   expect_sibling(vdc, "renderD140");
++   /* nothing is a child of the display, and the SGX's own node isn't its
++    * sibling */
++   expect(vdc, NULL);
++   expect_sibling(sgx, NULL);
++   /* a render node on another bus: not the display's sibling */
++   node("devices/pci0000:00/0000:00:1c.0/0000:02:00.0", "renderD141");
++   expect_sibling(vdc, "renderD140");
++   /* a display with a render node of its own beside the SGX: the SGX's */
++   node(vdc, "renderD139");
++   expect_sibling(vdc, "renderD140");
++   /* a platform display has no PCI siblings with render nodes */
++   expect_sibling(plat, NULL);
++
 +   if (!failures)
-+      printf("loader_find_child_render_node: all passed\n");
++      printf("loader_find_child_render_node, "
++             "loader_find_sibling_render_node: all passed\n");
 +   return failures != 0;
 +}

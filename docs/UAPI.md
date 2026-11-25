@@ -140,6 +140,18 @@ damage on the jobs that draw into it, usually a few KB. An entry for an object t
 an import (our own objects are write-combined, and a dma-buf of this device imports as the
 original object) is checked and flushes nothing.
 
+An import whose exporter maps it write-combined or uncached flushes nothing either, after
+its import-time write-back. At import the kernel reads the cache bits of every PTE of the
+exporter's vmap (`lookup_address()`), and only WC, UC- or UC on every 4 KiB page counts.
+x86 doesn't allow one page two memory types (PAT), so such an exporter's other mappings are
+uncached too, and no CPU cache can hold a line of the object. gma500's exports on Cedarview
+are like this (its pages are set WC, and its vmap is WC). Skipping their flushes is worth
+about 11% in a CPU-bound game at 1024x600, from 46 to 51 fps on an N2600 (issue #5): the back
+buffer's 2.4 MB was flushed before and after every frame. A cached exporter (GEM shmem,
+udmabuf, a DMA helper object) keeps the flushes. Nothing in dma-buf states the exporter's
+CPU caching, and i915 on non-LLC Atoms flushes an import once when it maps it and never
+again. This check is narrower than that: cacheable imports still flush around every job.
+
 **Sync is explicit** (D6, M5): a job's fences are its `sync_ops`, and nothing is added to a
 shared object's reservation. Implicit sync with other drivers goes through the dma-buf:
 `DMA_BUF_IOCTL_EXPORT_SYNC_FILE` for what a job must wait for, and the job's out-fence

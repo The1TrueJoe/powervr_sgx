@@ -274,6 +274,7 @@ static void
 sgx_bind_blend_state(struct pipe_context *pctx, void *hwcso)
 {
    sgx_context(pctx)->blend = hwcso;
+   sgx_context(pctx)->fs_gen++;
 }
 
 static void *
@@ -375,6 +376,7 @@ sgx_set_framebuffer_state(struct pipe_context *pctx,
    struct sgx_context *ctx = sgx_context(pctx);
 
    util_copy_framebuffer_state(&ctx->framebuffer, fb);
+   ctx->fs_gen++;
    /* depth only: a colour buffer of the context's own to render into
     * (begin_frame), at least the framebuffer's size, with the depth buffer's
     * samples.  Made here, not in begin_frame, which runs with the screen
@@ -431,6 +433,7 @@ sgx_set_blend_color(struct pipe_context *pctx,
                     const struct pipe_blend_color *color)
 {
    sgx_context(pctx)->blend_color = *color;
+   sgx_context(pctx)->fs_gen++;
 }
 
 static void
@@ -461,10 +464,13 @@ static void *
 sgx_create_sampler_state(struct pipe_context *pctx,
                          const struct pipe_sampler_state *cso)
 {
-   struct pipe_sampler_state *so = CALLOC_STRUCT(pipe_sampler_state);
+   static uint32_t next_id;
+   struct sgx_sampler *so = CALLOC_STRUCT(sgx_sampler);
 
-   if (so)
-      *so = *cso;
+   if (so) {
+      so->base = *cso;
+      so->id = p_atomic_inc_return(&next_id);
+   }
    return so;
 }
 
@@ -473,18 +479,27 @@ sgx_bind_sampler_states(struct pipe_context *pctx, mesa_shader_stage shader,
                         unsigned start, unsigned nr, void **hwcso)
 {
    struct sgx_context *ctx = sgx_context(pctx);
+   struct pipe_sampler_state **s =
+      shader == MESA_SHADER_FRAGMENT ? ctx->samplers
+      : shader == MESA_SHADER_VERTEX ? ctx->vs_samplers
+                                     : NULL;
 
-   if (shader != MESA_SHADER_FRAGMENT)
+   if (!s)
       return;
+   if (shader == MESA_SHADER_FRAGMENT)
+      ctx->fs_gen++;
+   else
+      ctx->vs_gen++;
    for (unsigned i = 0; i < nr && start + i < PIPE_MAX_SAMPLERS; i++)
-      ctx->samplers[start + i] = hwcso ? hwcso[i] : NULL;
+      s[start + i] = hwcso ? hwcso[i] : NULL;
 }
 
 static struct pipe_sampler_view *
 sgx_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                         const struct pipe_sampler_view *cso)
 {
-   struct pipe_sampler_view *so = CALLOC_STRUCT(pipe_sampler_view);
+   struct sgx_view *v = CALLOC_STRUCT(sgx_view);
+   struct pipe_sampler_view *so = v ? &v->base : NULL;
 
    if (!so)
       return NULL;
@@ -511,16 +526,30 @@ sgx_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
                       struct pipe_sampler_view **views)
 {
    struct sgx_context *ctx = sgx_context(pctx);
+   struct pipe_sampler_view **v = shader == MESA_SHADER_FRAGMENT ? ctx->views
+                                  : shader == MESA_SHADER_VERTEX ? ctx->vs_views
+                                                                 : NULL;
 
-   if (shader != MESA_SHADER_FRAGMENT)
+   if (!v)
       return;
+   if (shader == MESA_SHADER_FRAGMENT)
+      ctx->fs_gen++;
+   else
+      ctx->vs_gen++;
    for (unsigned i = 0; i < nr + unbind_num_trailing_slots; i++) {
       unsigned s = start + i;
 
       if (s < PIPE_MAX_SHADER_SAMPLER_VIEWS)
-         pipe_sampler_view_reference(&ctx->views[s],
-                                     i < nr && views ? views[i] : NULL);
+         pipe_sampler_view_reference(&v[s], i < nr && views ? views[i] : NULL);
    }
+   /* one past the highest bound (what a draw looks through) */
+   unsigned *n = shader == MESA_SHADER_FRAGMENT ? &ctx->n_views : &ctx->n_vs_views;
+   unsigned top = MIN2(MAX2(*n, start + nr + unbind_num_trailing_slots),
+                       PIPE_MAX_SHADER_SAMPLER_VIEWS);
+
+   while (top && !v[top - 1])
+      top--;
+   *n = top;
 }
 
 static void
@@ -528,10 +557,34 @@ sgx_texture_barrier(struct pipe_context *pctx, unsigned flags)
 {
 }
 
-/* queries: none of GLES2's need the GPU yet */
+/*
+ * Queries.  Occlusion queries (SGX_DEBUG=occlusion, docs/GL3.md H5): no
+ * counter is known in the hardware, so while one counts, each draw's
+ * fragment program stores 1 to the query's slot from every pixel it shades
+ * (sgxws_blend.visible), past the depth and stencil tests and a discard, in
+ * a translucent pass, which shades in submission order: a pixel a later
+ * draw hides has still counted.  ANY_SAMPLES_PASSED is exact; SAMPLES_PASSED
+ * gets 1 for any number.  The other queries return 0.
+ */
+#define SGX_QUERY_SLOTS 4096
+
 struct sgx_query {
    unsigned type;
+   unsigned slot; /* its slot in ctx->query_bo since its last begin */
+   /* the frame its result waits for: the last it was drawn in, or (results
+    * come in order) the last an earlier query was */
+   uint32_t seq;
+   bool pending, drawn;
 };
+
+static bool
+occlusion(unsigned type)
+{
+   return (sgx_drv_debug & SGX_DEBUG_OCCLUSION) &&
+          (type == PIPE_QUERY_OCCLUSION_COUNTER ||
+           type == PIPE_QUERY_OCCLUSION_PREDICATE ||
+           type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE);
+}
 
 static struct pipe_query *
 sgx_create_query(struct pipe_context *pctx, unsigned query_type, unsigned index)
@@ -546,26 +599,108 @@ sgx_create_query(struct pipe_context *pctx, unsigned query_type, unsigned index)
 static void
 sgx_destroy_query(struct pipe_context *pctx, struct pipe_query *q)
 {
+   struct sgx_context *ctx = sgx_context(pctx);
+
+   if (ctx->occlusion == (struct sgx_query *)q)
+      ctx->occlusion = NULL;
    FREE(q);
 }
 
 static bool
-sgx_begin_end_query(struct pipe_context *pctx, struct pipe_query *q)
+sgx_begin_query(struct pipe_context *pctx, struct pipe_query *pq)
 {
+   struct sgx_context *ctx = sgx_context(pctx);
+   struct sgx_screen *screen = sgx_screen(pctx->screen);
+   struct sgx_query *q = (struct sgx_query *)pq;
+
+   if (!occlusion(q->type) || !ctx->hw)
+      return true;
+   if (!sgxws_bo_valid(&ctx->query_bo)) {
+      int e;
+
+      ctx->query_seq = calloc(SGX_QUERY_SLOTS, sizeof(*ctx->query_seq));
+      if (!ctx->query_seq)
+         return false;
+      simple_mtx_lock(&screen->lock);
+      e = sgxws_bo_alloc(screen->dev, &ctx->query_bo, SGXWS_MEM_VERTEX,
+                         SGX_QUERY_SLOTS * 4, 0x1000);
+      simple_mtx_unlock(&screen->lock);
+      if (e)
+         return false;
+   }
+   q->slot = ctx->query_next++ % SGX_QUERY_SLOTS;
+   /* a slot a frame in flight may still store to: that frame first */
+   if (sgxws_seq_after(ctx->query_seq[q->slot], sgxws_done_seq(ctx->hw)))
+      sgx_finish(ctx);
+   ctx->query_bo.map[q->slot] = 0;
+   q->pending = ctx->query_pending;
+   q->seq = ctx->query_last;
+   q->drawn = false;
+   ctx->occlusion = q;
    return true;
 }
 
 static bool
-sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *q, bool wait,
-                     union pipe_query_result *result)
+sgx_end_query(struct pipe_context *pctx, struct pipe_query *q)
 {
-   memset(result, 0, sizeof(*result));
+   struct sgx_context *ctx = sgx_context(pctx);
+
+   if (ctx->occlusion == (struct sgx_query *)q)
+      ctx->occlusion = NULL;
    return true;
 }
 
+uint32_t
+sgx_query_va(const struct sgx_context *ctx)
+{
+   if (!ctx->occlusion || ctx->queries_off)
+      return 0;
+   return ctx->query_bo.va + ctx->occlusion->slot * 4 - 4;
+}
+
+void
+sgx_query_drawn(struct sgx_context *ctx)
+{
+   struct sgx_query *q = ctx->occlusion;
+
+   q->seq = ctx->query_seq[q->slot] = ctx->query_last =
+      sgxws_next_seq(ctx->hw);
+   q->pending = q->drawn = ctx->query_pending = true;
+   sgxws_use_bo(ctx->hw, &ctx->query_bo, true);
+}
+
+static bool
+sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *pq,
+                     bool wait, union pipe_query_result *result)
+{
+   struct sgx_context *ctx = sgx_context(pctx);
+   struct sgx_query *q = (struct sgx_query *)pq;
+   uint32_t v;
+
+   memset(result, 0, sizeof(*result));
+   if (!occlusion(q->type) || !q->pending)
+      return true;
+   if (sgxws_seq_after(q->seq, sgxws_done_seq(ctx->hw))) {
+      /* its frame: still recorded, or in flight */
+      if (q->seq == sgxws_next_seq(ctx->hw))
+         sgx_flush_frame(ctx);
+      if (!wait)
+         return false;
+      sgx_finish(ctx);
+   }
+   v = q->drawn ? ctx->query_bo.map[q->slot] : 0;
+   if (q->type == PIPE_QUERY_OCCLUSION_COUNTER)
+      result->u64 = v;
+   else
+      result->b = v != 0;
+   return true;
+}
+
+/* st turns queries off around its own draws (blits, util_blitter) */
 static void
 sgx_set_active_query_state(struct pipe_context *pctx, bool enable)
 {
+   sgx_context(pctx)->queries_off = !enable;
 }
 
 /* copies on the CPU: textures and buffers are CPU-visible, render targets are
@@ -842,11 +977,44 @@ sgx_blit_zs(struct pipe_context *pctx, const struct pipe_blit_info *info)
    return true;
 }
 
+/* The colour of a blit out of a 4x buffer on the GPU: the buffer's memory is
+ * a one-sample image of the resolved pixels, so the blitter samples it as
+ * one, at any scale or format it draws.  The copy this replaces mapped the
+ * buffer on the CPU, waiting for the render and reading it back out of
+ * write-combined memory: about 21 ms a frame at 1024x600 (issue #43).
+ *
+ * The resource itself is presented as one-sample for the blit's length, not a
+ * copy of it: the draw marks what it samples (use_seq, the render's buffer
+ * list) on the resource it sees, and a later write to the 4x buffer must
+ * wait for this read.  Its render is flushed first, so no frame records
+ * into it while it reads as one-sample. */
+static bool
+sgx_blit_resolve_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   struct pipe_resource *src = info->src.resource;
+   unsigned samples = src->nr_samples, storage = src->nr_storage_samples;
+   bool ok;
+
+   if (sgx_drv_debug & SGX_DEBUG_CPU_RESOLVE)
+      return false;
+   sgx_flush_resource_writes(sgx_context(pctx), sgx_resource(src));
+   src->nr_samples = 0;
+   src->nr_storage_samples = 0;
+   ok = sgx_blit_gpu(pctx, info);
+   src->nr_samples = samples;
+   src->nr_storage_samples = storage;
+   if (ok)
+      sgx_context(pctx)->stats.blit_gpu++;
+   return ok;
+}
+
 /* A blit out of a 4x colour buffer: its memory holds the resolved pixels
  * (the PBE resolves each tile as it stores it, sgx_draw.c begin_frame), so
- * the resolve is a copy; a scaled or converting one copies into a
- * one-sample texture first and blits from that.  Depth and stencil go
- * through the CPU (sgx_blit_zs), from sample 0 of the ZLS buffer. */
+ * the resolve is a GPU blit from them (sgx_blit_resolve_gpu).  What that
+ * refuses (a scissored blit, a format the TPU can't sample) is a CPU copy;
+ * a scaled or converting one copies into a one-sample texture first and
+ * blits from that.  Depth and stencil go through the CPU (sgx_blit_zs),
+ * from sample 0 of the ZLS buffer. */
 static bool
 sgx_blit_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
@@ -864,6 +1032,8 @@ sgx_blit_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
       pctx->blit(pctx, &b);
       return true;
    }
+   if (sgx_blit_resolve_gpu(pctx, info))
+      return true;
    if (box.width < 0) {
       box.x += box.width;
       box.width = -box.width;
@@ -905,6 +1075,100 @@ sgx_blit_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
    pctx->blit(pctx, &b);
    pipe_resource_reference(&tmp, NULL);
    return true;
+}
+
+/* A blit of boxes more than a layer deep on the CPU: a volume's mip level
+ * from the one before (util_gen_mipmap's glGenerateMipmap, two slices into
+ * one) and an array's layers.  Nearest, or LINEAR in each axis the blit
+ * scales (in z too: a 3D level's eight taps); not mirrored. */
+static bool
+sgx_blit_cpu_box(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   const struct pipe_box *sb = &info->src.box, *db = &info->dst.box;
+   enum pipe_format sf = info->src.format, df = info->dst.format;
+   struct pipe_transfer *st, *dt;
+   uint8_t *src, *dst;
+   int sw = sb->width, sh = sb->height, sd = sb->depth, dw = db->width,
+       dh = db->height, dd = db->depth;
+
+   /* every channel of a texel is written: a partial colour mask isn't
+    * honoured here, so such a blit is refused */
+   if (info->mask != PIPE_MASK_RGBA)
+      return false;
+   if (info->scissor_enable || info->render_condition_enable ||
+       info->alpha_blend || info->num_window_rectangles || sw <= 0 ||
+       sh <= 0 || sd <= 0 || dw <= 0 || dh <= 0 || dd <= 0 ||
+       util_format_is_depth_or_stencil(sf) ||
+       util_format_is_pure_integer(sf) ||
+       !util_format_unpack_description(sf)->unpack_rgba ||
+       !util_format_pack_description(df)->pack_rgba_float)
+      return false;
+   src = pctx->texture_map(pctx, info->src.resource, info->src.level,
+                           PIPE_MAP_READ, sb, &st);
+   if (!src)
+      return false;
+   dst = pctx->texture_map(pctx, info->dst.resource, info->dst.level,
+                           PIPE_MAP_WRITE, db, &dt);
+   if (!dst) {
+      pipe_texture_unmap(pctx, st);
+      return false;
+   }
+   unsigned sbpp = util_format_get_blocksize(sf);
+   bool lin = info->filter == PIPE_TEX_FILTER_LINEAR;
+   bool lx = lin && sw != dw, ly = lin && sh != dh, lz = lin && sd != dd;
+   float *row = malloc(sizeof(float) * 4 * dw);
+
+   for (int z = 0; z < dd && row; z++) {
+      for (int y = 0; y < dh; y++) {
+         for (int x = 0; x < dw; x++) {
+            float f[3] = {(x + 0.5f) * sw / dw - 0.5f,
+                          (y + 0.5f) * sh / dh - 0.5f,
+                          (z + 0.5f) * sd / dd - 0.5f};
+            const int n[3] = {sw, sh, sd};
+            const bool l[3] = {lx, ly, lz};
+            int i0[3], i1[3];
+            float a[3], c[4] = {0};
+
+            for (int k = 0; k < 3; k++) {
+               if (l[k]) {
+                  i0[k] = CLAMP((int)floorf(f[k]), 0, n[k] - 1);
+                  i1[k] = MIN2(i0[k] + 1, n[k] - 1);
+                  a[k] = CLAMP(f[k] - floorf(f[k]), 0.0f, 1.0f);
+                  if (f[k] < 0)
+                     a[k] = 0;
+               } else {
+                  i0[k] = i1[k] = CLAMP((int)floorf(f[k] + 0.5f), 0, n[k] - 1);
+                  a[k] = 0;
+               }
+            }
+            for (int t = 0; t < 8; t++) {
+               float w = 1, v[4];
+               int p[3];
+
+               for (int k = 0; k < 3; k++) {
+                  bool hi = t >> k & 1;
+                  w *= hi ? a[k] : 1 - a[k];
+                  p[k] = hi ? i1[k] : i0[k];
+               }
+               if (w == 0)
+                  continue;
+               util_format_unpack_rgba(sf, v,
+                                       src + p[2] * st->layer_stride +
+                                          p[1] * st->stride + p[0] * sbpp,
+                                       1);
+               for (int i = 0; i < 4; i++)
+                  c[i] += w * v[i];
+            }
+            memcpy(&row[4 * x], c, sizeof(c));
+         }
+         util_format_pack_rgba(df, dst + z * dt->layer_stride + y * dt->stride,
+                               row, dw);
+      }
+   }
+   free(row);
+   pipe_texture_unmap(pctx, st);
+   pipe_texture_unmap(pctx, dt);
+   return !!row;
 }
 
 static void
@@ -954,6 +1218,11 @@ sgx_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
               sgx_resource(info->dst.resource)->texture);
       return;
    }
+   if ((info->src.box.depth != 1 || info->dst.box.depth != 1) &&
+       sgx_blit_cpu_box(pctx, info)) {
+      ctx->stats.blit_cpu++;
+      return;
+   }
    fprintf(stderr, "sgx: blit %s -> %s not supported yet\n",
            util_format_short_name(info->src.format),
            util_format_short_name(info->dst.format));
@@ -997,8 +1266,8 @@ sgx_state_init(struct sgx_context *ctx)
    p->resource_release = u_default_resource_release;
    p->create_query = sgx_create_query;
    p->destroy_query = sgx_destroy_query;
-   p->begin_query = sgx_begin_end_query;
-   p->end_query = sgx_begin_end_query;
+   p->begin_query = sgx_begin_query;
+   p->end_query = sgx_end_query;
    p->get_query_result = sgx_get_query_result;
    p->set_active_query_state = sgx_set_active_query_state;
    p->resource_copy_region = sgx_resource_copy_region;

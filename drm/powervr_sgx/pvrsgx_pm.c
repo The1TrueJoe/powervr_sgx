@@ -5,6 +5,7 @@
 
 #include <linux/pm_runtime.h>
 
+#include "pvrsgx_ccb.h"
 #include "pvrsgx_device.h"
 #include "pvrsgx_drv.h"
 #include "pvrsgx_fw.h"
@@ -114,6 +115,13 @@ static int pvrsgx_runtime_suspend(struct device *dev)
 	mutex_lock(&sdev->reset_lock);
 	pvrsgx_fw_stop(sdev);
 	mutex_unlock(&sdev->reset_lock);
+	/*
+	 * Power-off resets the BIF: no cached walk can reach retired mappings.
+	 * Drain waiters here rather than waiting for unrelated future GPU work.
+	 * Outside the reset lock: the callbacks free buffers, which takes their
+	 * reservation locks. Nothing queues a waiter now that powered is clear.
+	 */
+	pvrsgx_ccb_inval_reap(sdev, true);
 	return 0;
 }
 
@@ -179,3 +187,7 @@ const struct dev_pm_ops pvrsgx_pm_ops = {
 	SYSTEM_SLEEP_PM_OPS(pvrsgx_suspend, pvrsgx_resume)
 	RUNTIME_PM_OPS(pvrsgx_runtime_suspend, pvrsgx_runtime_resume, NULL)
 };
+
+#if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_KUNIT_TEST)
+#include "tests/pvrsgx_pm_test.c"
+#endif

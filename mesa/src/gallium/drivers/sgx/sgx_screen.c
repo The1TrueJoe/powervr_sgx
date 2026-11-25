@@ -44,6 +44,10 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "every buffer's device copy a BO of its own, not small ones cut from shared slabs"},
    {"notexblits", SGX_DEBUG_NO_TEX_BLITS,
     "blits into a texture through the CPU, as 0.2.0 did (only render targets on the GPU)"},
+   {"nomerge", SGX_DEBUG_NO_MERGE,
+    "the draws of one call drawn one by one, not merged into one draw of their triangles or lines"},
+   {"cpuresolve", SGX_DEBUG_CPU_RESOLVE,
+    "a 4x colour buffer's resolve copied on the CPU, as 0.2.2 did, not blitted on the GPU"},
    {"nolazyscanout", SGX_DEBUG_NO_LAZY_SCANOUT,
     "scanout buffers on a dumb-buffer display (kmsro) are the display's from the start, not when a KMS handle is asked for"},
    {"nophasesplit", SGX_DEBUG_NO_PHASE_SPLIT,
@@ -64,6 +68,12 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "uniform blocks, 12 a stage of 64 KiB, each copied into the frame for a draw (ARB_uniform_buffer_object; with glsl130 only, as their offsets are integers): until that passes on a board"},
    {"zlsdump", SGX_DEBUG_ZLS_DUMP,
     "after every flushed render with a depth buffer, wait for it and write its ZLS buffer to /tmp/sgx-zls-<n>-<w>x<h>-<format>-s<samples>.bin (the layout test, docs/TEX.md section 7)"},
+   {"vtf", SGX_DEBUG_VTF,
+    "vertex texture fetch: 16 sampler units in the vertex stage (with glsl130 only, as the compiler samples in a vertex program with native integers): until it passes on a board"},
+   {"tex3d", SGX_DEBUG_TEX3D,
+    "3D textures up to 256 on a side, in the volume layout (docs/TEX.md section 14): until piglit and dEQP pass them"},
+   {"occlusion", SGX_DEBUG_OCCLUSION,
+    "occlusion queries: a store from every pixel a draw shades while one counts, in a translucent pass (ANY_SAMPLES_PASSED; SAMPLES_PASSED counts 1): until piglit and dEQP pass them"},
    {"flushrt", SGX_DEBUG_FLUSH_RT,
     "send SGX_FLUSH_HW_RENDER_TARGET at a target's destruction (hangs a srvinit microkernel)"},
    DEBUG_NAMED_VALUE_END};
@@ -123,6 +133,16 @@ sgx_ubos(void)
           (SGX_DEBUG_UBO | SGX_DEBUG_GLSL130);
 }
 
+/* vertex texture fetch: SGX_DEBUG=vtf, and only with the native integers (the
+ * compiler samples in a vertex program on that path, and the sizes come from
+ * its integer block) */
+bool
+sgx_vtf(void)
+{
+   return (sgx_drv_debug & (SGX_DEBUG_VTF | SGX_DEBUG_GLSL130)) ==
+          (SGX_DEBUG_VTF | SGX_DEBUG_GLSL130);
+}
+
 static void
 sgx_init_shader_caps(struct pipe_screen *pscreen)
 {
@@ -173,6 +193,13 @@ sgx_init_shader_caps(struct pipe_screen *pscreen)
       /* GLSL 1.30's integers (the compiler's native_integers): only with
        * SGX_DEBUG=glsl130 until the GL 3.0 work passes on a board */
       caps->integers = !!(sgx_drv_debug & SGX_DEBUG_GLSL130);
+      /* vertex texture fetch (SGX_DEBUG=vtf): the compiler's dependent smp at
+       * LOD 0 with its state in the vertex program's SA (ISA.md "Vertex
+       * texture fetch"); the 16 units docs/GL3.md lists, their sizes in the
+       * native-integer block (SGX_K_SIZE_UNITS) */
+      if (s == MESA_SHADER_VERTEX && sgx_vtf())
+         caps->max_texture_samplers = caps->max_sampler_views =
+            SGX_K_SIZE_UNITS;
       if (s == MESA_SHADER_FRAGMENT) {
          caps->max_texture_samplers = caps->max_sampler_views = f->samplers;
          /* mediump and lowp in 16 bits (F16 iteration, fmad16, F16/C10
@@ -216,11 +243,12 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
       MIN3(f->max_texture_size, screen->info->rt_max_width,
            screen->info->rt_max_height);
    caps->max_texture_cube_levels = f->max_cube_levels;
-   /* 3D textures of one texel, which sample as a 1x1 2D texture
-    * (sgx_program.c lower_tex_3d); the volume layout isn't the driver's yet
-    * (TEX.md section 14).  0 would refuse every glTexImage3D, and wined3d
-    * makes 1x1x1 ones at start-up for its unbound units (issue #5) */
-   caps->max_texture_3d_levels = 1;
+   /* 3D textures: volumes to 256 (ES 3.0's minimum, the ICD's size) with
+    * SGX_DEBUG=tex3d (sgx_tex_volume); otherwise one texel, sampled as a 1x1
+    * 2D texture (sgx_program.c lower_tex_3d).  0 would refuse every
+    * glTexImage3D, and wined3d makes 1x1x1 ones at start-up for its unbound
+    * units (issue #5) */
+   caps->max_texture_3d_levels = sgx_drv_debug & SGX_DEBUG_TEX3D ? 9 : 1;
    /* uniform blocks (SGX_DEBUG=ubo): 64 KiB, as most drivers have (GL 3.1
     * asks 16 KiB, and st takes ARB_uniform_buffer_object at no less; piglit's
     * generated blocks reach 32 KiB). Each is copied into the frame
@@ -229,6 +257,8 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    if (sgx_ubos())
       caps->max_constant_buffer_size = SGX_UBO_BYTES;
    caps->constant_buffer_offset_alignment = 16;
+   /* ARB_occlusion_query2, EXT_occlusion_query_boolean (sgx_state.c) */
+   caps->occlusion_query = !!(sgx_drv_debug & SGX_DEBUG_OCCLUSION);
    /* a pass a colour buffer (sgx_draw_vbo); SGX_DEBUG=nomrt for one */
    caps->max_render_targets = sgx_drv_debug & SGX_DEBUG_NO_MRT ? 1 : 4;
    /* each target's pass has its own colour epilogue (sgx_blend_rt): its own
@@ -236,6 +266,17 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
     * GL_ARB_draw_buffers_blend (Portal and other Source games use
     * glColorMaskIndexedEXT, issue #5) */
    caps->indep_blend_enable = caps->indep_blend_func = true;
+   /* textureLod (and textureGrad, lowered to it: sgx_lower_tex) in a fragment
+    * shader: a dependent smp with its LOD (ARB_shader_texture_lod) */
+   caps->fragment_shader_texture_lod = true;
+   /* OES_texture_half_float_linear: F16 textures are F32 planes the TPU
+    * doesn't filter; LINEAR at one level is four taps in the shader
+    * (sgx_tex_float_planes, lower_srgb_filter).  With them (glsl130) */
+   caps->texture_half_float_linear = !!(sgx_drv_debug & SGX_DEBUG_GLSL130);
+   /* GL_FRAMEBUFFER_SRGB: st hands over a linear view of the buffer when it's
+    * off, the sRGB one (encoded: lower_srgb_output) when on; with the sRGB
+    * render targets (SGX_DEBUG=glsl130) */
+   caps->dest_surface_srgb_control = !!(sgx_drv_debug & SGX_DEBUG_GLSL130);
    /* 1.30 with SGX_DEBUG=glsl130 (native integers, EXT_texture_integer),
     * for the GL 3.0 work's tests on a board */
    caps->glsl_feature_level = caps->glsl_feature_level_compatibility =
@@ -330,16 +371,24 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
           format != PIPE_FORMAT_R8_UINT && format != PIPE_FORMAT_R8_SINT &&
           format != PIPE_FORMAT_R8G8_UINT && format != PIPE_FORMAT_R8G8_SINT &&
           format != PIPE_FORMAT_R32_UINT && format != PIPE_FORMAT_R32_SINT &&
-          /* RG32 and RGBA32: a pass a channel into their planes; under
-           * SGX_DEBUG=glsl130 until that passes on a board */
+          /* RG32 and RGBA32: a pass a channel into their planes; and sRGB
+           * (encoded by the program, blended in it with integer ops:
+           * lower_srgb_output); under SGX_DEBUG=glsl130 until they pass on
+           * a board */
           !((sgx_drv_debug & SGX_DEBUG_GLSL130) &&
-            (format == PIPE_FORMAT_R32G32B32A32_UINT ||
+            (format == PIPE_FORMAT_R8G8B8A8_SRGB ||
+             format == PIPE_FORMAT_B8G8R8A8_SRGB ||
+             /* F32 planes, as RGBA32 (EXT_packed_float wants it rendered;
+              * sampled back converted, sgx_tex_f32_conv) */
+             format == PIPE_FORMAT_R11G11B10_FLOAT ||
+             format == PIPE_FORMAT_R32G32B32A32_UINT ||
              format == PIPE_FORMAT_R32G32B32A32_SINT ||
              format == PIPE_FORMAT_R32G32_UINT ||
              format == PIPE_FORMAT_R32G32_SINT)))
          return false;
       /* integer render targets aren't multisampled */
-      if (sample_count > 1 && util_format_is_pure_integer(format))
+      if (sample_count > 1 &&
+          (util_format_is_pure_integer(format) || sgx_tex_raw32(format)))
          return false;
    }
    if (usage & PIPE_BIND_DEPTH_STENCIL) {
@@ -347,7 +396,13 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
        * stored (no ZLS yet), so they are good within one render. */
       if (format != PIPE_FORMAT_Z16_UNORM &&
           format != PIPE_FORMAT_Z24X8_UNORM &&
-          format != PIPE_FORMAT_Z24_UNORM_S8_UINT)
+          format != PIPE_FORMAT_Z24_UNORM_S8_UINT &&
+          /* ARB_depth_buffer_float: the ISP and the ZLS keep every depth as
+           * float32 already, and the sampler reads it as F32 (sgx_tex_depth);
+           * the CPU copy keeps its own format */
+          !((sgx_drv_debug & SGX_DEBUG_GLSL130) &&
+            (format == PIPE_FORMAT_Z32_FLOAT ||
+             format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT)))
          return false;
    }
    if (usage & PIPE_BIND_VERTEX_BUFFER) {
@@ -369,6 +424,14 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    if ((usage & PIPE_BIND_SAMPLER_VIEW) && !sgx_tex_format(format) &&
        !(usage & PIPE_BIND_RENDER_TARGET))
       return false;
+   /* float and snorm textures (F32 planes, sgx_tex_float_planes; offset
+    * binary bytes, sgx_tex_snorm): with the GL 3.0 work, until they pass on
+    * a board */
+   if ((usage & PIPE_BIND_SAMPLER_VIEW) &&
+       (sgx_tex_float_planes(format) || sgx_tex_snorm(format)) &&
+       format != PIPE_FORMAT_R32_FLOAT &&
+       !(sgx_drv_debug & SGX_DEBUG_GLSL130))
+      return false;
    /* RG32 and RGBA32 are stored for the compiler's word-by-word fetches
     * (sgx_tex_raw32), which it doesn't do yet: not sampled until it does */
    if ((usage & PIPE_BIND_SAMPLER_VIEW) && sgx_tex_raw32(format) > 1 &&
@@ -385,9 +448,17 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
    case PIPE_TEXTURE_2D:
    case PIPE_TEXTURE_RECT:
    case PIPE_TEXTURE_CUBE:
-   /* one texel, kept as a 2D texture (max_texture_3d_levels) */
-   case PIPE_TEXTURE_3D:
       return true;
+   /* A volume holds 8-, 16- and 32-bit texels (sgx_tex_volume); without
+    * SGX_DEBUG=tex3d, one texel, kept as a 2D texture (max_texture_3d_levels).
+    * Render targets answer as a 2D texture's: st picks GL_RGB 565's and
+    * GL_RGBA 4444's format only among renderable ones, and checks a layer
+    * attached to a framebuffer as a 2D texture anyway (rendering into a
+    * volume's layer isn't done: TEX.md section 14) */
+   case PIPE_TEXTURE_3D:
+      return !(sgx_drv_debug & SGX_DEBUG_TEX3D) ||
+             (!(usage & PIPE_BIND_DEPTH_STENCIL) && !sgx_tex_word32(format) &&
+              !sgx_tex_raw32(format));
    default:
       return false;
    }

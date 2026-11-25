@@ -1,13 +1,7 @@
 # 2026-11-03: 17165 tests, Fail 150, Pass 16566, Skip 445, Warn 4
 # dEQP-GLES2 (VK-GL-CTS 4.6.8.0) on the CE5310 board (CE5300 SGX545), pbuffer 256x256 rgba8888d24s8: one full pass on um-re 5886029 (drive-deqp.py), 0 wedges, 0 recoveries; flakes: sgx-flakes-seen.txt
 
-# cube LOD bias (texture2D's bias argument fails the same way)
-dEQP-GLES2.functional.texture.mipmap.cube.bias.linear_linear,Fail
-dEQP-GLES2.functional.texture.mipmap.cube.bias.linear_nearest,Fail
-dEQP-GLES2.functional.texture.mipmap.cube.bias.nearest_linear,Fail
-dEQP-GLES2.functional.texture.mipmap.cube.bias.nearest_nearest,Fail
-
-# cube maps: NPOT faces (15x15, and the 63/39/51/47 of teximage2d_align): no cube layout for them, the DDK samples one linear face and fails every one; a few 16-bit and copied faces
+# cube maps: NPOT faces (15x15, and the 63/39/51/47 of teximage2d_align): no cube layout for them, the DDK samples one linear face and fails every one
 dEQP-GLES2.functional.texture.completeness.cube.npot_all_repeat,Fail
 dEQP-GLES2.functional.texture.completeness.cube.npot_mirrored_repeat,Fail
 dEQP-GLES2.functional.texture.completeness.cube.npot_s_repeat,Fail
@@ -42,10 +36,6 @@ dEQP-GLES2.functional.texture.size.cube.15x15_rgb888,Fail
 dEQP-GLES2.functional.texture.size.cube.15x15_rgba4444,Fail
 dEQP-GLES2.functional.texture.size.cube.15x15_rgba8888,Fail
 dEQP-GLES2.functional.texture.size.cube.16x16_l8_mipmap,Fail
-dEQP-GLES2.functional.texture.specification.basic_copytexsubimage2d.cube_rgb,Fail
-dEQP-GLES2.functional.texture.specification.basic_copytexsubimage2d.cube_rgba,Fail
-dEQP-GLES2.functional.texture.specification.basic_texsubimage2d.la88_cube,Fail
-dEQP-GLES2.functional.texture.specification.basic_texsubimage2d.rgba4444_cube,Fail
 dEQP-GLES2.functional.texture.specification.teximage2d_align.cube_l8_63_1,Fail
 dEQP-GLES2.functional.texture.specification.teximage2d_align.cube_l8_63_2,Fail
 dEQP-GLES2.functional.texture.specification.teximage2d_align.cube_l8_63_4,Fail

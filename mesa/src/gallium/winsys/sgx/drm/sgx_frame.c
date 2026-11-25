@@ -2873,6 +2873,12 @@ sgxws_upload_fs_split(struct sgxws_ctx *c, const uint64_t *code, unsigned n,
    return upload_fs(c, code, n, code1, n1, color_pa1, blend, fb, temps);
 }
 
+/* st.a.d sa<SGXWS_VISIBLE_SA>, #0, #1 [skipinv]: a store at sa6 + 4, from
+ * the pixels the program runs for, not the 2x2 quads' helpers */
+static_assert(SGXWS_VISIBLE_SA == 6, "the store's encoding");
+#define ST_VISIBLE_LO 0xa0018001u
+#define ST_VISIBLE_HI 0xf0870004u
+
 static uint32_t
 upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
           const uint64_t *code1, unsigned count1, unsigned color_pa,
@@ -2880,8 +2886,9 @@ upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
           unsigned temps)
 {
    int discard_pa = fb ? fb->discard_pa : -1, depth_pa = fb ? fb->depth_pa : -1;
-   uint32_t *w = malloc((count + count1 + 12) * 8), va, b[2];
+   uint32_t *w = malloc((count + count1 + 13) * 8), va, b[2];
    bool masked = blend && blend->wmask != 0xf;
+   bool visible = blend && blend->visible;
    unsigned n = 0;
 
    if (!w)
@@ -2925,6 +2932,8 @@ upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
       if (n & 1)
          put(w, &n, 0, 0xf8000140u); /* nop: phase 1 on 16 bytes */
       w[0] = n;                      /* relocated to an absolute pc */
+      if (visible)
+         put(w, &n, ST_VISIBLE_LO, ST_VISIBLE_HI);
       /* split: the colour's code runs here, only for the pixels that pass */
       if (code1)
          put_code(w, &n, code1, count1);
@@ -2943,6 +2952,8 @@ upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
       return va;
    }
    put(w, &n, 0, PHAS_HI | 0x700); /* phas.i #0, #0 [wait=7] */
+   if (visible)
+      put(w, &n, ST_VISIBLE_LO, ST_VISIBLE_HI);
    put_code(w, &n, code, count);
    if (blend && blend->blend)
       put_blend(w, &n, blend, color_pa, !masked, false);

@@ -147,17 +147,35 @@ struct sgx_pipe_shader {
    uint32_t not_bgra; /* units bound to a texture not sampled B, G, R, A
                          ordered (sgx_tex_bgra) */
    uint32_t depth;    /* units bound to a depth texture (sgx_tex_depth) */
+   uint32_t snorm;    /* units bound to an snorm texture, stored offset
+                         binary (sgx_tex_snorm, lower_snorm_texel) */
+   /* bit 2 * unit + axis (s 0, t 1): a strided F32 texture's REPEAT and
+    * MIRRORED_REPEAT axes, wrapped in the shader (lower_word32_wrap) */
+   uint32_t wrap_rep, wrap_mir;
    /* colour buffer 0 is an integer format (pack_int_outputs): 0 not, 1 one of
     * 8 bits a channel, 2 R32, 3 + c channel c's plane of RG32 / RGBA32 */
    uint8_t rt_int;
    /* MRT: 1 + the colour buffer this variant draws into, its DATA output
     * made output 0 (remap_outputs); 0 a single buffer */
    uint8_t rt_target;
+   /* colour buffer 0 is sRGB (lower_srgb_output): 0 not, 1 the colour
+    * encoded, 2 blended first, in linear, with the tile's colour decoded (as
+    * rt_blend and rt_blend_color say; the compiler's rt_packed), the sop2
+    * epilogue left out.  reads_tile: it does read the tile (pass type) */
+   uint8_t rt_srgb;
+   bool reads_tile;
+   struct pipe_rt_blend_state rt_blend; /* colormask 0: the epilogue's */
+   float rt_blend_color[4];             /* 0 unless a factor reads it */
    /* units bound to an RGBA32 / RG32 texture, read a plane at a time (the
     * compiler's tex_r32x4 / tex_r32x2) */
    uint32_t r32x4, r32x2;
    /* shadow samples: each unit's compare function (lower_shadow) */
    uint8_t compare[PIPE_MAX_SAMPLERS];
+   /* fragment: the units an implicit-LOD sample reads dependently
+    * (dep_lod_units, the base shader's), and of those the ones bound to a
+    * mipmapped view and sampler: this variant's samples there take their
+    * LOD from the coordinate's derivatives (lower_dep_lod) */
+   uint32_t dep_lod_units, dep_mip;
    struct sgx_pipe_shader *variants_srgb[8];
    unsigned next_variant_srgb;
 };
@@ -192,6 +210,23 @@ struct sgx_blend {
 
 struct vcache_chunk;
 
+/* a sampler state, with an id no other one gets (sgx_view's cache) */
+struct sgx_sampler {
+   struct pipe_sampler_state base;
+   uint32_t id;
+};
+
+/* a sampler view, with the texture state words (sgx_tex_words) the last
+ * draw that sampled it made: the same while the sampler and the texture's
+ * addresses are.  A draw made them again for every unit (Quake 3 switches
+ * textures between nearly all of its draws, among a few hundred views). */
+struct sgx_view {
+   struct pipe_sampler_view base;
+   uint32_t words_sampler, words_va, words_cube0_va;
+   bool words_valid;
+   uint32_t words[4];
+};
+
 struct sgx_context {
    struct pipe_context base;
 
@@ -215,6 +250,15 @@ struct sgx_context {
     * set_framebuffer_state to the framebuffer, with its depth buffer's
     * samples. */
    struct pipe_resource *dummy_cb;
+   /* occlusion queries (SGX_DEBUG=occlusion, sgx_state.c): the one counting
+    * (NULL when none is, or st has turned queries off around its own
+    * draws), and the slots their draws store to, one a begin, taken in turn
+    * (query_seq: the last frame each was drawn in; query_last: the last any
+    * was, once query_pending) */
+   struct sgx_query *occlusion;
+   bool queries_off, query_pending;
+   struct sgxws_bo query_bo;
+   uint32_t query_next, *query_seq, query_last;
    uint64_t rt_used[SGX_MAX_RTS], rt_clock;       /* when each was last taken */
    unsigned num_rts;
    struct sgx_resource *recording; /* the target of the frame being recorded */
@@ -226,7 +270,29 @@ struct sgx_context {
    unsigned rt_plane, recording_plane;
    bool rt_later_pass;
    /* MRT, a pass a colour buffer: the one this pass draws or clears into */
+   /* sgx_fs_for's and sgx_vs_for's last answers, good while the counter
+    * for what each reads holds: fs_gen (fragment views and samplers, the
+    * framebuffer, the blend state and colour), vs_gen (vertex views and
+    * samplers); both go up when any variant ends.  A draw looked them up
+    * again, texture key and all (Quake 3 and GoldSrc draw hundreds a frame;
+    * the vertex shader's rarely changes between them). */
+   uint32_t fs_gen, vs_gen;
+   struct {
+      uint32_t gen;
+      const void *fs;
+      unsigned rt_index, rt_plane;
+      void *out;
+   } fs_memo;
+   struct {
+      uint32_t gen;
+      const void *vs, *fs;
+      uint8_t vtx_fmt[16];
+      bool points;
+      void *out;
+   } vs_memo;
    unsigned rt_index;
+   /* one past the highest view bound to the fragment and vertex stages */
+   unsigned n_views, n_vs_views;
 
    struct pipe_framebuffer_state framebuffer;
    struct pipe_viewport_state viewport;
@@ -248,6 +314,9 @@ struct sgx_context {
    unsigned n_draw_ubos;
    struct pipe_sampler_state *samplers[PIPE_MAX_SAMPLERS]; /* fragment */
    struct pipe_sampler_view *views[PIPE_MAX_SHADER_SAMPLER_VIEWS]; /* fragment */
+   /* the vertex stage's (SGX_DEBUG=vtf: sgx_vtf) */
+   struct pipe_sampler_state *vs_samplers[PIPE_MAX_SAMPLERS];
+   struct pipe_sampler_view *vs_views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
 
    /* SGX_STATS=1: where the time goes, printed every 2 s */
    /* objects the frame being recorded has from clears (the stats tell a frame
@@ -309,6 +378,11 @@ struct pipe_context *sgx_context_create(struct pipe_screen *pscreen, void *priv,
                                         unsigned flags);
 
 void sgx_state_init(struct sgx_context *ctx);
+/* while an occlusion query counts: its slot's address less 4, for
+ * sa[SGXWS_VISIBLE_SA] (0 when none counts); and, once the draw is in the
+ * frame it renders in, the frame noted and the slots listed */
+uint32_t sgx_query_va(const struct sgx_context *ctx);
+void sgx_query_drawn(struct sgx_context *ctx);
 void sgx_draw_init(struct sgx_context *ctx);
 void sgx_draw_fini(struct sgx_context *ctx);
 void sgx_program_init(struct sgx_context *ctx);

@@ -1887,7 +1887,33 @@ source: pa, sa, r, or a hardware constant such as c52 = 1.0; **corpus**;
 **LOD read** `texture2DLod(s, uv, l)`: h8-9 = 2 and src2 = the LOD
 (**corpus**). Gradients (`h8-9 = 3`, what the vendor compiler emits for a
 sample inside non-uniform flow) take src2 = the first of the derivative
-registers (**corpus**, one case).
+registers (**corpus**, one case). A 2D one reads four registers from src2
+on: ds/dx, ds/dy, dt/dx, dt/dy, and takes its LOD from the longer of the
+two vectors (s, t)/dx and (s, t)/dy (**hardware**, `tools/isa/hwt_grad.py`
+on an 8x8 texture with its chain, each texel naming its level: one register
+of the four at 0.5 alone gives level 2, a fifth or sixth register nothing;
+r12 with r14, or r13 with r15, at 0.287 each give level 2, every other pair
+level 1). Which of x and y comes first doesn't show in an isotropic LOD.
+
+**On a cube map** (**hardware**, `tools/isa/hwt_cubegrad.py`: an 8x8 cube
+with its chains, every texel naming its face and level). `smp.3d.grad`
+returns the last level whatever r11-r27 hold, zeros included, so it
+isn't a gradient read we can use. `smp.2d.grad` with the cube's state
+words still picks the face from (x, y, z) and reads four registers from
+src2, r12-r15, and nothing after them. They act as the x and y derivatives
+of the direction, in the 2D form's order (dx/dx, dx/dy, dy/dx, dy/dy),
+taken as they are, with no projection onto the face. On +X only r14-r15
+change the level, on -Y only r12-r13, and on +Z all four; 0.5 gives level
+2 of 8 texels, as on a 2D texture, where the face's own derivative would
+be 0.25. The z derivatives can't be given. So neither form takes a cube's
+gradients the way GL defines them, and the driver computes a cube's LOD in
+the program.
+
+A dependent sample's implicit LOD is wrong in a quad its primitive covers
+only in part (**hardware**, `mesa/tests/sgx_deplod.c`: 128 of 4096 pixels
+against the PDS's sample, all on the quads where two triangles meet, with
+the helpers' coordinates right). The driver gives such a sample of a
+mipmapped texture its gradients from `fdsx` / `fdsy` (`lower_dep_lod`).
 
 **Vertex texture fetch** (**corpus**): the same smp with h8-9 = 2;
 `texture2D` in a vertex shader uses LOD c48 (0.0) since there are no
@@ -2623,7 +2649,7 @@ vendor driver; the open stack doesn't use the container.
 - The finalizer: one texture format gets `and dst, dst, #0x7fffffff` on the result → capture finalized programs across the texture formats and find which one.
 - The finalizer: unpack paths for s8, u16, s16, f16, f32 texel channels, `mov` for f32, c10 targets, formats 6/7 (`limm 0xffff8000`, test) → capture finalized programs for each texel format and result precision.
 - The finalizer: how the driver writes the texture-state table into SA registers at draw time → capture the secondary program / PDS DOUTD of a draw with a dependent read.
-- The texture-sample sequence: LOD reads, gradient operand layout (how many registers, which order) → hwt: an smp.2d.grad with known derivatives against a mipmapped texture, read the level chosen.
+- The texture-sample sequence: LOD reads (gradient operand layout: done, `hwt_grad.py`, above).
 - The texture-sample sequence: vertex texture fetch with LOD c48 and skipinv → hwt or open-stack vertex texture test on the CE5300 board.
 - Header: version other than 0x23 rejected → A/B: version 0x22.
 - Header: program type 2 = geometry → none on GLES2; leave unsupported.

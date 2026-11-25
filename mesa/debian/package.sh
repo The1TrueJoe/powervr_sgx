@@ -7,6 +7,7 @@
 # at build time). Each architecture brings its own ld.so.conf.d entry and glvnd
 # EGL vendor file (mesa/debian/etc.<arch>), so the two packages share only
 # /opt/sgx/share, which is the same in both: Multi-Arch: same, co-installable.
+# Neither needs the other: i386 alone serves an i386 system.
 # MESA_SGX_BREAKS, when set, is the control file's Breaks (a release's: the kernel
 # packages too old for its uAPI). Writes mesa-sgx_<version>_<arch>.deb here.
 set -eu
@@ -38,7 +39,8 @@ Description: Mesa with the sgx driver for the PowerVR SGX545
  OpenGL, OpenGL ES, EGL and GBM for the PowerVR SGX545 of Intel's
  Cedarview and CE5300 SoCs, under the powervr_sgx kernel driver.
  Installed in /opt/sgx and used ahead of Debian's Mesa. The i386 package
- is for 32-bit programs (games) on a 64-bit system, beside the amd64 one.
+ is for 32-bit programs (games) beside the amd64 one, or alone on an i386
+ system.
 CTL
 printf '#!/bin/sh\nset -e\nldconfig\n' > "$P/DEBIAN/postinst"
 cp "$P/DEBIAN/postinst" "$P/DEBIAN/postrm"

@@ -701,6 +701,17 @@ a running X server.
 The fragment secondary preamble isn't worth building for the desktop. The gradients
 (15-34 ops a program, above) are the only glamor programs it would help, and those are rare.
 
+## GoldSrc's immediate mode (CE5300 board, 2026-11-20)
+
+Counter-Strike 1.6's renderer draws every world face as its own `glBegin(GL_POLYGON)`.
+Mesa's vbo module hands the faces between two state changes to the driver as one call
+of several draws (about 4.6 a call with a texture switch every 6 faces). Each draw cost
+about 9 us of CPU and each call about 14 us of state setup. `mesa/tests/sgx_gl1bench`
+reproduces the frame. The draws of one call are now one draw of their triangles or
+lines (`merged_draw`, `SGX_DEBUG=nomerge` to compare). The bench goes from 24.4 to 30.5
+fps (33.2 with `nozerocopy`). Details and what is left:
+`docs/log/entries/2026-11-20-0150-goldsrc-draw-merge.md`.
+
 ## Kernel driver (powervr_sgx)
 
 What a job costs on the CPU side, from a submit to its fence, measured with the
