@@ -105,6 +105,33 @@ sgxws_bo_prepare_target(struct sgxws_dev *d, struct sgxws_bo *bo)
       d->kif->bo_prepare_target(d, bo);
 }
 
+bool
+sgxws_target_twiddled(const struct sgxws_target *t)
+{
+   return t->t1_layout == SGX_TEXSTATE_LAYOUT_TWIDDLED;
+}
+
+void
+sgxws_bo_cpu_written(struct sgxws_bo *bo)
+{
+   if (bo->impl)
+      bo->impl->cpu_dirty = true;
+}
+
+/* once a process: what the texture heap couldn't hold goes to the general
+ * heap */
+static void
+texture_heap_full(void)
+{
+   static bool said;
+
+   if (!said) {
+      said = true;
+      mesa_logw("sgx: the texture heap is full; sampled buffers go to the "
+                "general heap");
+   }
+}
+
 int
 sgxws_bo_alloc(struct sgxws_dev *d, struct sgxws_bo *bo, enum sgxws_mem mem,
                uint32_t size, uint32_t align)
@@ -122,16 +149,20 @@ sgxws_bo_alloc(struct sgxws_dev *d, struct sgxws_bo *bo, enum sgxws_mem mem,
              ? sgxws_bo_alloc_heap(d, bo, SGX_HEAP_TEXTURE, SGXWS_ATTRIBS_COLOR,
                                    size, align)
              : -ENOMEM;
-      if (e)
+      if (e) {
+         texture_heap_full();
          e = sgxws_bo_alloc_heap(d, bo, SGX_HEAP_GENERAL, SGXWS_ATTRIBS_COLOR,
                                  size, align);
+      }
       if (!e)
          sgxws_bo_prepare_target(d, bo);
       return e;
    case SGXWS_MEM_TEXTURE:
       e = sgxws_bo_alloc_heap(d, bo, SGX_HEAP_TEXTURE, 0x3, size, align);
-      if (e)
+      if (e) {
+         texture_heap_full();
          e = sgxws_bo_alloc_heap(d, bo, SGX_HEAP_GENERAL, 0x3, size, align);
+      }
       return e;
    case SGXWS_MEM_VERTEX:
       return sgxws_bo_alloc_heap(d, bo, SGX_HEAP_GENERAL, 0x1, size, align);
@@ -490,8 +521,8 @@ enum {
 /* MOVS (DOUT): r1 = DS0 pair row, r2 = DS1 pair row; selects 0 s1.lo, 1 s1.hi,
  * 2 s2.lo, 3 s2.hi */
 static uint32_t
-pds_movs(unsigned form, unsigned r1, unsigned r2, unsigned a, unsigned b,
-         unsigned c, unsigned d, enum sgx_pds_dout dest)
+pds_movs_encode(unsigned form, unsigned r1, unsigned r2, unsigned a, unsigned b,
+                unsigned c, unsigned d, enum sgx_pds_dout dest)
 {
    return sgx_pds_encode(&(struct sgx_pds_instr){
       .opc = SGX_PDS_OPC_MOVS,
@@ -503,6 +534,30 @@ pds_movs(unsigned form, unsigned r1, unsigned r2, unsigned a, unsigned b,
       .r2 = r2,
       .sel = {a, b, c, d},
    });
+}
+
+/* every draw's PDS programs are a few MOVS forms, so each thread keeps the
+ * words it encoded (the encoder walks the instruction description) */
+static uint32_t
+pds_movs(unsigned form, unsigned r1, unsigned r2, unsigned a, unsigned b,
+         unsigned c, unsigned d, enum sgx_pds_dout dest)
+{
+   static _Thread_local struct {
+      uint32_t key, word;
+   } cache[64];
+   uint32_t key;
+
+   if (form > 3 || r1 > 63 || r2 > 63 || (a | b | c | d) > 3 || dest > 15)
+      return pds_movs_encode(form, r1, r2, a, b, c, d, dest);
+   key = 1u << 31 | form << 24 | r1 << 18 | r2 << 12 | a << 10 | b << 8 |
+         c << 6 | d << 4 | dest;
+   unsigned h = (key ^ key >> 7 ^ key >> 13) & 63;
+
+   if (cache[h].key != key) {
+      cache[h].word = pds_movs_encode(form, r1, r2, a, b, c, d, dest);
+      cache[h].key = key;
+   }
+   return cache[h].word;
 }
 
 /* dst = src1 op src2: add, mul16, and, or, xor, op0xd.s1 */
@@ -811,9 +866,12 @@ sgxws_dev_create(int fd, const struct sgxws_dev_options *opts)
    d->flush_rt = opts->flush_rt;
    d->frame_gap_us = opts->frame_gap_us;
    d->state_always = opts->state_always;
-   /* four: the next frame records while this one renders (a game's frame is
-    * three renders); docs/PERF.md */
-   d->slots = opts->slots ? CLAMP(opts->slots, 2, SGXWS_MAX_SLOTS) : 4;
+   /* six: the next frame records while this one renders when a frame is
+    * up to four renders (a game's two or three, plus a recorder's blit and
+    * pack: Minecraft with capture went from 13 to 17 fps against four).
+    * Each slot is ~20 MB of rings per context; SGX_SLOTS overrides (2-8).
+    * docs/PERF.md */
+   d->slots = opts->slots ? CLAMP(opts->slots, 2, SGXWS_MAX_SLOTS) : 6;
    d->ta_split = d->kif->kick_ta ? opts->ta_split : 0;
    d->dry_run = opts->dry_run;
 
@@ -863,6 +921,36 @@ ctx_free(struct sgxws_ctx *c)
    c->dev->kif->ctx_fini(c);
    free(c);
 }
+
+/* TA terminate (VDM type 6, PDS.md "DOUTA"): DOUTA (0x2000, 0), 3 x
+ * (pa1, 0x100), then a state-emit task for the two attributes.  pa1 bounds
+ * the region the terminate closes; (tile columns - 1) << 16 | (32-pixel rows
+ * - 1) gives the DDK's 0x0016000e at 720x480 and covers every target tried.
+ * A terminate smaller than the target (0x0016000e closes 1440x960) leaves the
+ * tiles outside it unclosed: they are not drawn right, and the DPM counts
+ * their pages in use after the render, 82 of a 2048x1200 scene's 153 every
+ * render, until the TA's thresholds fire and the jobs time out
+ * (docs/STATE.md) */
+static uint32_t
+terminate_prog(struct sgxws_ctx *c, uint32_t pa1)
+{
+   struct pds t = {0};
+   uint32_t rows;
+
+   pds_d0(&t, 0, 0x2000);
+   pds_d0(&t, 1, sgx_pds_douta_ctrl(&(struct sgx_pds_douta){.reg = 0}));
+   pds_d0(&t, 2, pa1);
+   pds_d0(&t, 3, sgx_pds_douta_ctrl(&(struct sgx_pds_douta){.reg = 1}));
+   pds_d0(&t, 4, doutu_w0(c, c->state_emit[2], true, 0));
+   pds_d0(&t, 5, 0);
+   CODE(&t, pds_movs(MV, 0, 0x18, 0, 1, 2, 2, DOUTA));
+   for (int i = 0; i < 3; i++)
+      CODE(&t, pds_movs(MV, 1, 0x18, 0, 1, 2, 2, DOUTA));
+   CODE(&t, pds_movs(MV, 2, 0, 0, 1, 2, 2, DOUTU));
+   CODE(&t, pds_halt());
+   return pds_emit(&c->pds_vtx, &t, &rows);
+}
+
 
 struct sgxws_ctx *
 sgxws_ctx_create(struct sgxws_dev *d, int priority)
@@ -945,21 +1033,7 @@ sgxws_ctx_create(struct sgxws_dev *d, int priority)
    /* VDM state programs that every frame ends with */
    c->empty_state = pds_secondary(&c->pds_vtx, 0, 0,
                                   doutu_w0(c, c->empty_v, true, 0), 0, NULL);
-   /* TA terminate (VDM type 6, PDS.md "DOUTA"): DOUTA (0x2000, 0), 3 x
-    * (0x16000e, 0x100), then a state-emit task for the two attributes [D; the
-    * values' meaning G] */
-   pds_d0(&t, 0, 0x2000);
-   pds_d0(&t, 1, sgx_pds_douta_ctrl(&(struct sgx_pds_douta){.reg = 0}));
-   pds_d0(&t, 2, 0x0016000e);
-   pds_d0(&t, 3, sgx_pds_douta_ctrl(&(struct sgx_pds_douta){.reg = 1}));
-   pds_d0(&t, 4, doutu_w0(c, c->state_emit[2], true, 0));
-   pds_d0(&t, 5, 0);
-   CODE(&t, pds_movs(MV, 0, 0x18, 0, 1, 2, 2, DOUTA));
-   for (int i = 0; i < 3; i++)
-      CODE(&t, pds_movs(MV, 1, 0x18, 0, 1, 2, 2, DOUTA));
-   CODE(&t, pds_movs(MV, 2, 0, 0, 1, 2, 2, DOUTU));
-   CODE(&t, pds_halt());
-   c->terminate = pds_emit(&c->pds_vtx, &t, &rows);
+   c->terminate = terminate_prog(c, 0x0016000e);
 
    /* pixel programs shared by every object without inputs, and the clear's */
    c->pds_empty_p = pds_secondary(&c->pds_pix, 0, 0,
@@ -1054,12 +1128,22 @@ rt_numbers(struct sgxws_rt_numbers *r, uint32_t w, uint32_t h)
 struct sgxws_rt *
 sgxws_rt_create(struct sgxws_ctx *c, uint32_t w, uint32_t h)
 {
-   struct sgxws_rt *s = calloc(1, sizeof(*s));
+   return sgxws_rt_create_samples(c, w, h, 1);
+}
 
-   if (!s)
+struct sgxws_rt *
+sgxws_rt_create_samples(struct sgxws_ctx *c, uint32_t w, uint32_t h,
+                        unsigned samples)
+{
+   struct sgxws_rt *s;
+
+   if ((samples != 1 && samples != 4) || samples > c->dev->info.rt_max_samples)
+      return NULL;
+   if (!(s = calloc(1, sizeof(*s))))
       return NULL;
    s->w = w;
    s->h = h;
+   s->samples = samples;
    rt_numbers(&s->n, w, h);
    if (c->dev->kif->rt_init(c, s)) {
       free(s);
@@ -1103,17 +1187,20 @@ eot_program(struct sgxws_ctx *c)
    uint32_t pbe[4], side;
    struct sgxws_ptr p;
 
-   for (unsigned i = 0; i < c->n_eot; i++) {
+   for (unsigned i = 0; i < c->n_eot && !c->n_eot_override; i++) {
       const struct sgxws_eot *e = &c->eot[i];
 
       if (e->va == t->va && e->stride == t->stride && e->w == s->w &&
           e->h == s->h && e->pbe_format == t->pbe_format &&
-          e->t1_layout == t->t1_layout) {
+          e->t1_layout == t->t1_layout && e->samples == MAX2(t->samples, 1) &&
+          e->raw == t->raw) {
          pool->last_seq = sgxws_next_seq(c);
          return e->code;
       }
    }
-   if (c->n_eot == SGXWS_EOT_CACHE || ring_room(pool) < 7 * 8 + USSE_ALIGN) {
+   unsigned bytes = c->n_eot_override ? c->n_eot_override * 4 : 7 * 8;
+
+   if (c->n_eot == SGXWS_EOT_CACHE || ring_room(pool) < bytes + USSE_ALIGN) {
       /* the other pool, emptied once the last render that ran code from it is
        * done */
       unsigned other = !c->eot_cur;
@@ -1132,6 +1219,13 @@ eot_program(struct sgxws_ctx *c)
       c->n_eot = 0;
    }
 
+   if (c->n_eot_override) {
+      /* a hardware test's, not cached: the next test brings its own */
+      p = ring_alloc(pool, c->n_eot_override * 4, USSE_ALIGN);
+      memcpy(p.p, c->eot_override, c->n_eot_override * 4);
+      pool->last_seq = sgxws_next_seq(c);
+      return p.va;
+   }
    p = ring_alloc(pool, 7 * 8, USSE_ALIGN);
    sgx_pack(&pbe[0], PBE_STATE_WORD0, w0)
    { /* clip min [D] */
@@ -1144,13 +1238,18 @@ eot_program(struct sgxws_ctx *c)
       w1.y_max = s->h - 1;
    }
    sgx_pack(&pbe[2], PBE_STATE_WORD2, w2) /* b15 [D] */
-      w2.pitch = (t->stride - 1) >> 1;    /* [C] */
+   {
+      w2.pitch = (t->stride - 1) >> 1; /* [C] */
+      /* 4x: the 2x2 samples resolved into the pixel (STATE.md
+       * "Multisampling (4x)", ms4: 016f8000 -> 416f8000) */
+      w2.downscale = t->samples > 1 ? 1 : 0;
+   }
    sgx_pack(&pbe[3], PBE_STATE_WORD3, w3) /* [D] */
       w3.address = SGX_DEV_ADDR(t->va);
    sgx_pack(&side, PBE_SIDEBAND, sb)
    {
       sb.format = t->pbe_format;
-      sb.dither = true;
+      sb.dither = !t->raw;
       sb.twiddled = t->t1_layout == SGX_TEXSTATE_LAYOUT_TWIDDLED;
    }
    p.p[0] = 0; /* phas.i #0, #0 [wait=7] */
@@ -1168,10 +1267,20 @@ eot_program(struct sgxws_ctx *c)
       .h = s->h,
       .pbe_format = t->pbe_format,
       .t1_layout = t->t1_layout,
+      .samples = MAX2(t->samples, 1),
+      .raw = t->raw,
       .code = p.va,
    };
    pool->last_seq = sgxws_next_seq(c);
    return p.va;
+}
+
+void
+sgxws_hwt_eot(struct sgxws_ctx *c, const uint32_t *words, unsigned n)
+{
+   c->n_eot_override = words ? MIN2(n, SGXWS_EOT_OVERRIDE_WORDS) : 0;
+   if (words)
+      memcpy(c->eot_override, words, c->n_eot_override * 4);
 }
 
 /* The pixel event program, written for the event word the 3D passes it
@@ -1321,8 +1430,15 @@ int
 sgxws_begin(struct sgxws_ctx *c, struct sgxws_rt *rt,
             const struct sgxws_target *t)
 {
-   if (c->rt == rt && c->target.va == t->va)
+   /* the same memory: the frame goes on.  The caller's buffer is the one
+    * the frame now renders for (sgxws_target_bo): another resource of the
+    * same memory may have begun it, and a readback of this one must find
+    * its render here and end it (fixed-clip-enables under
+    * ARB_framebuffer_object read the frame before, with this left stale) */
+   if (c->rt == rt && c->target.va == t->va) {
+      c->target.bo = t->bo;
       return 0;
+   }
    if (c->rt) {
       int e = sgxws_flush(c, 0);
 
@@ -1335,11 +1451,13 @@ sgxws_begin(struct sgxws_ctx *c, struct sgxws_rt *rt,
    c->draws = 0;
    c->ta_kicks = c->seg_draws = 0;
    c->last_blk_n = c->last_u_va = 0;
+   c->n_ubo_copy = c->ubo_copy_next = 0;
    c->n_use = 0;
    c->bias_set = false;
    c->bias_units = 0;
    c->bias_factor = 0.0f;
    c->clip = (struct sgxws_rect){0, 0, rt->w, rt->h};
+   c->damage = (struct sgxws_rect){0, 0, 0, 0};
 
    /* the render details are the target's: written at the kick, once its
     * previous render is done */
@@ -1620,6 +1738,22 @@ vpgen_object(struct sgxws_ctx *c, bool set, const struct sgxws_rect *tiles,
             vertices_per_task(c->dev->core, 4));
 }
 
+/* the pixels a draw or clear may change: the clip it draws within */
+static void
+add_damage(struct sgxws_ctx *c)
+{
+   struct sgxws_rect *d = &c->damage;
+
+   if (d->x1 <= d->x0) {
+      *d = c->clip;
+      return;
+   }
+   d->x0 = MIN2(d->x0, c->clip.x0);
+   d->y0 = MIN2(d->y0, c->clip.y0);
+   d->x1 = MAX2(d->x1, c->clip.x1);
+   d->y1 = MAX2(d->y1, c->clip.y1);
+}
+
 /* Make r the visible pixels (STATE.md "Scissor and partial viewports"): reset
  * the bits over the whole target within the old rectangle's tiles, and set
  * them over r, which leaves r's tiles as the region clip the draws inherit.
@@ -1730,6 +1864,7 @@ sgxws_clear(struct sgxws_ctx *c, const float rgba[4], float depth,
    vdm_draw(c, SGXWS_TRIANGLES, 3, c->idx, v.va, 16, 4, c->clear_vs, 4, 8, 0,
             8);
    c->draws++;
+   add_damage(c);
    return 0;
 }
 
@@ -1782,6 +1917,46 @@ mte_ctrl(const struct sgxws_state *st)
 
 static int kick_ta(struct sgxws_ctx *c);
 
+/* uniform block i of a draw in this frame's general ring: a copy of its own,
+ * or the one an earlier draw of the frame made of the same key (sgxws_ubo);
+ * sgxws_draw has made the room (mem_bytes). Its address */
+static uint32_t
+ubo_copy(struct sgxws_ctx *c, const struct sgxws_draw *d, unsigned i,
+         const uint32_t *done)
+{
+   const struct sgxws_ubo *b = &d->ubos[i];
+   struct sgxws_ptr p;
+
+   /* the vertex and fragment programs reading one block */
+   for (unsigned j = 0; j < i; j++)
+      if (d->ubos[j].data == b->data && d->ubos[j].bytes == b->bytes &&
+          d->ubos[j].key == b->key)
+         return done[j];
+   if (b->key)
+      for (unsigned j = 0; j < c->n_ubo_copy; j++)
+         if (c->ubo_copy[j].key == b->key && c->ubo_copy[j].data == b->data &&
+             c->ubo_copy[j].bytes == b->bytes)
+            return c->ubo_copy[j].va;
+   /* whole vec4s, a block cut short padded with zeros (the compiler's loads
+    * read vec4s) */
+   uint32_t room = (b->bytes + 15) & ~15u;
+
+   p = ring_alloc(&c->gen, room ? room : 16, 16);
+   memset(p.p, 0, room ? room : 16);
+   memcpy(p.p, b->data, b->bytes);
+   if (b->key) {
+      unsigned j = c->ubo_copy_next;
+
+      c->ubo_copy_next = (j + 1) % 16;
+      c->n_ubo_copy = MAX2(c->n_ubo_copy, j + 1);
+      c->ubo_copy[j].key = b->key;
+      c->ubo_copy[j].data = b->data;
+      c->ubo_copy[j].bytes = b->bytes;
+      c->ubo_copy[j].va = p.va;
+   }
+   return p.va;
+}
+
 int
 sgxws_draw(struct sgxws_ctx *c, const struct sgxws_draw *d)
 {
@@ -1793,9 +1968,17 @@ sgxws_draw(struct sgxws_ctx *c, const struct sgxws_draw *d)
    uint32_t mem_bytes = ((d->vs_mem.dwords * 4 + 15) & ~15u) +
                         ((d->fs_mem.dwords * 4 + 15) & ~15u);
    struct sgxws_ptr v = {0}, u, vsec, vmem = {0}, fmem = {0};
+   uint32_t ubo_va[SGXWS_MAX_UBOS];
+   bool fs_ubos = false;
    struct sgxws_fetch fetch[SGXWS_MAX_FETCH];
    int e;
 
+   if (d->n_ubos > SGXWS_MAX_UBOS)
+      return -E2BIG;
+   for (unsigned i = 0; i < d->n_ubos; i++) {
+      mem_bytes += (d->ubos[i].bytes + 15) & ~15u;
+      fs_ubos |= d->ubos[i].fs && d->ubos[i].sa >= 0;
+   }
    if ((e = depth_bias(c, st)))
       return e;
    if (d->n_fetch) {
@@ -1893,13 +2076,26 @@ sgxws_draw(struct sgxws_ctx *c, const struct sgxws_draw *d)
       fmem = ring_alloc(&c->gen, d->fs_mem.dwords * 4, 16);
       memcpy(fmem.p, d->fs_mem.words, d->fs_mem.dwords * 4);
    }
+   /* the uniform blocks, after any submit make_room made (a copy names
+    * this frame's memory), then their addresses in the memory blocks */
+   for (unsigned i = 0; i < d->n_ubos; i++)
+      ubo_va[i] = ubo_copy(c, d, i, ubo_va);
+   for (unsigned i = 0; i < d->n_ubos; i++) {
+      const struct sgxws_ubo *b = &d->ubos[i];
+      struct sgxws_ptr *m = b->fs ? &fmem : &vmem;
+
+      if (b->mem && m->p &&
+          b->mem < (b->fs ? d->fs_mem.dwords : d->vs_mem.dwords))
+         m->p[b->mem] = ubo_va[i];
+   }
 
    /* fragment: the constants and the secondary program that DMAs them, then
     * the primary program that runs the shader */
    if (fs->sec_dwords) {
       /* the frame's last block again when the constants are (a memory
        * block's address is new each draw) */
-      if (!d->fs_mem.dwords && c->last_u_va && !c->dev->state_always &&
+      if (!d->fs_mem.dwords && !fs_ubos && c->last_u_va &&
+          !c->dev->state_always &&
           c->last_u_dwords == fs->sec_dwords &&
           !memcmp(c->last_u, d->fs_consts, fs->sec_dwords * 4)) {
          u.va = c->last_u_va;
@@ -1908,8 +2104,12 @@ sgxws_draw(struct sgxws_ctx *c, const struct sgxws_draw *d)
          memcpy(u.p, d->fs_consts, fs->sec_dwords * 4);
          for (unsigned j = 0; j < d->fs_mem.n_bases && d->fs_mem.dwords; j++)
             u.p[d->fs_mem.base[j]] = fmem.va + 512 * j;
+         for (unsigned i = 0; i < d->n_ubos; i++)
+            if (d->ubos[i].fs && d->ubos[i].sa >= 0 &&
+                (unsigned)d->ubos[i].sa < fs->sec_dwords)
+               u.p[d->ubos[i].sa] = ubo_va[i];
          c->last_u_va = 0;
-         if (!d->fs_mem.dwords) {
+         if (!d->fs_mem.dwords && !fs_ubos) {
             if (c->last_u_cap < fs->sec_dwords) {
                uint32_t *m = realloc(c->last_u, fs->sec_dwords * 4);
 
@@ -2001,8 +2201,11 @@ sgxws_draw(struct sgxws_ctx *c, const struct sgxws_draw *d)
    sgx_pack(&blk[n++], TA_STATE_OUTSELECT, os)
    {
       os.out_dwords = vs->out_dwords;
-      os.unknown_11_13 = SGX_TA_STATE_OUTSELECT_UNKNOWN_11_13_DRAW;
+      os.unknown_11_13 = vs->colour
+                            ? SGX_TA_STATE_OUTSELECT_UNKNOWN_11_13_DRAW_COLOUR
+                            : SGX_TA_STATE_OUTSELECT_UNKNOWN_11_13_DRAW;
       os.point_size = vs->point_size;
+      os.clip_planes = vs->clip_planes;
    }
    sgx_pack(&blk[n++], TA_STATE_WCLAMP, wc) wc.value = 1e-5f;
    blk[n++] = mte_ctrl(st);
@@ -2049,6 +2252,10 @@ sgxws_draw(struct sgxws_ctx *c, const struct sgxws_draw *d)
       memcpy(vsec.p + 10, d->vs_consts, vs->const_dwords * 4);
    for (unsigned j = 0; j < d->vs_mem.n_bases && d->vs_mem.dwords; j++)
       vsec.p[10 + d->vs_mem.base[j]] = vmem.va + 512 * j;
+   for (unsigned i = 0; i < d->n_ubos; i++)
+      if (!d->ubos[i].fs && d->ubos[i].sa >= 0 &&
+          (unsigned)d->ubos[i].sa < vs->const_dwords)
+         vsec.p[10 + d->ubos[i].sa] = ubo_va[i];
    sec = pds_dma_task(c, &c->pds_vtx, vsec.va, vsec_dwords,
                       doutu_w0(c, c->empty_v, true, 0), 0, &vrows);
    vdm_state(c, SGX_VDMCTRL_BLOCK_TYPE_PDS_STATE, sec, vrows,
@@ -2065,6 +2272,7 @@ sgxws_draw(struct sgxws_ctx *c, const struct sgxws_draw *d)
                vs->in_dwords, vs->out_dwords, vs->temps,
                vertices_per_task(c->dev->core, vs->out_dwords));
    c->draws++;
+   add_damage(c);
    /* SGX_TA_SPLIT: the GPU tiles what is recorded while the rest is */
    if (c->dev->ta_split && ++c->seg_draws >= c->dev->ta_split)
       return kick_ta(c);
@@ -2082,7 +2290,13 @@ sgxws_vdm_end(struct sgxws_ctx *c)
    vdm_state(c, SGX_VDMCTRL_BLOCK_TYPE_PDS_STATE, c->empty_state, 1,
              SGX_VDMCTRL_STATE_KIND_DMA, 0, 0);
    /* the TA terminate's 2 attributes */
-   vdm_state(c, SGX_VDMCTRL_BLOCK_TYPE_PDS_STATE_TERMINATE, c->terminate, 3,
+   /* the target's own terminate region (terminate_prog); the same program
+    * frame after frame comes back from pds_emit's memo */
+   uint32_t term =
+      c->rt ? terminate_prog(c, (c->rt->n.xt - 1) << 16 |
+                                   (DIV_ROUND_UP(c->rt->h, 32) - 1))
+            : c->terminate;
+   vdm_state(c, SGX_VDMCTRL_BLOCK_TYPE_PDS_STATE_TERMINATE, term, 3,
              SGX_VDMCTRL_STATE_KIND_TA_BLOCK, 2, 0);
    sgx_pack(vdm_slot(c), VDMCTRL_STREAM_TERMINATE0, t)
    {
@@ -2137,13 +2351,19 @@ slot_wait(struct sgxws_ctx *c, unsigned i, unsigned ms)
 {
    uint32_t seq = c->slot_kick[i].seq;
 
+   bool timed = ms && c->slot_kick[i].kicked_ns;
+
    if (!sgxws_seq_after(seq, c->done_seq))
       return 0;
-   if (c->dev->kif->wait_seq(c, seq, ms))
-      return -ETIMEDOUT;
-   if (c->slot_kick[i].kicked_ns) {
-      uint64_t ns = sgxws_now_ns() - c->slot_kick[i].kicked_ns;
+   /* Render latency times only the renders a wait sees end: one already
+    * done when first looked at ended at some point since its kick that
+    * isn't known (a compositor idle between frames looks seconds later). */
+   if (c->dev->kif->wait_seq(c, seq, timed ? 0 : ms)) {
+      uint64_t ns;
 
+      if (!timed || c->dev->kif->wait_seq(c, seq, ms))
+         return -ETIMEDOUT;
+      ns = sgxws_now_ns() - c->slot_kick[i].kicked_ns;
       c->ns_latency += ns;
       c->n_latency++;
       if (c->slot_kick[i].scanout) {
@@ -2633,34 +2853,42 @@ wmask_words(unsigned m, unsigned color_pa, uint32_t w[2])
 static uint32_t
 upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
           const uint64_t *code1, unsigned count1, unsigned color_pa,
-          const struct sgxws_blend *blend, int discard_pa, unsigned temps);
+          const struct sgxws_blend *blend, const struct sgxws_fs_feedback *fb,
+          unsigned temps);
 
 uint32_t
 sgxws_upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
                 unsigned color_pa, const struct sgxws_blend *blend,
-                int discard_pa, unsigned temps)
+                const struct sgxws_fs_feedback *fb, unsigned temps)
 {
-   return upload_fs(c, code, count, NULL, 0, color_pa, blend, discard_pa,
-                    temps);
+   return upload_fs(c, code, count, NULL, 0, color_pa, blend, fb, temps);
 }
 
 uint32_t
 sgxws_upload_fs_split(struct sgxws_ctx *c, const uint64_t *code, unsigned n,
                       const uint64_t *code1, unsigned n1, unsigned color_pa1,
-                      const struct sgxws_blend *blend, int discard_pa,
-                      unsigned temps)
+                      const struct sgxws_blend *blend,
+                      const struct sgxws_fs_feedback *fb, unsigned temps)
 {
-   return upload_fs(c, code, n, code1, n1, color_pa1, blend, discard_pa,
-                    temps);
+   return upload_fs(c, code, n, code1, n1, color_pa1, blend, fb, temps);
 }
+
+/* st.a.d sa<SGXWS_VISIBLE_SA>, #0, #1 [skipinv]: a store at sa6 + 4, from
+ * the pixels the program runs for, not the 2x2 quads' helpers */
+static_assert(SGXWS_VISIBLE_SA == 6, "the store's encoding");
+#define ST_VISIBLE_LO 0xa0018001u
+#define ST_VISIBLE_HI 0xf0870004u
 
 static uint32_t
 upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
           const uint64_t *code1, unsigned count1, unsigned color_pa,
-          const struct sgxws_blend *blend, int discard_pa, unsigned temps)
+          const struct sgxws_blend *blend, const struct sgxws_fs_feedback *fb,
+          unsigned temps)
 {
-   uint32_t *w = malloc((count + count1 + 12) * 8), va, b[2];
+   int discard_pa = fb ? fb->discard_pa : -1, depth_pa = fb ? fb->depth_pa : -1;
+   uint32_t *w = malloc((count + count1 + 13) * 8), va, b[2];
    bool masked = blend && blend->wmask != 0xf;
+   bool visible = blend && blend->visible;
    unsigned n = 0;
 
    if (!w)
@@ -2668,7 +2896,7 @@ upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
    /* a constant-colour blend works in r0, r1 */
    if (blend && blend->blend && blend->constant && temps < 2)
       temps = 2;
-   if (discard_pa >= 0) {
+   if (discard_pa >= 0 || depth_pa >= 0) {
       /*
        * A program that discards runs in two phases (ISA.md "Phases, visibility
        * feedback and discard"):
@@ -2677,21 +2905,35 @@ upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
        * p1, and atst8 [end] in place of the compiler's feedback nop (its last
        * instruction); phase 1, on an even instruction, = the colour out
        * without end, then phas.i #0, #0 [end].
+       * A gl_FragDepth write puts depthf pa<depth_pa>, sa3, sa4 [end] there
+       * instead ((p1) depthf with a discard), and without a discard a no-op
+       * in pcoeff's slot (sgxws_fs_feedback).
        */
       uint8_t reloc[1] = {0};
 
       put(w, &n, 0,
           0xfa440100u | ((temps + 3) / 4)); /* phas.i #phase1, #t [wait=1] */
-      put(w, &n,
-          0xb0000004u | (uint32_t)discard_pa << 14 |
-             (uint32_t)(discard_pa + 1) << 7,
-          0xf8300004u); /* pcoeff pa<n>, pa<n+1>, sa4 */
+      if (discard_pa >= 0)
+         put(w, &n,
+             0xb0000004u | (uint32_t)discard_pa << 14 |
+                (uint32_t)(discard_pa + 1) << 7,
+             0xf8300004u); /* pcoeff pa<n>, pa<n+1>, sa4 */
+      else
+         put(w, &n, 0xa0000000u, 0x28a10002u); /* mov pa0, pa0 [skipinv rcnt] */
       put_code(w, &n, code, count - 1);
-      put(w, &n, 0xf0000184u | color_pa << 21 | color_pa << 14,
-          0xf9340406u); /* atst8 [end] */
+      if (depth_pa >= 0)
+         /* (p1) depthf pa<d>, sa3, sa4 [end]: h9-10 = 2 (p1) with a discard,
+          * 0 (every pixel) without (ISA.md, gl_FragDepth, H10) */
+         put(w, &n, 0xf0000184u | (uint32_t)depth_pa << 14,
+             discard_pa >= 0 ? 0xfb340404u : 0xfb340004u);
+      else
+         put(w, &n, 0xf0000184u | color_pa << 21 | color_pa << 14,
+             0xf9340406u); /* atst8 [end] */
       if (n & 1)
          put(w, &n, 0, 0xf8000140u); /* nop: phase 1 on 16 bytes */
       w[0] = n;                      /* relocated to an absolute pc */
+      if (visible)
+         put(w, &n, ST_VISIBLE_LO, ST_VISIBLE_HI);
       /* split: the colour's code runs here, only for the pixels that pass */
       if (code1)
          put_code(w, &n, code1, count1);
@@ -2710,6 +2952,8 @@ upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
       return va;
    }
    put(w, &n, 0, PHAS_HI | 0x700); /* phas.i #0, #0 [wait=7] */
+   if (visible)
+      put(w, &n, ST_VISIBLE_LO, ST_VISIBLE_HI);
    put_code(w, &n, code, count);
    if (blend && blend->blend)
       put_blend(w, &n, blend, color_pa, !masked, false);
@@ -2794,7 +3038,21 @@ sgxws_get_stats(struct sgxws_ctx *c, struct sgxws_stats *st, bool reset)
    st->gpu_verts = c->gpu_verts;
    st->state_sent = c->state_sent;
    st->state_skipped = c->state_skipped;
+   st->bo_allocs = c->dev->bo_allocs;
+   st->bo_cached = c->dev->bo_cached;
+   st->bo_busy = c->dev->bo_busy;
+   st->gem_live = c->dev->gem_live;
+   st->gem_bytes = c->dev->gem_bytes;
+   st->gem_made = c->dev->gem_made;
+   st->gem_closed = c->dev->gem_closed;
+   st->code_resets = c->dev->code_resets;
+   st->zombies = c->dev->zombies;
+   st->zombie_bytes = c->dev->zombie_bytes;
+   st->cached = c->dev->cached;
+   st->cached_bytes = c->dev->cached_bytes;
    if (reset) {
+      c->dev->bo_allocs = c->dev->bo_cached = c->dev->bo_busy = 0;
+      c->dev->gem_made = c->dev->gem_closed = c->dev->code_resets = 0;
       c->state_sent = c->state_skipped = 0;
       c->ns_flush = c->ns_cmd = c->ns_kick = c->ns_target_wait =
          c->ns_slot_wait = 0;

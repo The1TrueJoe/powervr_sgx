@@ -19,6 +19,7 @@
 #include "pvrsgx_device.h"
 #include "pvrsgx_dump.h"
 #include "pvrsgx_fw.h"
+#include "pvrsgx_kobj.h"
 #include "pvrsgx_job.h"
 #include "pvrsgx_mmu.h"
 #include "pvrsgx_render.h"
@@ -28,7 +29,7 @@
 static void dump_regs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 {
 	const struct pvrsgx_core_regs *cr = sdev->cr;
-	u32 edm = pvrsgx_dirlist_edm(sdev);
+	u32 edm = pvrsgx_dirlist_edm(sdev), lists = sdev->family->num_dir_lists;
 	const struct {
 		const char *name;
 		u32 reg;
@@ -46,11 +47,11 @@ static void dump_regs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 		{ "BIF_CTRL", SGX_CR_BIF_CTRL },
 		{ "BIF_INT_STAT", SGX_CR_BIF_INT_STAT },
 		{ "BIF_FAULT", SGX_CR_BIF_FAULT },
-		{ "BIF_BANK0", SGX_CR_BIF_BANK0 },
+		{ "BIF_BANK0", cr->bif_bank0 },
 		{ "BIF_DIR_LIST_BASE0", SGX_CR_BIF_DIR_LIST_BASE0 },
-		{ "BIF_DIR_LIST_BASE1", SGX_CR_BIF_DIR_LIST_BASE1 },
-		{ "BIF_DIR_LIST_BASE2", SGX_CR_BIF_DIR_LIST_BASE1 + 4 },
-		{ NULL, sgx_cr_bif_dir_list_base(edm) },
+		{ "BIF_DIR_LIST_BASE1", lists > 1 ? SGX_CR_BIF_DIR_LIST_BASE1 : 0 },
+		{ "BIF_DIR_LIST_BASE2", lists > 2 ? SGX_CR_BIF_DIR_LIST_BASE1 + 4 : 0 },
+		{ NULL, edm ? sgx_cr_bif_dir_list_base(edm) : 0 },
 		{ "EDM_TASK_REG0", cr->edm_task_reg0 },
 		{ "EDM_TASK_REG1", cr->edm_task_reg1 },
 	};
@@ -70,14 +71,19 @@ static void dump_regs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 	}
 }
 
-void pvrsgx_dump_status(struct seq_buf *sb, struct pvrsgx_device *sdev)
+void pvrsgx_dump_status(struct seq_buf *sb, struct pvrsgx_device *sdev, bool regs)
 {
 	u32 *ctl = sdev->fw.cpu[PVRSGX_FW_CCBCTL];
+	struct pvrsgx_kobj_counts kc;
 
 	seq_buf_printf(sb, "firmware running: %d lost: %d resets: %u irqs: %d\n", sdev->fw_running,
 		       sdev->lost, sdev->reset_count, atomic_read(&sdev->irq_count));
+	if (sdev->vdc)
+		seq_buf_printf(sb, "irqs found behind the display's latch: %d\n",
+			       atomic_read(&sdev->irq_late));
 	seq_buf_printf(sb, "kernel PD 0x%08x idle PD 0x%08x\n",
-		       pvrsgx_mmu_pd_addr(sdev->kernel_mmu), pvrsgx_mmu_pd_addr(sdev->idle_mmu));
+		       pvrsgx_mmu_pd_addr(sdev->kernel_mmu),
+		       pvrsgx_mmu_pd_addr(pvrsgx_idle_mmu(sdev)));
 	seq_buf_printf(sb, "ccb wo %u ro %u issued %llu consumed %llu\n", READ_ONCE(ctl[0]),
 		       READ_ONCE(ctl[1]), sdev->ccb_issued, pvrsgx_ccb_consumed(sdev));
 	seq_buf_printf(sb, "hostctl init 0x%x power 0x%x uk-lockups %u ",
@@ -89,8 +95,13 @@ void pvrsgx_dump_status(struct seq_buf *sb, struct pvrsgx_device *sdev)
 		       pvrsgx_fw_hostctl(sdev, HOSTCTL_INTERRUPT_CLEAR),
 		       pvrsgx_fw_hostctl(sdev, HOSTCTL_ASSERT_FAIL));
 	seq_buf_printf(sb, "powered: %d\n", READ_ONCE(sdev->powered));
+	if (pvrsgx_kobj_pending(sdev, &kc))
+		seq_buf_printf(sb, "kobjs graveyard %u (%llu pages) unmapped %u (%llu pages)\n",
+			       kc.graveyard, kc.graveyard_pages, kc.unmapped, kc.unmapped_pages);
+	seq_buf_printf(sb, "client unmaps waiting for the invalidate %u\n",
+		       pvrsgx_ccb_inval_pending(sdev));
 	/* After a failed start the clocks are still on; after a stop they are not. */
-	if (!READ_ONCE(sdev->powered))
+	if (!regs || !READ_ONCE(sdev->powered))
 		return;
 	dump_regs(sb, sdev);
 }
@@ -119,11 +130,14 @@ static void dump_bif(struct seq_buf *sb, struct pvrsgx_device *sdev, struct pvrs
 {
 	const struct pvrsgx_core_regs *cr = sdev->cr;
 	u32 stat = sgx_rd(sdev, SGX_CR_BIF_INT_STAT);
-	u32 addr = sgx_rd(sdev, SGX_CR_BIF_FAULT) & SGX_MMU_ADDR_MASK;
+	u32 addr = sgx_rd(sdev, SGX_CR_BIF_FAULT) & cr->bif_fault_addr;
 
-	seq_buf_printf(sb, "BIF: bank set 0x%08x bank0 0x%08x mem req 0x%08x\n",
-		       sgx_rd(sdev, SGX_CR_BIF_BANK_SET), sgx_rd(sdev, SGX_CR_BIF_BANK0),
-		       sgx_rd(sdev, SGX_CR_BIF_MEM_REQ_STAT));
+	if (cr->bif_bank0)
+		seq_buf_printf(sb, "BIF: bank set 0x%08x bank0 0x%08x mem req 0x%08x\n",
+			       sgx_rd(sdev, cr->bif_bank_set), sgx_rd(sdev, cr->bif_bank0),
+			       sgx_rd(sdev, SGX_CR_BIF_MEM_REQ_STAT));
+	else
+		seq_buf_printf(sb, "BIF: mem req 0x%08x\n", sgx_rd(sdev, SGX_CR_BIF_MEM_REQ_STAT));
 	for (unsigned int i = 0; i < sdev->family->num_dir_lists; i++)
 		seq_buf_printf(sb, "  dir list %2u: 0x%08x\n", i,
 			       sgx_rd(sdev, sgx_cr_bif_dir_list_base(i)));
@@ -138,7 +152,8 @@ static void dump_bif(struct seq_buf *sb, struct pvrsgx_device *sdev, struct pvrs
 		       field_get(cr->bif_int_stat_fault_type, stat));
 	dump_lookup(sb, "job's", bad->ctx->vm->mmu, addr);
 	dump_lookup(sb, "firmware's", sdev->kernel_mmu, addr);
-	dump_lookup(sb, "idle", sdev->idle_mmu, addr);
+	if (!pvrsgx_core_single_context(sdev->family))
+		dump_lookup(sb, "idle", sdev->idle_mmu, addr);
 }
 
 /*
@@ -152,6 +167,7 @@ void pvrsgx_coredump(struct pvrsgx_device *sdev, struct pvrsgx_job *bad)
 		[DRM_POWERVR_SGX_JOB_TYPE_TRANSFER] = "transfer",
 		[DRM_POWERVR_SGX_JOB_TYPE_NULL] = "null",
 	};
+	unsigned long flags;
 	struct seq_buf sb;
 	char *buf;
 
@@ -162,8 +178,8 @@ void pvrsgx_coredump(struct pvrsgx_device *sdev, struct pvrsgx_job *bad)
 	seq_buf_init(&sb, buf, COREDUMP_BYTES);
 	seq_buf_printf(&sb, "powervr_sgx hang: %s job, ccb %llu, reset %u\n",
 		       bad->type < ARRAY_SIZE(types) ? types[bad->type] : "?", bad->ccb_seq,
-		       sdev->reset_count + 1);
-	pvrsgx_dump_status(&sb, sdev);
+		       sdev->reset_count);
+	pvrsgx_dump_status(&sb, sdev, true);
 	if (sdev->fw_running)
 		dump_bif(&sb, sdev, bad);
 	pvrsgx_fw_dump(&sb, sdev, PVRSGX_FW_HOSTCTL, "hostctl");
@@ -173,5 +189,42 @@ void pvrsgx_coredump(struct pvrsgx_device *sdev, struct pvrsgx_job *bad)
 	pvrsgx_job_dump(&sb, bad);
 	if (seq_buf_has_overflowed(&sb))
 		drm_warn(&sdev->base, "coredump truncated\n");
-	dev_coredumpv(sdev->base.dev, buf, seq_buf_used(&sb), GFP_NOWAIT);
+	/* devcoredump registers a device, which allocates: from a worker. */
+	spin_lock_irqsave(&sdev->fence_lock, flags);
+	if (!sdev->coredump) {
+		sdev->coredump = buf;
+		sdev->coredump_len = seq_buf_used(&sb);
+		buf = NULL;
+	}
+	spin_unlock_irqrestore(&sdev->fence_lock, flags);
+	vfree(buf);
+	queue_work(system_dfl_wq, &sdev->coredump_work);
+}
+
+static void coredump_work_fn(struct work_struct *work)
+{
+	struct pvrsgx_device *sdev = container_of(work, struct pvrsgx_device, coredump_work);
+	unsigned long flags;
+	size_t len;
+	void *buf;
+
+	spin_lock_irqsave(&sdev->fence_lock, flags);
+	buf = sdev->coredump;
+	len = sdev->coredump_len;
+	sdev->coredump = NULL;
+	spin_unlock_irqrestore(&sdev->fence_lock, flags);
+	if (buf)
+		dev_coredumpv(sdev->base.dev, buf, len, GFP_KERNEL);
+}
+
+void pvrsgx_coredump_init(struct pvrsgx_device *sdev)
+{
+	INIT_WORK(&sdev->coredump_work, coredump_work_fn);
+}
+
+void pvrsgx_coredump_fini(struct pvrsgx_device *sdev)
+{
+	cancel_work_sync(&sdev->coredump_work);
+	vfree(sdev->coredump);
+	sdev->coredump = NULL;
 }

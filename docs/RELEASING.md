@@ -2,12 +2,13 @@
 
 A release is a tag. Pushing a tag `v<version>` (for example `v0.1.0`) runs
 `.github/workflows/release.yml`. It builds, from that tag:
-- the Cedarview kernel package in its release flavor, which has no test-kit patches
-  (`powervr-sgx-deb.yml`);
-- `mesa-sgx` and `sgx545-firmware` (`mesa-debian.yml`);
+- the Cedarview kernel package in its release flavor, which has no test-kit patches,
+  for amd64 and i386 (`powervr-sgx-deb.yml`);
+- `mesa-sgx` for amd64 and i386, and `sgx545-firmware` (`mesa-debian.yml`);
 - `SHA256SUMS` over all of them.
 
-It then attaches them to a **draft pre-release**. Nothing is public until a person
+It then attaches them to a **draft pre-release**, with `docs/releases/<tag>.md` as its notes
+when that file exists (generic notes otherwise). Nothing is public until a person
 publishes the draft on GitHub. Publishing runs `.github/workflows/apt-repo.yml`, which
 rebuilds the signed apt repository on GitHub Pages from every published release.
 
@@ -15,9 +16,18 @@ The packages take their versions from the tag:
 
 | package | version for `v0.1.0` |
 |---|---|
-| `linux-image-7.3.3-sgx`, `linux-headers-7.3.3-sgx` | `7.3.3-sgx0.1.0` |
+| `linux-image-7.3.3-sgx`, `linux-headers-7.3.3-sgx` (amd64, i386) | `7.3.3-sgx0.1.0` |
 | `mesa-sgx` | `<Mesa version>+sgx0.1.0` |
 | `sgx545-firmware` | `0.1.0` |
+
+A CI build that isn't a release numbers its packages `0~git<date>.<commit>` (the
+kernel `7.3.3-sgx0~git…`, Mesa `<Mesa version>+sgx0~git…`), which sorts below every
+release, so apt moves from a test build to the next release by itself.
+
+The kernel and Mesa must come from the same release once the uAPI changes. A release's
+`mesa-sgx` and `sgx545-firmware` carry `Breaks:` on the kernels before their uAPI
+(`mesa/debian/BREAKS`), so apt upgrades the kernel with them. Raise it when the uAPI's
+major version changes.
 
 A tag is `v` and a version that starts with a digit: digits, letters, dots, `+` and
 `-`. A `-` becomes `~` in the package versions, so a pre-release sorts before its release
@@ -28,20 +38,41 @@ and the package inside still says `0.2.0~rc1`.
 
 ## Steps
 
-1. Merge `dev` into `main` (a merge commit) once `dev`'s CI is green, then tag `main`
-   and push the tag:
+0. Put the notes in `docs/releases/v<version>.md` on `dev`; the tag's draft takes them.
+   Then merge `dev` into `main` with a merge commit (a pull request from `dev` into `main`,
+   merged with "Create a merge commit"), so `main`'s tree is `dev`'s. Releases are cut on
+   `main`.
+
+   Rehearse the release on `main`: run `release` by hand with a version such as
+   `0.2.4~rc0`:
 
    ```bash
-   git checkout main && git merge --no-ff dev && git push origin main
+   gh workflow run release.yml --ref main -f version=0.2.4~rc0
    ```
 
+   It builds the packages under that version, signs a throwaway apt repository and runs
+   `tools/release/repo-test.sh` in Debian 13: the upgrade from the last published release,
+   `mesa-sgx:i386` alone, a fresh install, and the way off CI-built packages; then, in an
+   i386 Debian 13 with no amd64, a fresh install of the i386 kernel, the firmware and
+   `mesa-sgx`. It also builds the driver with DKMS against the release kernel's headers.
+   Nothing is tagged or published. `kernel_run` reuses a finished release-flavor
+   `powervr-sgx-deb` run (both architectures) with the same version instead of building
+   the kernels again.
+
+1. Once the rehearsal passes, tag the commit it ran on and push the tag:
+
    ```bash
-   git tag -a v0.1.0 -m "powervr_sgx 0.1.0" && git push origin v0.1.0
+   git fetch origin && git tag -a v0.2.4 -m "powervr_sgx 0.2.4" origin/main && git push origin v0.2.4
    ```
+
+   0.2.1 to 0.2.3 were cut on a `release/v0.2` branch, before `main` took `dev`'s tree. A
+   fix for an older series can still go that way: start `release/vX.Y` from the series'
+   last tag, merge or cherry-pick the fix, rehearse and tag there.
 
 2. Wait for the `release` run to finish. The kernel build takes several hours.
-3. On the Releases page, check the draft: its five files (the four packages and
-   `SHA256SUMS`), and that `SHA256SUMS` checks against a plain download:
+3. On the Releases page, check the draft: its eight files (the kernel image and headers
+   for amd64 and i386, the firmware, Mesa for amd64 and i386, and `SHA256SUMS`), and that
+   `SHA256SUMS` checks against a plain download:
 
    ```bash
    gh release download v0.1.0 --repo The1TrueJoe/powervr_sgx --dir /tmp/v0.1.0 && (cd /tmp/v0.1.0 && sha256sum -c SHA256SUMS)

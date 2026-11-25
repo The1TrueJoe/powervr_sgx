@@ -5,7 +5,8 @@
  * The SGX545 of a Cedarview GPU (GMA3600/3650). It shares the PCI function and
  * register BAR with the display engine, which gma500 drives; gma500 publishes
  * the SGX as the auxiliary device "gma500_gfx.sgx" with its register window mapped
- * and hands over its interrupt (include/drm/gma500_sgx.h).
+ * and hands over its interrupt; it never touches the SGX itself
+ * (include/drm/gma500_sgx.h).
  */
 
 #include <linux/auxiliary_bus.h>
@@ -33,41 +34,43 @@ static int pvrsgx_aux_probe(struct auxiliary_device *adev, const struct auxiliar
 		return -ENODEV;
 	}
 
-	/* DMA as the GPU's PCI function does; there is no IOMMU on these parts. */
+	sdev = pvrsgx_alloc(dev);
+	if (IS_ERR(sdev))
+		return PTR_ERR(sdev);
+	/* The SGX does DMA as the GPU's PCI function: no device of its own. */
+	drm_dev_set_dma_dev(&sdev->base, dev->parent);
+	/*
+	 * Kernels without drm/shmem/0001 map shmem objects for the auxiliary
+	 * device; without a mask it maps them to nothing (issue #5).
+	 */
 	dev->dma_mask = &dev->coherent_dma_mask;
 	err = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	if (err)
 		return err;
-
-	sdev = pvrsgx_alloc(dev);
-	if (IS_ERR(sdev))
-		return PTR_ERR(sdev);
 	sdev->gma_sgx = gma;
 	sdev->family = pvrsgx_core_family_get(gma->core);
-	/* An auxiliary device has no DMA parameters of its own. */
-	dev->dma_parms = &sdev->dma_parms;
-	dma_set_max_seg_size(dev, UINT_MAX);
 	sdev->regs = gma->regs;
 	sdev->irq = to_pci_dev(dev->parent)->irq;
 	auxiliary_set_drvdata(adev, sdev);
 
 	/* The graphics island is up only while gma500 is. */
 	err = pm_runtime_resume_and_get(dev->parent);
-	if (err) {
-		dev->dma_parms = NULL;
+	if (err)
 		return err;
-	}
 	err = pvrsgx_probe_common(sdev);
 	pm_runtime_put(dev->parent);
-	if (err)
-		dev->dma_parms = NULL;	/* sdev goes with the failed probe */
 	return err;
 }
 
 static void pvrsgx_aux_remove(struct auxiliary_device *adev)
 {
 	pvrsgx_remove_common(auxiliary_get_drvdata(adev));
-	adev->dev.dma_parms = NULL;
+}
+
+static void pvrsgx_aux_shutdown(struct auxiliary_device *adev)
+{
+	/* Before gma500's: it may turn DMA back on for the next kernel. */
+	pvrsgx_shutdown_common(auxiliary_get_drvdata(adev));
 }
 
 static const struct auxiliary_device_id pvrsgx_aux_ids[] = {
@@ -80,6 +83,7 @@ static struct auxiliary_driver pvrsgx_aux_driver = {
 	.name = "sgx",
 	.probe = pvrsgx_aux_probe,
 	.remove = pvrsgx_aux_remove,
+	.shutdown = pvrsgx_aux_shutdown,
 	.id_table = pvrsgx_aux_ids,
 	.driver.pm = pm_ptr(&pvrsgx_pm_ops),
 };

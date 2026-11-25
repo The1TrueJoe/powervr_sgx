@@ -8,6 +8,7 @@
 
 #include "pipe/p_screen.h"
 #include "util/simple_mtx.h"
+#include "util/pb_slab.h"
 #include "util/slab.h"
 
 #include "sgxws.h"
@@ -32,8 +33,20 @@
 #define SGX_DEBUG_NO_F16_SAMPLES     (1 << 16)
 #define SGX_DEBUG_NO_PDS_MERGE       (1 << 17)
 #define SGX_DEBUG_NO_DEP_F16_SAMPLES (1 << 18)
+#define SGX_DEBUG_ZLS_DUMP           (1 << 19)
+#define SGX_DEBUG_GLSL130            (1 << 20)
+#define SGX_DEBUG_NO_MRT             (1 << 21)
+#define SGX_DEBUG_UBO                (1 << 22)
+#define SGX_DEBUG_NO_VBO_SLABS       (1 << 23)
+#define SGX_DEBUG_NO_TEX_BLITS       (1 << 24)
+#define SGX_DEBUG_NO_MERGE           (1 << 25)
+#define SGX_DEBUG_VTF                (1 << 26)
+#define SGX_DEBUG_TEX3D              (1 << 27)
+#define SGX_DEBUG_NO_OCCLUSION       (1 << 28)
+#define SGX_DEBUG_CPU_RESOLVE        (1 << 29)
 
 extern uint32_t sgx_drv_debug;
+bool sgx_vtf(void);
 /* SGX_DUMP_CODE=dir: every compiled program's instructions written there */
 const char *sgx_dump_code_dir(void);
 
@@ -53,6 +66,7 @@ struct sgx_screen {
    /* the services connection; one per screen, used under lock */
    struct sgxws_dev *dev;
    simple_mtx_t lock;
+   uint64_t spare_bytes; /* textures' spare copies (p_atomic) */
    /* The one hardware render context (CCB, parameter buffer) of the process,
     * shared by every pipe context and serialised by the lock, as the DDK runs a
     * GL client on one render context: a second render context with a parameter
@@ -70,6 +84,15 @@ struct sgx_screen {
       uint32_t seq;
    } retired[32];
    unsigned n_retired;
+
+   /* Small buffers' device copies, cut from slabs of device memory
+    * (sgx_buffer_vbo): a game that re-specifies its vertex buffer every draw
+    * (glBufferData, GL_STREAM_DRAW) made and freed a BO each, thousands a
+    * second (issue #5).  An entry freed is used again once the kick it was
+    * last read by is done: vbo_done, the done kick at the allocation */
+   struct pb_slabs vbo_slabs;
+   bool vbo_slabs_ok;
+   uint32_t vbo_done;
 
    /* kmsro: the display device scanout buffers are allocated on */
    bool zero_copy; /* sgxws_device_info.zero_copy, unless SGX_DEBUG=nozerocopy */

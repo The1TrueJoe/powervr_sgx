@@ -8,8 +8,8 @@ shape.
 The header is [`uapi/powervr_sgx_drm.h`](uapi/powervr_sgx_drm.h), named as
 `include/uapi/drm/<driver>_drm.h` headers are. The driver (`drm/powervr_sgx`, through a
 symlink) and the tests build against it. `uapi/check.sh` compiles it for i386 and x86_64 against the
-literal layouts in `uapi/layout.inc`. The command streams are defined in
-[`uapi/powervr_sgx_kmd_stream.xml`](uapi/powervr_sgx_kmd_stream.xml) (section 3).
+literal layouts in `uapi/layout.inc`. The client commands are defined in
+[`uapi/powervr_sgx_cmd.xml`](uapi/powervr_sgx_cmd.xml) (section 3).
 
 Identifiers spell the driver name in full: `drm_powervr_sgx_*` and
 `DRM_IOCTL_POWERVR_SGX_*`. `pvr` is the prefix of upstream's Rogue driver, whose module is
@@ -56,7 +56,7 @@ What this replaces on the client side (`docs/DRIVER-UPSTREAM.md` section 4):
 | today, in the winsys | with this uAPI |
 |---|---|
 | services heaps and allocation attributes | GEM objects, `VM_MAP` |
-| CCB ring, `SGXMKIF_CMDTA` | `SUBMIT_JOBS` with `CMD_TA_KICK` and `CMD_RENDER` streams |
+| CCB ring, `SGXMKIF_CMDTA` | `SUBMIT_JOBS` with `drm_powervr_sgx_cmd_ta_kick` and `drm_powervr_sgx_cmd_render` |
 | render details, RT data, region headers, tail pointers, RT numbers | `CREATE_RT_DATASET`, kernel-built |
 | parameter buffer, descriptor, block list, free list, thresholds | `CREATE_CONTEXT.param_buffer_pages`, kernel-built |
 | HW render context | `CREATE_CONTEXT`, kernel-built |
@@ -116,17 +116,47 @@ addresses 32 bits of physical memory, so without an IOMMU `VM_MAP` refuses an im
 with a page above 4 GiB (`-EFAULT`): the DMA layer would have bounced that page, and the
 GPU would write the bounce copy. The GPU doesn't snoop the CPU caches, not even through
 cache-consistent PTEs (CE5310 board, 2026-11-09), and an import's pages may be cached on the CPU
-side. **So a job must list every import it reads or writes in its BO list** (`READ` or
-`WRITE`), on explicit sync too: the kernel flushes each listed import before the job and
-again once it is done, and only those. An unlisted import gets no coherence: the GPU may
-read stale data, and dirty CPU lines may later overwrite its output. Flushing every import
-mapped in the VM instead (the first version) cost Minecraft about 12 ms a frame, most of
-it for X jobs that never touched the scanout (2026-11-09); one 720x480 buffer is about
-1.4 MB, about 1.3 ms to flush on the CE5300. Our own objects, write-combined on the CPU,
-need no flush; they need listing only when shared, for implicit sync. An object in a job's BO list gets the job's fence
-in its reservation object (written: `WRITE`, else `READ`), and the job waits for the
-fences already there. That shared reservation is what makes a KMS commit of an imported
-buffer wait for the render (`powervr_sgx_prime`, the implicit frames).
+side. **So a job lists the bytes of imports it reads or writes in `cache_ranges`** (D6;
+`READ`, `WRITE` or both, rows of bytes at a stride, so one damage rectangle is one entry).
+The kernel flushes only those bytes:
+
+- when the job is about to run, it writes back and drops the CPU's lines of every range
+  (a GPU read sees the CPU's writes; no dirty line lands on a GPU write later);
+- once the job's writes have reached memory, before its out-fence signals, it drops the
+  lines of every `WRITE` range again (the CPU may have fetched them during the job);
+- once, when an object is imported, it writes back the whole object.
+
+It flushes through the exporter's vmap, held for the import's life, so an import must
+come from an exporter that supports vmap. A job whose fence carries an error (reset,
+device lost) gets no after-flush: its `WRITE` ranges are undefined. Bytes the job changes
+but doesn't list have undefined contents afterwards, for the CPU and the GPU, and that is
+never a leak: after the import-time write-back, a stale line or DRAM word is the object's
+own earlier contents. Writes by another process into a cached dma-buf the job reads are
+not covered: the same open problem as panthor's, not solved here. Flushing every import
+mapped in the VM (the first version) cost Minecraft about 12 ms a frame, most of it for X
+jobs that never touched the scanout (2026-11-09); one 720x480 buffer is about 1.4 MB,
+about 1.15 ms to flush on the CE5300 (0.85 us/KB, B3). With ranges, X lists the scanout's
+damage on the jobs that draw into it, usually a few KB. An entry for an object that isn't
+an import (our own objects are write-combined, and a dma-buf of this device imports as the
+original object) is checked and flushes nothing.
+
+An import whose exporter maps it write-combined or uncached flushes nothing either, after
+its import-time write-back. At import the kernel reads the cache bits of every PTE of the
+exporter's vmap (`lookup_address()`), and only WC, UC- or UC on every 4 KiB page counts.
+x86 doesn't allow one page two memory types (PAT), so such an exporter's other mappings are
+uncached too, and no CPU cache can hold a line of the object. gma500's exports on Cedarview
+are like this (its pages are set WC, and its vmap is WC). Skipping their flushes is worth
+about 11% in a CPU-bound game at 1024x600, from 46 to 51 fps on an N2600 (issue #5): the back
+buffer's 2.4 MB was flushed before and after every frame. A cached exporter (GEM shmem,
+udmabuf, a DMA helper object) keeps the flushes. Nothing in dma-buf states the exporter's
+CPU caching, and i915 on non-LLC Atoms flushes an import once when it maps it and never
+again. This check is narrower than that: cacheable imports still flush around every job.
+
+**Sync is explicit** (D6, M5): a job's fences are its `sync_ops`, and nothing is added to a
+shared object's reservation. Implicit sync with other drivers goes through the dma-buf:
+`DMA_BUF_IOCTL_EXPORT_SYNC_FILE` for what a job must wait for, and the job's out-fence
+put back with `DMA_BUF_IOCTL_IMPORT_SYNC_FILE`, which is what makes a KMS commit of an
+imported buffer wait for the render (`powervr_sgx_prime`).
 
 `DRM_POWERVR_SGX_BO_CODE` makes a code object (D12): it holds USSE programs, it is the
 only kind of object the USSE heaps accept, and it can go nowhere else. It has no CPU
@@ -158,8 +188,11 @@ The GPU must not run code that changes after the scan. Code objects are mapped w
 PTE `READONLY` bit, which stops a client task's `st` (E1, DRM-DRIVER.md section 6).
 While a VM maps the object, an upload may only write past the end of every earlier
 upload (`-EBUSY` otherwise): new code lands only in bytes the GPU sees as zeros, which
-is a harmless instruction. Once no VM maps it, the object can be uploaded anywhere
-again.
+is a harmless instruction. Once no VM maps it and the GPU has finished every job that
+could use those mappings, the object can be uploaded anywhere again; until then a lower
+write fails with `-EBUSY`. An unmap lets go of the object only after those jobs and, if
+the VM ran one since the GPU started, after the BIF invalidate, which goes out with the
+next command.
 
 PDS programs are not scanned. A PDS program reaches USSE code only through DOUTU, which
 picks a code base: 0-13 cover exactly the two USSE heaps, and 14 and 15 point at nothing
@@ -242,9 +275,17 @@ The kernel computes (all capture, STATE.md 6):
 - RT data with two entries, three render-details sets, the TA-data blocks, and the
   0x200-byte background object block with its vertices from `w` and `h`.
 
-`samples` must be 1 in this version. TE AA has multisample bits, but no capture shows a
-multisampled frame (G14). `flags` is reserved. `TE_AA`, `RT +0x10`, `+0x14`, `+0x18` and
-`+0x68` are kernel constants in this version (G12).
+`samples` is 1 or 4 (0 is 1). At 4 the target is 2×2 samples per pixel, resolved at the end
+of each tile (capture `ms1`/`ms4`, STATE.md "Multisampling (4x)"). The TE tiles samples:
+the numbers above come from `2·xt` and `2·yt` tiles, with `w·h·4` against `0x4b000`; the
+macrotile registers and tiles per macrotile are those halved, in pixel tiles, and
+`TE_SCREEN` stays in pixel tiles. That gives, at 720×480, `TE_MTILE1` `8180c012`, 0x30 tiles
+per macrotile, region arrays of 0x9000 and tail pointers of 0x4000. The kernel also sets
+`TE_AA` b31 and b30, RT +0x10 b1, RT +0x14 and +0x18 `eaa26e26` (0x88 at 1x), and the ZLS
+control's tile count from `2·xt`. Only 720×480 is captured at 4x; other sizes follow the
+same formulas (G14). The client sets the PBE's resolve (word 2 b30) and the ZLS 3D flags
+itself. `flags` is reserved. `TE_AA`, `RT +0x10`, `+0x14`, `+0x18` and `+0x68` are
+otherwise kernel constants in this version (G12).
 
 ### SUBMIT_JOBS
 
@@ -258,10 +299,10 @@ multisampled frame (G14). `flags` is reserved. `TE_AA`, `RT +0x10`, `+0x14`, `+0
 | `type` | `RENDER` or `TRANSFER` |
 | `context_handle` | context of the matching type |
 | `flags` | per type: transfer has `DST_TWIDDLED`, render has none yet |
-| `cmd_stream`, `cmd_stream_len` | a `CMD_RENDER` or `CMD_TRANSFER` stream (section 3) |
+| `cmd` | a `drm_powervr_sgx_cmd_render` or `drm_powervr_sgx_cmd_transfer` (section 3) |
 | `sync_ops` | array of `{handle, flags, value}`, wait or signal, binary or timeline, as pvr |
-| `bo_refs` | array of `{handle, flags}`, read or write. Only shared objects need one (D6) |
-| `ta_kicks` | render only: array of `drm_powervr_sgx_ta_kick` `{cmd_stream, cmd_stream_len, flags}`, each a `CMD_TA_KICK` stream; at least one |
+| `cache_ranges` | array of `{handle, flags, offset, size, stride, rows}`, read and/or write, at most 64: the bytes of imports the kernel keeps coherent around the job (D6) |
+| `ta_kicks` | render only: array of `drm_powervr_sgx_cmd_ta_kick`, each `head.size` equal to the stride; at least one |
 | `rt_dataset_handle` | render only |
 
 **A render job is a whole scene** (D3). The first element of `ta_kicks` is the kick with
@@ -274,12 +315,13 @@ Fences and errors:
 
 - One out-fence per job. It signals from the completion interrupt when the 3D has
   finished, or when the transfer has finished.
-- Reservation objects: the out-fence goes on the VM's reservation object as bookkeeping,
-  and on each `bo_refs` entry as read or write. In-fences of `bo_refs` become scheduler
-  dependencies.
+- Reservation objects: the out-fence goes on the VM's reservation object as bookkeeping
+  only. Shared objects get no fence from the kernel (D6: sync is explicit).
 - `-ECANCELED`: the context is not OK (section 8). `-EIO`: the device is lost. `-ENOENT`:
-  a handle is wrong. `-EINVAL`: a stream is malformed, or a stream or job field failed
-  validation (section 3). `-EFAULT`: a pointer is bad.
+  a handle is wrong. `-EINVAL`: a command is malformed, or a command or job field failed
+  validation (section 3). `-E2BIG`: a command or extension has non-zero bytes past what
+  the kernel knows. `-EOPNOTSUPP`: a job type or extension this core doesn't accept.
+  `-EFAULT`: a pointer is bad.
 
 Kernel side, for orientation: one `drm_sched` scheduler for the GPU, one entity per
 context, and a hardware limit of one job at a time in the first version, since the open
@@ -287,115 +329,96 @@ microkernel's render-in-flight list is one slot (UKERNEL.md section 5). The job 
 feeds section 8. Scene-level jobs mean the scheduler's unit equals the microkernel's
 unit, so no half-submitted scene can sit in the firmware waiting for userspace.
 
-## 3. Client streams, field by field
+## 3. Client commands, field by field
 
-### 3.1 Stream format
+### 3.1 Command format
 
-The client's part of each command is a `pvr_stream`-style scalar stream (D2), the way
-upstream's Rogue driver passes its geometry, fragment and transfer commands
-(`drivers/gpu/drm/imagination/pvr_stream.c`). There are three streams:
+Revision 3 (D2, revised; design in [`uapi/rev3-commands.md`](uapi/rev3-commands.md)):
+each command is a plain struct with a common head, `{size, padding, extensions}`.
 
-| stream | where | per |
+| struct | where | per |
 |---|---|---|
-| `CMD_RENDER` | `drm_powervr_sgx_job.cmd_stream` of a render job | scene: the 3D values |
-| `CMD_TA_KICK` | `drm_powervr_sgx_ta_kick.cmd_stream`, one per element of `ta_kicks` | kick |
-| `CMD_TRANSFER` | `drm_powervr_sgx_job.cmd_stream` of a transfer job | transfer |
+| `drm_powervr_sgx_cmd_render` | `drm_powervr_sgx_job.cmd` of a render job | scene: the 3D values |
+| `drm_powervr_sgx_cmd_ta_kick` | each element of `ta_kicks` | kick |
+| `drm_powervr_sgx_cmd_transfer` | `drm_powervr_sgx_job.cmd` of a transfer job | transfer |
 
-A stream is little-endian and laid out as follows (design; framing as `pvr_stream`):
-
-1. A header of two `__u32`: the main stream's length in bytes, header included, then a
-   word that must be 0.
-2. The main stream: the fields in definition order, each naturally aligned from the start
-   of the stream (a 64-bit field on 8 bytes).
-3. Optionally, extension streams. Each group is announced by a `__u32` header: bits 29-31
-   are the header type, bit 28 says another header follows, and bits 0-27 hold one bit per
-   extension stream. The streams whose bits are set follow in bit order.
-
-The kernel copies the stream (at most 4 KiB) into kernel memory once, then decodes it.
-Where this is stricter than `pvr_stream.c`, the reason is that our fields get checked and
-pvr's do not:
-
-| rule | `pvr_stream.c` | here |
-|---|---|---|
-| main stream length | at least the header and at most the stream | **exactly** the length the kernel knows |
-| bytes skipped to align a field | ignored | must be 0 |
-| bytes after the last extension stream | ignored | `-EINVAL` |
-| the same header type twice | accepted | `-EINVAL` |
-| field values | copied into the firmware command | checked one by one (section 3.2), then across fields (sections 3.3 to 3.5) |
-
-**Growth.** A main stream never changes once released, so an old client's stream always
-decodes. A new field goes in an extension stream behind a new header bit. The driver's minor
-version (`drmGetVersion`) tells a client which bits a kernel accepts, as for any DRM uAPI
-addition; a bit tied to a hardware quirk is also listed by `QUIRKS_GET`. This is how D5 works
-with streams: a command
-word that gets a name and a test becomes an extension-stream field, and until then the
-kernel writes the captured constant. pvr's per-field `feature` flags exist for Rogue's BVNC
-variants. Nothing here needs them yet. If Cedarview diverges (G25), an extension stream
-behind a quirk carries the difference, and a must-have quirk makes it mandatory, as in pvr.
-
-**Fields carry values, not firmware words.** pvr's stream fields are register images that
-Mesa packs. Here a field is a value in the client's units, such as an address or a row
-count, and the kernel packs the firmware word. Each field can then be checked on its own,
-and the client never does arithmetic on kernel-chosen bases like `EUR_CR_PDS_EXEC_BASE`.
-Words that hold real register bit fields (`zls_control`, `flags_3d`, `ta_flags2`) are
-passed as register words with an allowed-bit mask.
-
-**Check order** for each stream of a job: copy, decode with the per-field checks, check the
-addresses against the job's VM (`mapped`), then run the command's cross-field rules. Any
-failure is `-EINVAL` and `failed_index` names the job.
+- **Base structs and extensions.** A base struct holds only fields that every
+  supported core has, with the same meaning. A field some core lacks, or a raw
+  register image whose layout is one core's, goes in an extension chained from
+  `head.extensions`. The SGX545's `zls_control`, `flags_3d` and `ta_flags2` are
+  such extensions. An extension left out reads as all zero.
+- **Copying.** The kernel copies each struct as `copy_struct_from_user()` does:
+  a shorter struct is zero-filled, and non-zero bytes past what it knows are
+  `-E2BIG`. A field appended later takes 0 to mean "absent".
+- **Check order** for each command of a job: copy with its extensions, the
+  per-field checks, the addresses against the job's VM (`mapped`), then the
+  command's cross-field rules.
+- **Errors.** A known extension this core doesn't accept is `-EOPNOTSUPP`; a
+  non-zero tail is `-E2BIG`; any other failure is `-EINVAL` or `-EFAULT`, and
+  `failed_index` names the job.
+  `DEV_QUERY_COMMANDS_GET` reports what a core accepts.
 
 ### 3.2 Field layout and kernel checks
 
-Generated from [`uapi/powervr_sgx_kmd_stream.xml`](uapi/powervr_sgx_kmd_stream.xml) by
-`uapi/gen_stream.py`; `uapi/check.sh` fails if this table is stale. Offsets are from the
-start of the stream.
+Generated from [`uapi/powervr_sgx_cmd.xml`](uapi/powervr_sgx_cmd.xml) by
+`uapi/gen_cmd.py`; `uapi/check.sh` fails if this table is stale. Offsets are
+from the start of the struct. One column per core: an address must be below
+2^va_bits; "unknown on this core" means the command is not offered there.
 
-- **address** fields are device-virtual addresses in the job's VM. "below 2^32" and the
-  alignment and heap checks are made at decode. "mapped for" is checked against the VM's
-  mappings at submit: `rt_depth` is `pad_w·pad_h·4` and `rt_stencil` is `pad_w·pad_h` of
-  the job's RT dataset (section 3.4).
-- "reaches a register only" means the value goes into a register or a firmware word that
-  the hardware reads as a number, with no address in it. Nothing outside the VM depends on
-  it.
-- The `tiles_x` and `tiles_y` limits are the last tile column and row of the largest render
-  target (`rt_max_width/32 - 1`, `rt_max_height/16 - 1`).
+- **address** fields are device-virtual addresses in the job's VM. "mapped" is
+  checked against the VM's mappings at submit: `rt_depth` is `pad_w·pad_h·4` and
+  `rt_stencil` is `pad_w·pad_h` of the job's RT dataset (section 3.4), times its
+  samples; `pds_rows`
+  is the row count times the core's `pds_row_bytes`.
+- "none" means the value goes into a register or a firmware word that the
+  hardware reads as a number, with no address in it. Nothing outside the VM
+  depends on it.
+- The `tiles_x` and `tiles_y` limits are the last tile column and row of the
+  largest render target (`rt_max_width/32 - 1`, `rt_max_height/16 - 1`).
 
-<!-- stream-table begin: generated by docs/uapi/gen_stream.py -->
-| stream | offset | field | bits | type | kernel check |
+<!-- cmd-table begin: generated by docs/uapi/gen_cmd.py -->
+| struct | offset | field | type | sgx545 | sgx530 |
 |---|---|---|---|---|---|
-| `CMD_RENDER` | 0x00 | header: `length` = 80, then a zero word | 64 | | exact |
-| | 0x08 | `depth_addr` | 64 | address | 0 = none; below 2^32; mapped for `rt_depth` bytes |
-| | 0x10 | `stencil_addr` | 64 | address | 0 = none; below 2^32; mapped for `rt_stencil` bytes |
-| | 0x18 | `pixel_event_pds_addr` | 64 | address | not 0; below 2^32; in `PDS_PIXEL`; 16-byte aligned; mapped for 16·`pixel_event_pds_rows` bytes |
-| | 0x20 | `bg_pds_secondary_addr` | 64 | address | not 0; below 2^32; in `PDS_PIXEL`; 16-byte aligned |
-| | 0x28 | `bg_pds_primary_addr` | 64 | address | not 0; below 2^32; in `PDS_PIXEL`; 16-byte aligned |
-| | 0x30 | `pixel_event_pds_rows` | 32 | uint | 1..63 |
-| | 0x34 | `bg_pds_secondary_rows` | 32 | uint | 1..63 |
-| | 0x38 | `bg_pds_primary_rows` | 32 | uint | 1..63 |
-| | 0x3c | `zls_control` | 32 | uint | bits in `0x001ff007` only |
-| | 0x40 | `flags_3d` | 32 | uint | bits in `0x00000180` only |
-| | 0x44 | `bg_depth` | 32 | float | none: reaches a register only |
-| | 0x48 | `depth_bias_units` | 32 | int | none: reaches a register only |
-| | 0x4c | `depth_bias_factor` | 32 | float | none: reaches a register only |
-| `CMD_TA_KICK` | 0x00 | header: `length` = 20, then a zero word | 64 | | exact |
-| | 0x08 | `vdm_base` | 64 | address | not 0; below 2^32; 4-byte aligned; mapped for 0x4 bytes |
-| | 0x10 | `ta_flags2` | 32 | uint | bits in `0x02c80000` only |
-| `CMD_TRANSFER` | 0x00 | header: `length` = 48, then a zero word | 64 | | exact |
-| | 0x08 | `bg_block_addr` | 64 | address | not 0; below 2^32; 16-byte aligned; mapped for 0x200 bytes |
-| | 0x10 | `pixel_event_pds_addr` | 64 | address | not 0; below 2^32; in `PDS_PIXEL`; 16-byte aligned; mapped for 16·`pixel_event_pds_rows` bytes |
-| | 0x18 | `pixel_event_pds_rows` | 32 | uint | 1..63 |
-| | 0x1c | `first_tile_x` | 32 | uint | 0..`tiles_x` limit |
-| | 0x20 | `first_tile_y` | 32 | uint | 0..`tiles_y` limit |
-| | 0x24 | `last_tile_x` | 32 | uint | 0..`tiles_x` limit |
-| | 0x28 | `last_tile_y` | 32 | uint | 0..`tiles_y` limit |
-| | 0x2c | `bg_depth` | 32 | float | none: reaches a register only |
-<!-- stream-table end -->
+| `cmd_render` (80 B) | 0x00 | head | |  |  |
+| | 0x10 | `depth_addr` | u64 | address, 0 = none, rt_depth mapped | address, 0 = none, rt_depth mapped |
+| | 0x18 | `stencil_addr` | u64 | address, 0 = none, rt_stencil mapped | address, 0 = none, rt_stencil mapped |
+| | 0x20 | `pixel_event_pds_addr` | u64 | address, in pds_pixel, align 16, pixel_event_pds_rows rows mapped | unknown on this core |
+| | 0x28 | `bg_pds_secondary_addr` | u64 | address, in pds_pixel, align 16 | unknown on this core |
+| | 0x30 | `bg_pds_primary_addr` | u64 | address, in pds_pixel, align 16 | unknown on this core |
+| | 0x38 | `pixel_event_pds_rows` | u32 | 1..63 | unknown on this core |
+| | 0x3c | `bg_pds_secondary_rows` | u32 | 1..63 | unknown on this core |
+| | 0x40 | `bg_pds_primary_rows` | u32 | 1..63 | unknown on this core |
+| | 0x44 | `bg_depth_f32` | f32 | none | none |
+| | 0x48 | `depth_bias_units` | s32 | none | none |
+| | 0x4c | `depth_bias_factor_f32` | f32 | none | none |
+| `cmd_ta_kick` (24 B) | 0x00 | head | |  |  |
+| | 0x10 | `vdm_base` | u64 | address, align 4, 4 mapped | unknown on this core |
+| `cmd_transfer` (56 B) | 0x00 | head | |  |  |
+| | 0x10 | `bg_block_addr` | u64 | address, align 16, 0x200 mapped | unknown on this core |
+| | 0x18 | `pixel_event_pds_addr` | u64 | address, in pds_pixel, align 16, pixel_event_pds_rows rows mapped | unknown on this core |
+| | 0x20 | `pixel_event_pds_rows` | u32 | 1..63 | unknown on this core |
+| | 0x24 | `first_tile_x` | u32 | 0..tiles_x | 0..tiles_x |
+| | 0x28 | `first_tile_y` | u32 | 0..tiles_y | 0..tiles_y |
+| | 0x2c | `last_tile_x` | u32 | 0..tiles_x | 0..tiles_x |
+| | 0x30 | `last_tile_y` | u32 | 0..tiles_y | 0..tiles_y |
+| | 0x34 | `bg_depth_f32` | f32 | none | none |
+| `ext_sgx545_render` (24 B, id 1, sgx545) | 0x00 | head | |  |  |
+| | 0x10 | `zls_control` | u32 | mask `0x001ff007` | - |
+| | 0x14 | `flags_3d` | u32 | mask `0x00000180` | - |
+| `ext_sgx545_ta_kick` (24 B, id 2, sgx545) | 0x00 | head | |  |  |
+| | 0x10 | `ta_flags2` | u32 | mask `0x02c80000` | - |
+
+| core | va_bits | pds_row_bytes | max_samples | commands offered |
+|---|---|---|---|---|
+| sgx545 | 32 | 16 | 4 | render, ta_kick, transfer |
+| sgx530 | 28 | unknown | unknown | none |
+<!-- cmd-table end -->
 
 Where a field says "mapped", that is a programming-error check made at submit time. A
 client can unmap afterwards, so this check is not a security boundary: section 7.1 says
 what is.
 
-### 3.3 `CMD_TA_KICK`
+### 3.3 `drm_powervr_sgx_cmd_ta_kick`
 
 | field | goes to | evidence |
 |---|---|---|
@@ -404,9 +427,10 @@ what is.
 
 The register also takes "a low-bits field" and "DPM bits" from the microkernel
 (UKERNEL.md section 7). Both are outside the client's reach. Which kick is first and which
-is last comes from the kick's position in `ta_kicks` (D3), not from the stream.
+is last comes from the kick's position in `ta_kicks` (D3), not from the command.
+`ta_flags2` is in `drm_powervr_sgx_ext_sgx545_ta_kick`.
 
-### 3.4 `CMD_RENDER`
+### 3.4 `drm_powervr_sgx_cmd_render`
 
 | field | goes to | evidence |
 |---|---|---|
@@ -426,6 +450,7 @@ Cross-field rules, in the kernel's render check:
 
 | rule | evidence |
 |---|---|
+| `zls_control` is not 0 into a 4-sample RT dataset: its depth and stencil are per sample and always stored, so a 4x render needs a ZLS buffer even without a depth config | capture: the vendor stack allocates 4 × 736×480×5 bytes and turns ZLS on for a window with no depth (`ms4`) |
 | `depth_addr` is not 0 when `zls_control` is not 0 | hardware: ZLS stores to it (TEX.md 7) |
 | `stencil_addr` is not 0 when `zls_control` has bit 0 or 1, or `flags_3d` has bit 8 | hardware: a bad stencil address locks up the 3D (TEX.md 7) |
 | depth and stencil each lie less than 2^30 above the ZLS request base, `min(depth, stencil) & 0xfff00000` | capture for the base (STATE.md 6); the 2^30 limit is a guess (G13) |
@@ -445,7 +470,7 @@ exist because later kicks can only send what changed. Here the kernel writes the
 set when it builds the job and uses deferred updates only where its firmware path needs
 them.
 
-### 3.5 `CMD_TRANSFER`
+### 3.5 `drm_powervr_sgx_cmd_transfer`
 
 | field | goes to | evidence |
 |---|---|---|
@@ -487,19 +512,14 @@ texture words, and the end-of-tile program with the destination's PBE words (TEX
 
 | file | what | who uses it |
 |---|---|---|
-| `uapi/powervr_sgx_kmd_stream.xml` | the streams, in the format of Mesa's `src/imagination/csbgen` (as `rogue/kmd_stream.xml`), plus validation attributes | the source of everything below |
-| Mesa's `gen_pack_header.py` | reads the XML; emits the defines and the `HDR` and `EXTHDR_*` packers. It parses `<stream>` and emits nothing for it, as for Rogue | Mesa |
-| `uapi/gen_stream.py user` | a writer per main stream (`SGX_KMD_STREAM_CMD_*_pack()`) with each field's offset | Mesa (G26) |
-| `uapi/gen_stream.py kernel-h`, `kernel-c` | the decoded structs and the tables: order, size, check, heap, extent | the kernel; generated copies in `uapi/stream/` |
-| `uapi/stream/pvrsgx_stream.c` | the decoder: framing, per-field checks, the mapped check | reference for the kernel driver |
-| `uapi/stream/pvrsgx_cmd_checks.c` | the cross-field rules of sections 3.4 and 3.5 | reference for the kernel driver (G27) |
-| `uapi/stream/test/` | host test: every stream written by the generated writer decodes to the same values, and each rule rejects the stream that breaks it; a fixture exercises extension streams, quirks and must-have bits | `check.sh` |
+| `uapi/powervr_sgx_cmd.xml` | the commands, their extensions, the cores and their per-core check values | the source of everything below |
+| `uapi/gen_cmd.py header` | the command block of `powervr_sgx_drm.h`: the structs, the extension structs and names | the kernel and Mesa |
+| `uapi/gen_cmd.py kernel-h`, `kernel-c` | the all-structs (a command with its extensions) and the check tables per core, with static asserts on every offset | the kernel; generated copies in `uapi/cmd/` |
+| `uapi/cmd/pvrsgx_cmd.c` | the copy (size, tail, extension chain) and the per-field and mapped checks | the kernel driver |
+| `uapi/cmd/pvrsgx_cmd_checks.c` | the cross-field rules of sections 3.4 and 3.5 | the kernel driver |
+| `uapi/cmd/test/` | host test: every rule of rev3-commands.md sections 3 and 4 rejects the command that breaks it, and good commands come through with their values | `check.sh` |
 
-csbgen ignores attributes it doesn't know, which is how `rogue/kmd_stream.xml` already
-carries the kernel-only `feature`. The validation attributes ride the same way: `check`
-(`none`, `range`, `mask`, `addr`), `min`, `max`, `max_limit`, `mask`, `align`, `heap`,
-`optional`, `extent`, `extent_field`, and `quirk` on an extension stream. The XML's header
-comment defines them.
+Mesa fills the structs from the header; it has no generated code of its own.
 
 ## 4. How every word of the firmware commands is produced
 
@@ -649,7 +669,8 @@ XML, the decoder compiles for both targets, and the stream test passes.
 |---|---|---|
 | `drm_powervr_sgx_obj_array` | 16 | `0x00 stride (4)`, `0x04 count (4)`, `0x08 array (8)` |
 | `drm_powervr_sgx_dev_query_gpu_info` | 16 | `0x00 core_id (4)`, `0x04 core_revision (4)`, `0x08 fw_interface_version (4)`, `0x0c _padding_c (4)` |
-| `drm_powervr_sgx_dev_query_limits` | 32 | `0x00 rt_max_width (4)`, `0x04 rt_max_height (4)`, `0x08 rt_max_samples (4)`, `0x0c pb_min_pages (4)`, `0x10 pb_default_pages (4)`, `0x14 pb_max_pages (4)`, `0x18 max_ta_kicks (4)`, `0x1c _padding_1c (4)` |
+| `drm_powervr_sgx_dev_query_limits` | 40 | `0x00 rt_max_width (4)`, `0x04 rt_max_height (4)`, `0x08 rt_max_samples (4)`, `0x0c pb_min_pages (4)`, `0x10 pb_default_pages (4)`, `0x14 pb_max_pages (4)`, `0x18 max_ta_kicks (4)`, `0x1c va_bits (4)`, `0x20 caps (4)`, `0x24 max_layers (4)` |
+| `drm_powervr_sgx_dev_query_commands` | 32 | `0x00 job_types (4)`, `0x04 _padding_4 (4)`, `0x08 render_exts (8)`, `0x10 ta_kick_exts (8)`, `0x18 transfer_exts (8)` |
 | `drm_powervr_sgx_dev_query_quirks` | 16 | `0x00 quirks (8)`, `0x08 count (2)`, `0x0a musthave_count (2)`, `0x0c _padding_c (4)` |
 | `drm_powervr_sgx_heap` | 32 | `0x00 base (8)`, `0x08 size (8)`, `0x10 flags (4)`, `0x14 page_size_log2 (4)`, `0x18 usse_base_index (4)`, `0x1c usse_window_log2 (4)` |
 | `drm_powervr_sgx_dev_query_heap_info` | 16 | `0x00 heaps (16)` |
@@ -659,17 +680,23 @@ XML, the decoder compiles for both targets, and the stream test passes.
 | `drm_powervr_sgx_ioctl_upload_code_args` | 40 | `0x00 handle (4)`, `0x04 flags (4)`, `0x08 offset (8)`, `0x10 size (8)`, `0x18 pointer (8)`, `0x20 bad_offset (8)` |
 | `drm_powervr_sgx_ioctl_create_vm_context_args` | 8 | `0x00 handle (4)`, `0x04 _padding_4 (4)` |
 | `drm_powervr_sgx_ioctl_destroy_vm_context_args` | 8 | `0x00 handle (4)`, `0x04 _padding_4 (4)` |
-| `drm_powervr_sgx_ioctl_vm_map_args` | 40 | `0x00 vm_context_handle (4)`, `0x04 flags (4)`, `0x08 device_addr (8)`, `0x10 handle (4)`, `0x14 _padding_14 (4)`, `0x18 offset (8)`, `0x20 size (8)` |
-| `drm_powervr_sgx_ioctl_vm_unmap_args` | 24 | `0x00 vm_context_handle (4)`, `0x04 _padding_4 (4)`, `0x08 device_addr (8)`, `0x10 size (8)` |
+| `drm_powervr_sgx_vm_bind_op` | 40 | `0x00 op (4)`, `0x04 handle (4)`, `0x08 bo_offset (8)`, `0x10 device_addr (8)`, `0x18 size (8)`, `0x20 flags (4)`, `0x24 _padding_24 (4)` |
+| `drm_powervr_sgx_ioctl_vm_bind_args` | 40 | `0x00 vm_context_handle (4)`, `0x04 flags (4)`, `0x08 ops (16)`, `0x18 sync_ops (16)` |
 | `drm_powervr_sgx_ioctl_create_context_args` | 24 | `0x00 type (4)`, `0x04 flags (4)`, `0x08 priority (4)`, `0x0c vm_context_handle (4)`, `0x10 param_buffer_pages (4)`, `0x14 handle (4)` |
 | `drm_powervr_sgx_ioctl_destroy_context_args` | 8 | `0x00 handle (4)`, `0x04 _padding_4 (4)` |
 | `drm_powervr_sgx_ioctl_get_context_state_args` | 16 | `0x00 handle (4)`, `0x04 state (4)`, `0x08 reset_count (4)`, `0x0c _padding_c (4)` |
 | `drm_powervr_sgx_ioctl_create_rt_dataset_args` | 24 | `0x00 context_handle (4)`, `0x04 width (4)`, `0x08 height (4)`, `0x0c samples (4)`, `0x10 flags (4)`, `0x14 handle (4)` |
 | `drm_powervr_sgx_ioctl_destroy_rt_dataset_args` | 8 | `0x00 handle (4)`, `0x04 _padding_4 (4)` |
-| `drm_powervr_sgx_ta_kick` | 16 | `0x00 cmd_stream (8)`, `0x08 cmd_stream_len (4)`, `0x0c flags (4)` |
+| `drm_powervr_sgx_cmd_head` | 16 | `0x00 size (4)`, `0x04 _padding_4 (4)`, `0x08 extensions (8)` |
+| `drm_powervr_sgx_ext` | 16 | `0x00 name (4)`, `0x04 _padding_4 (4)`, `0x08 next (8)` |
+| `drm_powervr_sgx_cmd_render` | 80 | `0x00 head (16)`, `0x10 depth_addr (8)`, `0x18 stencil_addr (8)`, `0x20 pixel_event_pds_addr (8)`, `0x28 bg_pds_secondary_addr (8)`, `0x30 bg_pds_primary_addr (8)`, `0x38 pixel_event_pds_rows (4)`, `0x3c bg_pds_secondary_rows (4)`, `0x40 bg_pds_primary_rows (4)`, `0x44 bg_depth_f32 (4)`, `0x48 depth_bias_units (4)`, `0x4c depth_bias_factor_f32 (4)` |
+| `drm_powervr_sgx_cmd_ta_kick` | 24 | `0x00 head (16)`, `0x10 vdm_base (8)` |
+| `drm_powervr_sgx_cmd_transfer` | 56 | `0x00 head (16)`, `0x10 bg_block_addr (8)`, `0x18 pixel_event_pds_addr (8)`, `0x20 pixel_event_pds_rows (4)`, `0x24 first_tile_x (4)`, `0x28 first_tile_y (4)`, `0x2c last_tile_x (4)`, `0x30 last_tile_y (4)`, `0x34 bg_depth_f32 (4)` |
+| `drm_powervr_sgx_ext_sgx545_render` | 24 | `0x00 base (16)`, `0x10 zls_control (4)`, `0x14 flags_3d (4)` |
+| `drm_powervr_sgx_ext_sgx545_ta_kick` | 24 | `0x00 base (16)`, `0x10 ta_flags2 (4)`, `0x14 _padding_14 (4)` |
 | `drm_powervr_sgx_sync_op` | 16 | `0x00 handle (4)`, `0x04 flags (4)`, `0x08 value (8)` |
-| `drm_powervr_sgx_bo_ref` | 8 | `0x00 handle (4)`, `0x04 flags (4)` |
-| `drm_powervr_sgx_job` | 80 | `0x00 type (4)`, `0x04 context_handle (4)`, `0x08 flags (4)`, `0x0c cmd_stream_len (4)`, `0x10 cmd_stream (8)`, `0x18 sync_ops (16)`, `0x28 bo_refs (16)`, `0x38 ta_kicks (16)`, `0x48 rt_dataset_handle (4)`, `0x4c _padding_4c (4)` |
+| `drm_powervr_sgx_cache_range` | 32 | `0x00 handle (4)`, `0x04 flags (4)`, `0x08 offset (8)`, `0x10 size (8)`, `0x18 stride (4)`, `0x1c rows (4)` |
+| `drm_powervr_sgx_job` | 80 | `0x00 type (4)`, `0x04 context_handle (4)`, `0x08 flags (4)`, `0x0c _padding_c (4)`, `0x10 cmd (8)`, `0x18 sync_ops (16)`, `0x28 cache_ranges (16)`, `0x38 ta_kicks (16)`, `0x48 rt_dataset_handle (4)`, `0x4c _padding_4c (4)` |
 | `drm_powervr_sgx_ioctl_submit_jobs_args` | 24 | `0x00 jobs (16)`, `0x10 failed_index (4)`, `0x14 _padding_14 (4)` |
 <!-- layout-table end -->
 
@@ -702,12 +729,12 @@ HWPerf has no uAPI.
 
 ### 7.2 Four hardware premises this design needs
 
-**Tested on a CE5300 board (core rev 1.0.14), 2026-11-02 (hardware):** P1, P2 and P3 **fail**;
+**Tested on the CE5300 board (core rev 1.0.14), 2026-11-02 (hardware):** P1, P2 and P3 **fail**;
 P4 **holds for our microkernel by construction** (it no longer reads `sa`, f672198), and the read half held on hardware; whether a client can leave `sa` for the DDK microkernel to read is untested. See `docs/log/entries/2026-11-02-0710-isolation-p1p4.md` and
 `tools/iso/`. So the items in 7.1 do not deliver isolation on their own, and D9 is in
 force. Summary in the table's last column; detail in the log entry.
 
-**P1's open half, on a second CE5300 board, 2026-11-02 (hardware):** the register-*write* test Joseph
+**P1's open half, on the CE5310 board, 2026-11-02 (hardware):** the register-*write* test Joseph
 asked for in D9. A client `str` to `BIF_DIR_LIST_BASE0` (0xc84) **does not change the
 register** — host read 0x01d6b000 before and after, and the shader's own read-back
 unchanged, in a frame that returned `render done` — so a client **cannot repoint translation**
@@ -730,8 +757,8 @@ experiment before M2's exit test could mean anything; that experiment has now ru
 
 | # | premise | why it is in doubt | experiment | **hardware result (2026-11-02)** |
 |---|---|---|---|---|
-| **P1** | **A client's USSE task can't write `EUR_CR_*` registers.** | UKERNEL.md section 8 has the microkernel using `ldr`/`str` on the register file. ISA.md lists `ldr`/`str` (names a guess there) as ordinary instructions with a 14-bit immediate address, and neither doc says they are restricted (G1). A task that can write the directory-list base can point itself at any memory. | From a vertex and a pixel task of an ordinary client: `ldr` of `EUR_CR_CORE_ID` and compare with the known value; `str` to a harmless scratch-like register and read it from the host. | **FAILS (reads).** A fragment task's `ldr` returned the true `CORE_ID` (0x01150000), `CORE_REVISION` (0x1000e) and a live per-pixel `TIMER`. `str` to the unused `USE_CODE_BASE_14`/`_15` had no effect. The *effective*-register write (2026-11-02): a `str` to `BIF_DIR_LIST_BASE0` **does not change the register** (host and shader read-back unchanged, frame completed), so a client **can't repoint translation** this way, and that store is also **not a DoS** — an isolated re-run (clean cold boot, WPE off, GPU idle) left the box up with 0 SGX recoveries over ~2.5 min. (The first run's reboot was a concurrent dEQP wedge, not this store.) All three client stores tried (`BIF_DIR_LIST_BASE0`, `USE_CODE_BASE_14`/`_15`) were dropped — but not generally: the microkernel writes registers via `str` (UKERNEL.md §8), so stores land in some context, and untested registers (`SOFT_RESET`, `EVENT_KICK`, clock/power) could be destructive. Fix: D9 option 1 — validate/forbid client `ldr` (reads leak) **and** `str` (same scan; relax only once we know why client stores drop). |
-| **P2** | **Kernel memory can't be reached from a client's TA or 3D task.** | UKERNEL.md section 6 points the EDM's directory base at the context PD, which suggests the DDK maps kernel heaps in every PD. SRVINIT.md's allocations carry `EDM_PROTECT`, but no doc says what enforces it or whether it is enforced. | From a client shader: load and store an address in the kernel data heap, with the page mapped `EDM_PROTECT`, and watch the memory from the host. Also read the BIF bank registers' layout (G2). | **FAILS.** Pixel *and* vertex tasks `ld` the host control block, the TA3D control block (incl. word 0x16 kernel-CCB base and **word 0x17 the PD physical address**), the kernel CCB, and the microkernel code — all in the client's translation. A `st` into the kernel region wedged the GPU (HWR). A client could also allocate in the kernel-data heap. Fix: the new kernel driver owns the PD and does not map kernel heaps/code into client PDs. **Only with the open microkernel** (2026-11-03, log `2026-11-03-0135-drm-first-ta`): the DDK microkernel moves the EDM onto the job's directory during a TA kick (`BIF_BANK0 = 0x11`, list 1 = the context PD) and fetches its own code through it, so under the DDK microkernel every client PD must map the kernel heaps and P2 stays open. The driver does that only when the DDK microkernel is loaded (`share_kernel_heaps`), and warns. |
+| **P1** | **A client's USSE task can't write `EUR_CR_*` registers.** | UKERNEL.md section 8 has the microkernel using `ldr`/`str` on the register file. ISA.md lists `ldr`/`str` (names a guess there) as ordinary instructions with a 14-bit immediate address, and neither doc says they are restricted (G1). A task that can write the directory-list base can point itself at any memory. | From a vertex and a pixel task of an ordinary client: `ldr` of `EUR_CR_CORE_ID` and compare with the known value; `str` to a harmless scratch-like register and read it from the host. | **FAILS (reads).** A fragment task's `ldr` returned the true `CORE_ID` (0x01150000), `CORE_REVISION` (0x1000e) and a live per-pixel `TIMER`. `str` to the unused `USE_CODE_BASE_14`/`_15` had no effect. The *effective*-register write (CE5310 board, 2026-11-02): a `str` to `BIF_DIR_LIST_BASE0` **does not change the register** (host and shader read-back unchanged, frame completed), so a client **can't repoint translation** this way, and that store is also **not a DoS** — an isolated re-run (clean cold boot, WPE off, GPU idle) left the box up with 0 SGX recoveries over ~2.5 min. (The first run's reboot was a concurrent dEQP wedge, not this store.) All three client stores tried (`BIF_DIR_LIST_BASE0`, `USE_CODE_BASE_14`/`_15`) were dropped — but not generally: the microkernel writes registers via `str` (UKERNEL.md §8), so stores land in some context, and untested registers (`SOFT_RESET`, `EVENT_KICK`, clock/power) could be destructive. Fix: D9 option 1 — validate/forbid client `ldr` (reads leak) **and** `str` (same scan; relax only once we know why client stores drop). |
+| **P2** | **Kernel memory can't be reached from a client's TA or 3D task.** | UKERNEL.md section 6 points the EDM's directory base at the context PD, which suggests the DDK maps kernel heaps in every PD. SRVINIT.md's allocations carry `EDM_PROTECT`, but no doc says what enforces it or whether it is enforced. | From a client shader: load and store an address in the kernel data heap, with the page mapped `EDM_PROTECT`, and watch the memory from the host. Also read the BIF bank registers' layout (G2). | **FAILS.** Pixel *and* vertex tasks `ld` the host control block, the TA3D control block (incl. word 0x16 kernel-CCB base and **word 0x17 the PD physical address**), the kernel CCB, and the microkernel code — all in the client's translation. A `st` into the kernel region wedged the GPU (HWR). A client could also allocate in the kernel-data heap. Fix: the new kernel driver owns the PD and does not map kernel heaps/code into client PDs. **Only with the open microkernel** (CE5310 board, 2026-11-03, log `2026-11-03-0135-drm-first-ta`): the DDK microkernel moves the EDM onto the job's directory during a TA kick (`BIF_BANK0 = 0x11`, list 1 = the context PD) and fetches its own code through it, so under the DDK microkernel every client PD must map the kernel heaps and P2 stays open. The driver does that only when the DDK microkernel is loaded (`share_kernel_heaps`), and warns. |
 | **P3** | **A client's PDS program can't enter the microkernel or gain its rights.** | DOUTU w0 picks the code base, and base 15 is the microkernel. w0 b27 is set on microkernel entries, meaning unknown (PDS.md). `USE_CODE_BASE` values carry `0x2000000` and `0x6000000` flags, not decoded (G4). | A client PDS program issues DOUTU with base 15, and with b27, at a test program; watch whether it runs, under which PD, and what P1 and P2 give it there. | **FAILS.** A client DOUTU naming code base 15 was not refused; the task ran from the kernel code base and wedged the GPU (HWR, pixel 0 not the uniform). DOUTU b27 changed nothing on a base-0 task. Fix: keep base 15 / the kernel code heap out of client PDS and PDs. As P2: possible only with the open microkernel; under the DDK microkernel the kernel code heap is in every client PD, so P3 stays open. |
 | **P4** | **The microkernel takes nothing from registers a client can write.** | UKERNEL.md section 1: secondary attributes "which the hardware does not clear between tasks" hold the microkernel's live state, the PD's physical address (word 0x17) among them. `sa` is what client shaders use for uniforms (G5). | Client shader reads `sa0`-`sa63` right after a microkernel task; then writes them and observes the next microkernel entry. | **Did not reproduce.** A client task's `sa11`-`sa63` held its own secondary-update results, per-task coefficient data (differs per pixel) and a prior same-client draw's clear color — not the microkernel's named pointers; `sa` is reloaded per task. But P2 hands a client the PD physical address anyway. Cross-client `sa` leak (G6) needs two clients, untested. The write-then-observe half is **untested**: the bring-up (log 2026-11-02-0630) first read as "a USSE task cannot write `sa`", but that was corrected the same night. The DDK microkernel writes `sa` in its PDS-DMA-entered context, and the stall was a write in the bare-`DOUTU` context before any DMA. Since f672198 the open microkernel keeps its pointers in a temporary (r17) and reads no `sa`, so nothing a client leaves in `sa` can steer it. **P4 holds for our microkernel**; for the DDK microkernel it rests on the per-task reload seen above. |
 
@@ -792,7 +819,7 @@ check it.
 | `bg_block_addr` (transfer) | below 2^32, aligned, 0x200 bytes mapped | HW (ISP) | fault or hang |
 | transfer `pixel_event_pds_addr` | as above | HW (PDS) | fault or hang |
 | `VM_MAP.device_addr` | below 2^32, page aligned, inside one heap, no overlap | kernel | `-EINVAL` or `-EEXIST` |
-| `sync_ops`, `bo_refs`, `ta_kicks`, `jobs`, `cmd_stream` (job and kick), `DEV_QUERY.pointer`, `quirks`, `heaps` | CPU user pointers: `copy_from_user` | kernel | `-EFAULT` |
+| `sync_ops`, `cache_ranges`, `ta_kicks`, `jobs`, `cmd` and the extension chains, `DEV_QUERY.pointer`, `quirks`, `heaps` | CPU user pointers: `copy_from_user` | kernel | `-EFAULT` |
 
 **Class B:** inside client memory, read by the hardware at draw time. The kernel doesn't
 look at these and can't: the client can change them after submit, and a shader can compute
@@ -836,10 +863,11 @@ Each rule in sections 2 to 5 gets an IGT negative test: reserved fields non-zero
 outside the allow-lists, addresses above 2^32 and outside heaps, unaligned PDS and VDM
 addresses, extents crossing the end of a mapping, `zls_control` b0 with no stencil,
 `ta_kicks` empty and over the limit, render jobs on transfer contexts and the reverse,
-handles from another file. Malformed streams too: a non-zero header word, a main stream of
-the wrong length, non-zero alignment bytes, trailing bytes, an unknown header type or bit,
-a header type twice, a stream over 4 KiB. `uapi/stream/test/stream_test.c` already runs
-each of these against the reference decoder on the host. M2's exit test, that one client can't corrupt another, needs
+handles from another file. Malformed commands too: a size below the head or over 4 KiB, a
+non-zero tail past the known struct, non-zero padding, a size changed between the kernel's
+two reads, an unknown extension name, another command's extension, a name twice, a chain
+past 16, an extension the core doesn't accept (`-EOPNOTSUPP`). `uapi/cmd/test/cmd_test.c`
+already runs each of these against the reference checker on the host. M2's exit test, that one client can't corrupt another, needs
 P1 to P4 as positive tests from an actual shader. It can't be met by ioctl tests alone.
 
 ## 8. Hardware recovery as userspace sees it
@@ -883,7 +911,7 @@ kernel's scheduler timeout, are gaps (G17). The draft uses the scheduler timeout
 | part | status |
 |---|---|
 | Struct layouts, on both targets | **Proven** by the compile (`uapi/check.sh`) |
-| Stream framing, per-field and cross-field checks | **Tested** on the host against the reference decoder (`uapi/stream/test`); not yet in a kernel |
+| Command copy, extensions, per-field and cross-field checks | **Tested** on the host against the reference checker (`uapi/cmd/test`); not yet in a kernel |
 | Ioctl set and shape | **Follows pvr**; the reasoning is sound, but no code has run against it |
 | Heap bases | **capture** |
 | USSE reach, PDS address formats, request bases, free-list limit | **capture and hardware** |
@@ -900,7 +928,7 @@ kernel's scheduler timeout, are gaps (G17). The draft uses the scheduler timeout
 Joseph went through all ten on 2026-11-02; each section starts with what was decided. Two
 changed the draft: the name (D1, `powervr_sgx`) and the stream encoding (D2). Both are now
 applied, in sections 2, 3 and 6, `uapi/powervr_sgx_drm.h` and the stream definition
-`uapi/powervr_sgx_kmd_stream.xml`. Where D2 needed something the other decisions don't
+`uapi/powervr_sgx_cmd.xml`. Where D2 needed something the other decisions don't
 settle, it is a gap (G26, G27), not a change to them. D9's register-write test has run (D9).
 
 ### D1. Driver name (module, DRM name, Mesa loader key)
@@ -922,6 +950,11 @@ added later. Mesa's directory is the Mesa maintainers' call (`AGENTS.md` section
 placeholder is one search-and-replace from any of these, until something merges.
 
 ### D2. Stream encoding
+
+**Revised (Joseph, 2026-11-11): plain per-command structs with a core
+extension chain** (uAPI revision 3, [`uapi/rev3-commands.md`](uapi/rev3-commands.md)),
+because other cores must fit without changing the base structs. The earlier
+decision follows.
 
 **Decided (Joseph, 2026-11-02): a `pvr_stream`-style stream, as `AGENTS.md` section 3.2
 describes,** with field layouts held in Mesa's tables as upstream's Rogue driver does.
@@ -979,7 +1012,7 @@ these words (MSAA, multi-RT) waits for a uAPI addition, which is append-only and
 
 ### D6. BO lists
 
-**Decided (Joseph, 2026-11-02): an optional per-job list of shared objects, as recommended.**
+**Decided (Joseph, 2026-11-02): an optional per-job list of shared objects, as recommended. Replaced 2026-11-12, below.**
 
 **Recommendation: an optional per-job list of shared objects, for implicit sync only.**
 Residency needs no list because `VM_MAP` pins pages, and private objects are covered by the
@@ -989,6 +1022,17 @@ style and fits Wayland explicit sync. The list is cheaper for X11 and old Waylan
 matches what `AGENTS.md` section 5 asked for. **Closes nothing:** an empty list is valid.
 **Amended (2026-11-09):** the list is also how a job names the imports it touches, and
 it must name every one (CREATE_BO, GET_BO_MMAP_OFFSET, imports): the kernel flushes only listed imports.
+**Replaced (Joseph, 2026-11-12: "per-job ranges"; rev 3, M5):** the BO list goes. A job
+lists the bytes of imports it touches in `cache_ranges` (the job fields table: rows of bytes at a
+stride, read and/or write, at most 64, no fence), and sync is explicit only, through
+`sync_ops` and the dma-buf sync-file ioctls above. B3 (CE5310 board, 720x480, X down) measured
+simpledrm's DIRTYFB at 4.2 ms/MB from its own dumb buffer and 199 ms/MB from our imported
+write-combined buffer, and clflush at 0.85 us/KB. So the scanout stays simpledrm's cached
+dumb buffer, the GPU blits into it, and the flush follows the damage, not the buffer.
+Rejected: a per-mapping `VM_BIND` coherence flag (flushes the whole buffer on every job in
+the VM: the 12 ms again); a panthor-style `BO_SYNC` ioctl of linear `{handle, op, offset,
+size}` (mainline precedent, but a second ioctl after waiting for each job, and a damage
+rect is one op per row). Details: `docs/uapi/rev3-commands.md` section 8.
 
 ### D7. VM contexts: explicit handles, or one per file
 
@@ -1010,7 +1054,7 @@ answer. Reasons that may force a change: P4 (reload `sa` on entry), P2 (a kernel
 EDM), concurrent renders (UKERNEL.md section 9), and per-job completion words. Each is a
 firmware-ABI bump, versioned through `fw_interface_version`.
 
-**Consequence found on hardware (2026-11-03): the isolation this uAPI promises needs
+**Consequence found on hardware (CE5310 board, 2026-11-03): the isolation this uAPI promises needs
 the open microkernel.** The DDK microkernel runs the EDM under the job's page directory
 during a TA kick (P2 row in 7.2), so the kernel heaps have to be mapped in every client
 directory while it runs, and P2 and P3 stay open. The DDK microkernel is therefore for
@@ -1038,11 +1082,11 @@ page directory (don't map kernel heaps, kernel code or base 15 into a client PD)
 This could end the upstream plan as written, so it deserves your attention before M2 code.
 
 **Decided (Joseph, 2026-11-02): run the register-write test first (does a client `str` to an
-effective register such as `BIF_DIR_LIST_BASE0` take effect?), on the CE5300 board, then decide.** The
+effective register such as `BIF_DIR_LIST_BASE0` take effect?), on the CE5310 board, then decide.** The
 plan is option 1, kernel shader validation, scoped by that result: full coverage of stores if
 writes land, a narrower check if only reads do.
 
-**Result (2026-11-02, hardware; log 2026-11-02-2021):** the store does **not** take —
+**Result (CE5310 board, 2026-11-02, hardware; log 2026-11-02-2021):** the store does **not** take —
 `BIF_DIR_LIST_BASE0` read back unchanged from both the host and the shader in a frame that
 completed, so a client gets **no translation escape** from a register write (the page-directory
 boundary holds against it). That store is also **not a denial of service**: an isolated re-run
@@ -1114,16 +1158,16 @@ Facts the design needs that `docs/` doesn't have.
 | G12 | Unnamed words. TA flags: STATE.md section 1 refers to a bit table that isn't there; `0x71`/`0x62` there, `0x63`/`0x10` in DRIVER-UPSTREAM.md; no middle-kick value. TA flags 2, 3D flags, cmd+0x20, +0x28-0x37, +0x48-0x50, +0x254, +0x26c-0x298; rd+0x08, 0x0c, 0x1c, 0x24, 0x44, 0x54, 0x64, 0x6c-0xc8, 0xcc; PDS middle word. GEN.md lists `+0x104` under render details, STATE.md under the TA command | D5, what Mesa can do | STATE.md |
 | G13 | ZLS: the load enable, field widths, range of the offsets, which bits touch the stencil address | `zls_control` allow-list | TEX.md 7 |
 | G14 | Render target limits: maximum width and height, TE field widths, multisample numbers | `LIMITS`, `CREATE_RT_DATASET` | STATE.md 4, 6 |
-| G15 | Lifetime and ownership: purpose of the 0x88, 0x40 and 0x50 TA-data blocks, scratch block and dependency block, and who reads each; `SGX_FLUSH_HW_RENDER_TARGET` timing out (GEN.md) and the DDK microkernel's RT and PB cleanups never completing (UKERNEL.md 3); concurrent contexts (UKERNEL.md section 9). **PB placement:** the DPM numbers PB pages from the 3D-params heap base, and a PB elsewhere hangs (2026-11-03, log 2026-11-03-0340-drm-per-vm-pb). So the 3D-params heap is per VM, with one PB per VM at its base, shared by the VM's render contexts (verified with three contexts, log 2026-11-03-0355-drm-shared-pb-restart). Open: whether the DPM state of a shared PB stays right when contexts' renders interleave beyond one job at a time | section 7.3, destroy paths | UKERNEL.md, GEN.md |
+| G15 | Lifetime and ownership: purpose of the 0x88, 0x40 and 0x50 TA-data blocks, scratch block and dependency block, and who reads each; `SGX_FLUSH_HW_RENDER_TARGET` timing out (GEN.md) and the DDK microkernel's RT and PB cleanups never completing (UKERNEL.md 3); concurrent contexts (UKERNEL.md section 9). **PB placement:** the DPM numbers PB pages from the 3D-params heap base, and a PB elsewhere hangs (CE5310 board, 2026-11-03, log 2026-11-03-0340-drm-per-vm-pb). So the 3D-params heap is per VM, with one PB per VM at its base, shared by the VM's render contexts (verified with three contexts, log 2026-11-03-0355-drm-shared-pb-restart). Open: whether the DPM state of a shared PB stays right when contexts' renders interleave beyond one job at a time | section 7.3, destroy paths | UKERNEL.md, GEN.md |
 | G16 | Preemption or context suspend during a job: does type 4 do anything useful for scheduling? | `priority` | UKERNEL.md |
 | G17 | Hang detection: which core hung, EDM timer path, signature registers' use, how the host learns it | section 8 | UKERNEL.md 5a, 9 |
 | G18 | PB overflow: DPM out-of-memory path, thresholds, partial renders | D10 | UKERNEL.md, STATE.md 6 |
 | G19 | CPU and GPU coherency: `ui32CacheControl` bits, what the BIF snoops, CPU mapping modes | `CREATE_BO`, fence ordering | UKERNEL.md |
-| G20 | Transfer: word 1, 3, 4, 5, 14, +0x194 meanings; word 11 (code size in TEX.md, a flag in UKERNEL.md); register 0x408 (region headers on a render, depth/stencil block on a transfer); transfer destination sync in the open microkernel (UKERNEL.md section 10). Completion: the DDK microkernel sets the shared command's destination sync (`asDstSyncs[0]`, +0x134), which the driver's transfer jobs complete on (CE5300, log 2026-11-03-0405-drm-transfers); words 0x168/0x16c are `sCtlStatusInfo[0]` | section 3.5, transfer fences | TEX.md, UKERNEL.md |
+| G20 | Transfer: word 1, 3, 4, 5, 14, +0x194 meanings; word 11 (code size in TEX.md, a flag in UKERNEL.md); register 0x408 (region headers on a render, depth/stencil block on a transfer); transfer destination sync in the open microkernel (UKERNEL.md section 10). Completion: the DDK microkernel sets the shared command's destination sync (`asDstSyncs[0]`, +0x134), which the driver's transfer jobs complete on (CE5310 board, log 2026-11-03-0405-drm-transfers); words 0x168/0x16c are `sCtlStatusInfo[0]` | section 3.5, transfer fences | TEX.md, UKERNEL.md |
 | G21 | What state needs rebuilding after a soft reset, per structure | section 8 | UKERNEL.md 5a |
 | G22 | Interrupts: can the kernel identify which job completed from host control fields alone? | fences | UKERNEL.md 5 |
 | G23 | Power: what type 3 needs for runtime PM (states, resume path) | kernel | UKERNEL.md |
 | G24 | Per-context firmware state beyond the HW context: words 8-15 and the fields at +0x3c and +0x40 that the commands use | `CREATE_CONTEXT` | STATE.md 6 |
 | G25 | Cedarview: `EUR_CR_CORE_REVISION` for 10131, errata, heap layout, microkernel differences; documented errata for 1014 | quirks, M4 | STATE.md, NOTES.md |
-| G26 | Stream tooling in Mesa (from D2). csbgen parses `<stream>` but emits nothing for it; Rogue writes its streams by hand in the XML's order. Our writer comes from `gen_stream.py`, and the XML carries validation attributes csbgen ignores. Whether Mesa takes `gen_stream.py` beside csbgen (or a `<stream>` emitter in csbgen), and the attributes in its XML, is the Mesa maintainers' call. The kernel's tables are generated from that file and committed; kernel reviewers may want the source in the kernel tree instead | M3 winsys, M5 | `AGENTS.md` 3.7, DRIVER-UPSTREAM.md |
-| G27 | Cross-field rules (from D2). csbgen refuses unknown tags, so rules that join fields (section 3.4's depth and stencil requirements and ZLS offset limit, section 3.5's tile order) are hand-written in the kernel's per-command check, not generated. They are the one part of the validation with two copies, section 3 and `pvrsgx_cmd_checks.c`, so a rule added to one can be missed in the other | validators | UAPI.md 3, `uapi/stream/` |
+| G26 | Closed by revision 3: Mesa fills the header's structs and needs no generator. Was: stream tooling in Mesa (from D2). csbgen parses `<stream>` but emits nothing for it; Rogue writes its streams by hand in the XML's order. Our writer comes from `gen_stream.py`, and the XML carries validation attributes csbgen ignores. Whether Mesa takes `gen_stream.py` beside csbgen (or a `<stream>` emitter in csbgen), and the attributes in its XML, is the Mesa maintainers' call. The kernel's tables are generated from that file and committed; kernel reviewers may want the source in the kernel tree instead | M3 winsys, M5 | `AGENTS.md` 3.7, DRIVER-UPSTREAM.md |
+| G27 | Cross-field rules (from D2). Rules that join fields (section 3.4's depth and stencil requirements and ZLS offset limit, section 3.5's tile order) are hand-written in the kernel's per-command check, not generated. They are the one part of the validation with two copies, section 3 and `pvrsgx_cmd_checks.c`, so a rule added to one can be missed in the other | validators | UAPI.md 3, `uapi/cmd/` |

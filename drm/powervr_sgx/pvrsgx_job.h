@@ -22,6 +22,26 @@ struct pvrsgx_file;
 struct pvrsgx_vm;
 
 /**
+ * struct pvrsgx_usage - A file's GPU time, for fdinfo
+ *
+ * Its contexts hold it too: a job may finish after its file has closed.
+ */
+struct pvrsgx_usage {
+	/** @ref: Held by the file and by each of its contexts. */
+	struct kref ref;
+	/**
+	 * @busy_ns: Time the file's render and transfer jobs spent on the GPU,
+	 * from their send to their end. The GPU runs one job at a time, both
+	 * kinds on its 3D pipeline: fdinfo's one engine, "render".
+	 */
+	atomic64_t busy_ns;
+};
+
+struct pvrsgx_usage *pvrsgx_usage_new(void);
+struct pvrsgx_usage *pvrsgx_usage_get(struct pvrsgx_usage *u);
+void pvrsgx_usage_put(struct pvrsgx_usage *u);
+
+/**
  * struct pvrsgx_context - A queue of jobs in one VM
  */
 struct pvrsgx_context {
@@ -31,6 +51,8 @@ struct pvrsgx_context {
 	struct pvrsgx_device *sdev;
 	/** @vm: The VM its jobs run in. */
 	struct pvrsgx_vm *vm;
+	/** @usage: Its file's GPU time. */
+	struct pvrsgx_usage *usage;
 	/** @entity: Its scheduler queue. */
 	struct drm_sched_entity entity;
 	/** @type: enum drm_powervr_sgx_ctx_type. */
@@ -50,10 +72,23 @@ struct pvrsgx_signal {
 	u64 point;
 };
 
+/* Bytes of an import a job reads or writes: @rows rows of @size, @stride apart. */
+struct pvrsgx_cache_range {
+	struct drm_gem_object *obj;
+	u64 offset;
+	u64 size;
+	u32 stride;
+	u32 rows;
+	bool write;
+	bool import;
+};
+
 /**
  * struct pvrsgx_job - One submitted job
  */
 struct pvrsgx_job {
+	/** @free_work: The final puts, off the scheduler's queue. */
+	struct work_struct free_work;
 	/** @base: The scheduler job. */
 	struct drm_sched_job base;
 	/** @ctx: The context it was submitted on. */
@@ -63,10 +98,14 @@ struct pvrsgx_job {
 
 	/** @hw_fence: Signalled when the firmware has finished the job. */
 	struct dma_fence *hw_fence;
-	/** @hw_fence_mem: @hw_fence's memory from submit until run_job initialises it. */
+	/** @hw_fence_mem: @hw_fence's memory from submit until run_job initializes it. */
 	struct dma_fence *hw_fence_mem;
+	/** @start_ns: When run_job sent it to the microkernel. */
+	u64 start_ns;
 	/** @ccb_seq: Kernel CCB command that carries the job. */
 	u64 ccb_seq;
+	/** @noops_before: pvrsgx_device.noops_sent once the job was sent. */
+	u32 noops_before;
 	/** @node: In pvrsgx_device.active while on the GPU. */
 	struct list_head node;
 	/**
@@ -81,25 +120,16 @@ struct pvrsgx_job {
 	/** @transfer: The transfer job, for a transfer context. */
 	struct pvrsgx_transfer_job transfer;
 
-	/** @bos: Objects the job references, for implicit sync. */
-	struct drm_gem_object **bos;
-	/** @bo_flags: DRM_POWERVR_SGX_BO_REF_FLAG_* of each of @bos. */
-	u32 *bo_flags;
-	/** @nbos: Number of @bos. */
-	u32 nbos;
-	/** @imports: The imported objects in @bos, flushed around the job. */
-	struct drm_gem_object **imports;
-	/** @nimports: Number of @imports. */
-	u32 nimports;
-	/** @signals: Syncobjs to signal with the job's fence. */
-	struct pvrsgx_signal *signals;
-	/** @nsignals: Number of @signals. */
-	u32 nsignals;
+	/** @ranges: The bytes of imports the job reads or writes, flushed around it. */
+	struct pvrsgx_cache_range *ranges;
+	/** @nranges: Number of @ranges. */
+	u32 nranges;
 };
 
 int pvrsgx_job_init(struct pvrsgx_device *sdev);
 void pvrsgx_job_fini(struct pvrsgx_device *sdev);
 void pvrsgx_job_process_done(struct pvrsgx_device *sdev);
+void pvrsgx_job_unplug(struct pvrsgx_device *sdev);
 int pvrsgx_job_quiesce(struct pvrsgx_device *sdev);
 void pvrsgx_job_unquiesce(struct pvrsgx_device *sdev);
 bool pvrsgx_job_oldest_done(struct pvrsgx_device *sdev);

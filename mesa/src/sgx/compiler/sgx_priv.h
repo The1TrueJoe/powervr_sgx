@@ -41,18 +41,18 @@ enum sgx_file {
                    after layout) */
    SGX_F_IXSA,  /* sa[idx1 + n] */
    SGX_F_IDX,   /* index register n (destination) */
-   SGX_F_LIT, /* literal constant n (driver_consts: an SA slot the driver fills)
-               */
+   /* literal constant n (driver_consts: an SA slot the driver fills) */
+   SGX_F_LIT,
 };
 
 struct sgx_ref {
    uint8_t file;
    uint8_t comp;
    uint8_t neg : 1, abs : 1;
-   uint8_t step
-      : 1; /* steps by one per iteration (else the same every iteration) */
-   uint8_t h16
-      : 1; /* an F16 half: n (comp for vregs) counts halves, 2 * reg + half */
+   /* steps by one per iteration (else the same every iteration) */
+   uint8_t step : 1;
+   /* an F16 half: n (comp for vregs) counts halves, 2 * reg + half */
+   uint8_t h16 : 1;
    uint8_t c10 : 1; /* a C10 operand of the colour classes (format control) */
    uint8_t lane;    /* pck .l<n> */
    uint32_t n;
@@ -107,24 +107,35 @@ struct sgx_iter {
    bool proj;       /* ... iterated projected (x/w, y/w) */
    bool f16;        /* iterated as F16 (mediump), two components per register */
    bool pointcoord; /* gl_PointCoord (set 0) */
+   bool flat;       /* every varying in the set flat */
+   /* the TA's vertex colour (source 0x20): one register, BGRA8 */
+   bool colour;
    unsigned sampler;
 };
+
+/* nir_tex_instr.backend_flags: a texelFetch lowered to txl */
+#define SGX_TEX_FETCH 1
+#define SGX_TEX_PLANAR 2 /* a plane of a tex_r32x4 / x2 unit: always dependent */
+#define SGX_TEX_PLANE_SHIFT 2
 
 struct sgx_sample {
    unsigned id;
    unsigned sampler;
    bool dependent, proj;
+   bool fetch; /* a texelFetch (SGX_TEX_FETCH) */
+   unsigned plane; /* SGX_TEX_PLANAR: its plane */
    unsigned dim; /* 2 = 2D, 3 = cube */
    unsigned set; /* non-dependent: the coordinate's texture coordinate set */
    int coord_pa; /* ... and its plain iteration, -1 none */
    /* where the PDS leaves the raw texel (RGBA8, unpacked in place) */
    unsigned pa;
-   unsigned lod; /* dependent: 0 none, 1 bias, 2 replace */
+   unsigned lod; /* dependent: 0 none, 1 bias, 2 replace, 3 gradients */
    /* unpacked to F16 (two channels per register), else left as RGBA8 */
    bool f16;
    bool f16coord; /* dependent: F16 coordinates, two per register (smp .f16) */
    bool f16_return; /* returns F16 pairs: pa, pa + 1; dependent: its two
                        destination registers */
+   unsigned state; /* dependent: its texture state block (place_constants) */
    /* dependent: the SAMPLE pseudo-instruction (dst raw, coord, lod) */
    struct sgx_ins *ins;
 };
@@ -143,14 +154,20 @@ struct sgx_ctx {
    /* register per I/O component: [location * 4 + component] (VARYING_SLOT_* /
     * VERT_ATTRIB_*), -1 none */
    int in_reg[512], out_reg[512];
+   /* a split (integer) varying's high halves, per component; -1 none */
+   int in_hi[512], out_hi[512];
 #define SGX_IN_HALF                                                            \
    0x10000 /* in_reg: an F16-iterated component, low bits = its half */
-#define SGX_ITER_FRAGCOORD                                                     \
-   14 /* list A iterator of gl_FragCoord (capture) */
+#define SGX_IN_U8                                                              \
+   0x20000 /* in_reg: a vertex colour component, low bits = 4 * pa + it */
+#define SGX_ITER_FRAGCOORD 14 /* list A iterator of gl_FragCoord */
    struct sgx_iter iters[16];
    unsigned n_iters;
    unsigned n_pa_inputs;
    unsigned psize_reg, n_out_regs;
+   /* vertex: user clip distances 0..n_clip-1, one fdpc each into
+    * o<clip_o + p> and cp<p> */
+   unsigned n_clip, clip_o;
 
    /* NIR def -> value */
    struct sgx_val *vals;
@@ -159,16 +176,16 @@ struct sgx_ctx {
    unsigned n_labels;
 
    /* uniforms */
-   uint8_t const_used[1024];
+   uint8_t const_used[SGX_MAX_CONST_K];
    /* 1 f32 (list C kind 1), 2 f16 (kind 2), 3 c10 (kind 3) */
-   uint8_t const_fmt[1024];
-   int const_slot[1024];
+   uint8_t const_fmt[SGX_MAX_CONST_K];
+   int const_slot[SGX_MAX_CONST_K];
    /* bit offset in the slot (f16 0/16, c10 0/10/20) */
-   uint8_t const_shift[1024];
+   uint8_t const_shift[SGX_MAX_CONST_K];
    /* the first of a lowp vec4 uniform (C10 candidate) */
-   uint8_t const_lowp[1024];
+   uint8_t const_lowp[SGX_MAX_CONST_K];
    /* GLSL precision of the uniform behind constant k (0 unknown) */
-   uint8_t const_prec[1024];
+   uint8_t const_prec[SGX_MAX_CONST_K];
    /* dynamically indexed arrays: first constant, constants it spans */
    struct {
       uint16_t k, range;
@@ -178,11 +195,11 @@ struct sgx_ctx {
    unsigned sa_base;
    /* where the slots live (place_constants): SA slot from sa_base, -1 memory
     * only; with mem_dwords every slot is also block word slot + 1 */
-   int slot_sa[1024 + 32];
+   int slot_sa[SGX_MAX_CONST_MAP];
    unsigned n_sa_phys; /* SA slots used: kept slots, then the bases */
    unsigned mem_dwords;
    unsigned n_mem_bases;
-   uint8_t mem_base_sa[8]; /* SA slot holding block address + 512 * j */
+   uint8_t mem_base_sa[SGX_MAX_MEM_BASES]; /* SA slot holding block address + 512 * j */
    uint32_t lit_bits[32];  /* driver_consts: literal slots' values */
    /* ... or, >= 0, the slot is constants k..k+3 packed to BGRA8 (0x12) */
    int lit_packed_k[32];
@@ -196,6 +213,7 @@ struct sgx_ctx {
    bool has_color;
    struct sgx_ref depth; /* gl_FragDepth */
    bool has_depth;
+   bool depth_done; /* emit_depth ran */
    unsigned depth_pa;
    int keep_vreg; /* discard: 1.0 = keep, -1 none */
    bool discards;
@@ -208,7 +226,8 @@ struct sgx_ctx {
    int face_f32;  /* ... as 1.0 / 0.0 (face_int: made when a select needs it) */
    struct sgx_ins *face_and; /* the and that makes face_int */
    unsigned colour_pa;
-   struct sgx_sample *samples[16];
+   struct sgx_sample *samples[SGX_MAX_SAMPLES];
+   unsigned n_dep_states; /* place_constants: dependent state blocks */
    unsigned n_samples;
 
    struct set *skip;        /* NIR instructions the backend doesn't emit */
@@ -289,6 +308,7 @@ enum sgx_debug {
    SGX_DBG_NO_PROJ_ALONE = BITFIELD64_BIT(26),
    SGX_DBG_NO_DEP_F16 = BITFIELD64_BIT(27),
    SGX_DBG_NO_INTERLEAVE = BITFIELD64_BIT(28),
+   SGX_DBG_FLATTEN_UNIFORM = BITFIELD64_BIT(29),
    SGX_DBG_NO_TEX_COLOR = BITFIELD64_BIT(16),
    SGX_DBG_NO_PACKED_COLOR = BITFIELD64_BIT(17),
 };

@@ -12,8 +12,10 @@
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/workqueue.h>
 
 #include <uapi/drm/powervr_sgx_drm.h>
 
@@ -24,6 +26,7 @@
 #include "pvrsgx_fw.h"
 #include "pvrsgx_gem.h"
 #include "pvrsgx_job.h"
+#include "pvrsgx_prime.h"
 #include "pvrsgx_render.h"
 #include "pvrsgx_validate.h"
 #include "pvrsgx_vm.h"
@@ -49,7 +52,8 @@ void *pvrsgx_obj_array_get(const struct drm_powervr_sgx_obj_array *in, u32 obj_s
 
 		if (err) {
 			kvfree(out);
-			return ERR_PTR(err == -E2BIG ? -EINVAL : err);
+			/* -E2BIG: a larger struct this kernel doesn't know. */
+			return ERR_PTR(err);
 		}
 	}
 	return out;
@@ -101,18 +105,20 @@ static int pvrsgx_ioctl_dev_query(struct drm_device *drm, void *data, struct drm
 	}
 	case DRM_POWERVR_SGX_DEV_QUERY_LIMITS_GET: {
 		/*
-		 * Render-target limits are not documented (docs/UAPI.md G14):
-		 * these are the sizes the captures cover, to be raised when
-		 * larger targets are tested. PB pages from STATE.md 6.
+		 * Render-target limits are not documented: these are the sizes
+		 * known to work, to be raised when larger targets are tested.
 		 */
 		struct drm_powervr_sgx_dev_query_limits lim = {
 			.rt_max_width = 2048,
 			.rt_max_height = 2048,
-			.rt_max_samples = 1,
+			.rt_max_samples = sdev->family->cmds->max_samples,
 			.pb_min_pages = 0x100,
-			.pb_default_pages = PVRSGX_PB_DEFAULT_PAGES,
-			.pb_max_pages = 0x8000,
-			.max_ta_kicks = 64,
+			.pb_default_pages = pvrsgx_pb_default_pages(sdev),
+			.pb_max_pages = pvrsgx_heaps(sdev)->pb_max_pages,
+			.max_ta_kicks = PVRSGX_MAX_TA_KICKS,
+			.va_bits = sdev->family->va_bits,
+			.caps = DRM_POWERVR_SGX_CAP_BACKWARD_BLITS,
+			.max_layers = 1,
 		};
 
 		return query_put(ptr, &args->size, &lim, sizeof(lim));
@@ -128,13 +134,31 @@ static int pvrsgx_ioctl_dev_query(struct drm_device *drm, void *data, struct drm
 			if (q._padding_c)
 				return -EINVAL;
 		}
-		/* No erratum that reaches userspace is documented for rev 1014 (G25). */
+		/* No erratum that reaches userspace is known for these cores. */
 		q.count = 0;
 		q.musthave_count = 0;
 		return query_put(ptr, &args->size, &q, sizeof(q));
 	}
 	case DRM_POWERVR_SGX_DEV_QUERY_HEAP_INFO_GET:
 		return pvrsgx_query_heap_info(sdev, ptr, &args->size);
+	case DRM_POWERVR_SGX_DEV_QUERY_COMMANDS_GET: {
+		const struct pvrsgx_cmd_def *render = pvrsgx_cmd_def(sdev, PVRSGX_CMD_RENDER);
+		const struct pvrsgx_cmd_def *kick = pvrsgx_cmd_def(sdev, PVRSGX_CMD_TA_KICK);
+		const struct pvrsgx_cmd_def *xfer = pvrsgx_cmd_def(sdev, PVRSGX_CMD_TRANSFER);
+		struct drm_powervr_sgx_dev_query_commands c = {
+			.job_types = BIT(DRM_POWERVR_SGX_JOB_TYPE_NULL),
+		};
+
+		/* A render needs its kicks too; an unsupported command is refused. */
+		if (render && render->supported && kick && kick->supported)
+			c.job_types |= BIT(DRM_POWERVR_SGX_JOB_TYPE_RENDER);
+		if (xfer && xfer->supported)
+			c.job_types |= BIT(DRM_POWERVR_SGX_JOB_TYPE_TRANSFER);
+		c.render_exts = render ? pvrsgx_cmd_ext_mask(render) : 0;
+		c.ta_kick_exts = kick ? pvrsgx_cmd_ext_mask(kick) : 0;
+		c.transfer_exts = xfer ? pvrsgx_cmd_ext_mask(xfer) : 0;
+		return query_put(ptr, &args->size, &c, sizeof(c));
+	}
 	default:
 		return -EINVAL;
 	}
@@ -146,10 +170,16 @@ static int pvrsgx_open(struct drm_device *drm, struct drm_file *file)
 
 	if (!sfile)
 		return -ENOMEM;
+	sfile->usage = pvrsgx_usage_new();
+	if (!sfile->usage) {
+		kfree(sfile);
+		return -ENOMEM;
+	}
 	sfile->sdev = to_pvrsgx_device(drm);
 	xa_init_flags(&sfile->vms, XA_FLAGS_ALLOC1);
 	xa_init_flags(&sfile->contexts, XA_FLAGS_ALLOC1);
 	xa_init_flags(&sfile->rtds, XA_FLAGS_ALLOC1);
+	init_rwsem(&sfile->submit_lock);
 	file->driver_priv = sfile;
 	return 0;
 }
@@ -164,6 +194,7 @@ static void pvrsgx_postclose(struct drm_device *drm, struct drm_file *file)
 	xa_destroy(&sfile->rtds);
 	xa_destroy(&sfile->contexts);
 	xa_destroy(&sfile->vms);
+	pvrsgx_usage_put(sfile->usage);
 	kfree(sfile);
 	file->driver_priv = NULL;
 }
@@ -176,8 +207,7 @@ static const struct drm_ioctl_desc pvrsgx_ioctls[] = {
 	IOCTL(GET_BO_MMAP_OFFSET, pvrsgx_ioctl_get_bo_mmap_offset),
 	IOCTL(CREATE_VM_CONTEXT, pvrsgx_ioctl_create_vm_context),
 	IOCTL(DESTROY_VM_CONTEXT, pvrsgx_ioctl_destroy_vm_context),
-	IOCTL(VM_MAP, pvrsgx_ioctl_vm_map),
-	IOCTL(VM_UNMAP, pvrsgx_ioctl_vm_unmap),
+	IOCTL(VM_BIND, pvrsgx_ioctl_vm_bind),
 	IOCTL(CREATE_CONTEXT, pvrsgx_ioctl_create_context),
 	IOCTL(DESTROY_CONTEXT, pvrsgx_ioctl_destroy_context),
 	IOCTL(GET_CONTEXT_STATE, pvrsgx_ioctl_get_context_state),
@@ -187,7 +217,25 @@ static const struct drm_ioctl_desc pvrsgx_ioctls[] = {
 	IOCTL(UPLOAD_CODE, pvrsgx_ioctl_upload_code),
 };
 
-DEFINE_DRM_GEM_FOPS(pvrsgx_fops);
+/*
+ * drm-usage-stats.rst: the file's GPU time on its one engine and its objects'
+ * memory; the core adds drm-driver and drm-client-id. No drm-cycles or
+ * drm-maxfreq: the driver doesn't set the clock.
+ */
+static void pvrsgx_show_fdinfo(struct drm_printer *p, struct drm_file *file)
+{
+	struct pvrsgx_file *sfile = to_pvrsgx_file(file);
+
+	drm_printf(p, "drm-engine-render:\t%llu ns\n",
+		   (u64)atomic64_read(&sfile->usage->busy_ns));
+	drm_show_memory_stats(p, file);
+}
+
+static const struct file_operations pvrsgx_fops = {
+	.owner = THIS_MODULE,
+	DRM_GEM_FOPS,
+	.show_fdinfo = drm_show_fdinfo,
+};
 
 static const struct drm_driver pvrsgx_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER | DRIVER_SYNCOBJ | DRIVER_SYNCOBJ_TIMELINE,
@@ -196,11 +244,12 @@ static const struct drm_driver pvrsgx_drm_driver = {
 	.ioctls = pvrsgx_ioctls,
 	.num_ioctls = ARRAY_SIZE(pvrsgx_ioctls),
 	.fops = &pvrsgx_fops,
+	.show_fdinfo = pvrsgx_show_fdinfo,
 #if defined(CONFIG_DEBUG_FS)
 	.debugfs_init = pvrsgx_debugfs_init,
 #endif
 	.gem_create_object = pvrsgx_gem_create_object,
-	.gem_prime_import_sg_table = drm_gem_shmem_prime_import_sg_table,
+	.gem_prime_import_sg_table = pvrsgx_prime_import_sg_table,
 
 	.name = PVRSGX_DRIVER_NAME,
 	.desc = PVRSGX_DRIVER_DESC,
@@ -211,6 +260,22 @@ static const struct drm_driver pvrsgx_drm_driver = {
 struct pvrsgx_device *pvrsgx_alloc(struct device *dev)
 {
 	return devm_drm_dev_alloc(dev, &pvrsgx_drm_driver, struct pvrsgx_device, base);
+}
+
+/*
+ * Stop the GPU as it is powered, then undo runtime PM: a suspended GPU is
+ * stopped already, and undoing runtime PM first could let a parent (ti-sysc)
+ * gate its clocks while the stop still writes registers.
+ */
+static void hw_stop(struct pvrsgx_device *sdev)
+{
+	struct device *dev = sdev->base.dev;
+	int active = pm_runtime_get_if_active(dev);
+
+	pvrsgx_device_unplug(sdev);
+	if (active > 0)
+		pm_runtime_put_noidle(dev);
+	pvrsgx_power_fini(sdev);
 }
 
 /* What both buses do once the registers are mapped and the interrupt source known. */
@@ -225,23 +290,73 @@ int pvrsgx_probe_common(struct pvrsgx_device *sdev)
 	/* Runtime PM is set up before userspace can reach the device. */
 	pvrsgx_power_init(sdev);
 	err = drm_dev_register(&sdev->base, 0);
-	if (err) {
-		pvrsgx_power_fini(sdev);
-		pvrsgx_device_fini(sdev);
-	}
+	if (err)
+		hw_stop(sdev);
 	return err;
 }
 
 void pvrsgx_remove_common(struct pvrsgx_device *sdev)
 {
-	pvrsgx_power_fini(sdev);
+	/* No new ioctl, and the running ones done, before the hardware goes. */
 	drm_dev_unplug(&sdev->base);
-	pvrsgx_device_fini(sdev);
+	hw_stop(sdev);
 }
+
+/*
+ * Reboot or kexec: leave the GPU stopped, with no reset to start it again, for
+ * whatever runs next. A suspended GPU is stopped already.
+ */
+void pvrsgx_shutdown_common(struct pvrsgx_device *sdev)
+{
+	int active;
+
+	if (!sdev)
+		return;
+	active = pm_runtime_get_if_active(sdev->base.dev);
+	pvrsgx_job_unplug(sdev);
+	if (active > 0)
+		pm_runtime_put_noidle(sdev->base.dev);
+}
+
+/*
+ * What the PCI id alone doesn't say: where the SGX's window is and who manages
+ * its power. driver_data in the id table is an index into this.
+ */
+enum pvrsgx_part_id {
+	PVRSGX_PART_CE5300,
+	PVRSGX_PART_CLOVER_TRAIL,
+};
+
+static const struct pvrsgx_part pvrsgx_parts[] = {
+	[PVRSGX_PART_CE5300] = {
+		.name = "Intel CE5300",
+		.core = 545,
+		.regs_off = 0,		/* the SGX is the whole PCI function */
+	},
+	[PVRSGX_PART_CLOVER_TRAIL] = {
+		.name = "Intel Clover Trail",
+		.core = 545,
+		/*
+		 * The Z2760's published GPU clock (notebookcheck, "Intel Atom
+		 * Z2760"); the CE5300's 400 MHz would run the microkernel's
+		 * timer a quarter slow.
+		 */
+		.clock_hz = 533000000,
+		/* Display engine's window first, the SGX's behind it. */
+		.regs_off = PVRSGX_CLV_SGX_OFFSET,
+		/*
+		 * ACPI can't power the island: GFX0's _PS0 only writes GDDS,
+		 * and the APM block that owns the island has no driver here yet.
+		 */
+		.flags = PVRSGX_PART_ISLAND_ALWAYS_ON | PVRSGX_PART_VDC_IRQ,
+	},
+};
 
 static int pvrsgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
+	const struct pvrsgx_part *part = &pvrsgx_parts[id->driver_data];
 	struct pvrsgx_device *sdev;
+	void __iomem *bar;
 	int err;
 
 	err = pcim_enable_device(pdev);
@@ -258,15 +373,43 @@ static int pvrsgx_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (IS_ERR(sdev))
 		return PTR_ERR(sdev);
 	sdev->pdev = pdev;
-	sdev->family = pvrsgx_core_family_get(id->driver_data);
+	sdev->part = part;
+	sdev->family = pvrsgx_core_family_get(part->core);
 	sdev->irq = pdev->irq;
+	if (part->flags & PVRSGX_PART_VDC_IRQ) {
+		err = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
+		if (err < 0)
+			return err;
+		sdev->irq = pci_irq_vector(pdev, 0);
+	}
+	if (!sdev->irq) {
+		dev_err(&pdev->dev, "no interrupt\n");
+		return -ENODEV;
+	}
 	pci_set_drvdata(pdev, sdev);
 
-	if (pci_resource_len(pdev, 0) < PVRSGX_REGS_MIN)
+	/*
+	 * On Clover Trail the SGX window shares BAR 0 with the display engine.
+	 * Only the window is ever touched. The firmware's framebuffer and the
+	 * KMS driver built on it (simpledrm) stay: this driver is render-only
+	 * and claims no framebuffer, so it must not call
+	 * drm_aperture_remove_conflicting_pci_framebuffers() either.
+	 */
+	if (pci_resource_len(pdev, 0) < part->regs_off + PVRSGX_REGS_MIN) {
+		dev_err(&pdev->dev, "BAR 0 is %pR: no %s window at 0x%x\n",
+			&pdev->resource[0], part->name, part->regs_off);
 		return -ENODEV;
-	sdev->regs = pcim_iomap_region(pdev, 0, PVRSGX_DRIVER_NAME);
-	if (IS_ERR(sdev->regs))
-		return PTR_ERR(sdev->regs);
+	}
+	bar = pcim_iomap_region(pdev, 0, PVRSGX_DRIVER_NAME);
+	if (IS_ERR(bar))
+		return PTR_ERR(bar);
+	sdev->regs = (u8 __iomem *)bar + part->regs_off;
+	/*
+	 * Only the SGX's bit there is ever touched (pvrsgx_device.c, irq_setup());
+	 * the display's own interrupts stay as they are.
+	 */
+	if (part->flags & PVRSGX_PART_VDC_IRQ)
+		sdev->vdc = bar;
 
 	return pvrsgx_probe_common(sdev);
 }
@@ -278,14 +421,12 @@ static void pvrsgx_remove(struct pci_dev *pdev)
 
 static void pvrsgx_shutdown(struct pci_dev *pdev)
 {
-	struct pvrsgx_device *sdev = pci_get_drvdata(pdev);
-
-	/* Leave the GPU quiet for whatever runs next. */
-	pvrsgx_fw_stop(sdev);
+	pvrsgx_shutdown_common(pci_get_drvdata(pdev));
 }
 
 static const struct pci_device_id pvrsgx_pci_ids[] = {
-	{ PCI_VDEVICE(INTEL, 0x089b), 545 },	/* CE5300 family: SGX545 */
+	{ PCI_VDEVICE(INTEL, 0x089b), PVRSGX_PART_CE5300 },	/* SGX545 on its own function */
+	{ PCI_VDEVICE(INTEL, 0x08cf), PVRSGX_PART_CLOVER_TRAIL },	/* Atom Z2760 */
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, pvrsgx_pci_ids);
@@ -299,23 +440,43 @@ static struct pci_driver pvrsgx_pci_driver = {
 	.driver.pm = pm_ptr(&pvrsgx_pm_ops),
 };
 
+struct workqueue_struct *pvrsgx_put_wq;
+
 static int __init pvrsgx_init(void)
 {
-	int err = pci_register_driver(&pvrsgx_pci_driver);
+	int err;
 
+	pvrsgx_put_wq = alloc_workqueue("powervr_sgx_put", WQ_UNBOUND, 0);
+	if (!pvrsgx_put_wq)
+		return -ENOMEM;
+	err = pci_register_driver(&pvrsgx_pci_driver);
 	if (err)
-		return err;
+		goto err_wq;
 	err = pvrsgx_aux_register();
 	if (err)
-		pci_unregister_driver(&pvrsgx_pci_driver);
+		goto err_pci;
+	err = pvrsgx_of_register();
+	if (err)
+		goto err_aux;
+	return 0;
+
+err_aux:
+	pvrsgx_aux_unregister();
+err_pci:
+	pci_unregister_driver(&pvrsgx_pci_driver);
+err_wq:
+	destroy_workqueue(pvrsgx_put_wq);
 	return err;
 }
 module_init(pvrsgx_init);
 
 static void __exit pvrsgx_exit(void)
 {
+	pvrsgx_of_unregister();
 	pvrsgx_aux_unregister();
 	pci_unregister_driver(&pvrsgx_pci_driver);
+	/* After every device: drains the puts that release them. */
+	destroy_workqueue(pvrsgx_put_wq);
 }
 module_exit(pvrsgx_exit);
 

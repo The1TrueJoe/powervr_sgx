@@ -247,20 +247,25 @@ sgx_create_blend_state(struct pipe_context *pctx,
    if (!so)
       return NULL;
    so->base = *cso;
-   if (cso->rt[0].blend_enable && !cso->logicop_enable) {
+   for (unsigned r = 0; r < (cso->independent_blend_enable ? SGX_BLEND_RTS : 1);
+        r++) {
+      const struct pipe_rt_blend_state *rt = &cso->rt[r];
+
+      if (!rt->blend_enable || cso->logicop_enable)
+         continue;
       /* the sop2 form, or the sopwm one where sop2's selectors can't say it
        * (SRC_ALPHA_SATURATE with the sources traded) */
       for (unsigned i = 0; i < 2; i++)
-         so->enable = blend_hw(&cso->rt[0], i, false, &so->hw[i]) ||
-                      blend_hw(&cso->rt[0], i, true, &so->hw[i]);
-      so->enable = so->enable && so->hw[0].blend && so->hw[1].blend;
-      if (!so->enable)
+         so->enable[r] = blend_hw(rt, i, false, &so->hw[r][i]) ||
+                         blend_hw(rt, i, true, &so->hw[r][i]);
+      so->enable[r] =
+         so->enable[r] && so->hw[r][0].blend && so->hw[r][1].blend;
+      if (!so->enable[r])
          fprintf(
             stderr,
             "sgx: blend (func %u/%u, factors %u %u %u %u) not drawn yet, drawing opaque\n",
-            cso->rt[0].rgb_func, cso->rt[0].alpha_func,
-            cso->rt[0].rgb_src_factor, cso->rt[0].rgb_dst_factor,
-            cso->rt[0].alpha_src_factor, cso->rt[0].alpha_dst_factor);
+            rt->rgb_func, rt->alpha_func, rt->rgb_src_factor,
+            rt->rgb_dst_factor, rt->alpha_src_factor, rt->alpha_dst_factor);
    }
    return so;
 }
@@ -269,6 +274,7 @@ static void
 sgx_bind_blend_state(struct pipe_context *pctx, void *hwcso)
 {
    sgx_context(pctx)->blend = hwcso;
+   sgx_context(pctx)->fs_gen++;
 }
 
 static void *
@@ -345,9 +351,12 @@ sgx_set_constant_buffer(struct pipe_context *pctx, mesa_shader_stage shader,
                         uint index, const struct pipe_constant_buffer *cb)
 {
    struct sgx_context *ctx = sgx_context(pctx);
-   struct pipe_constant_buffer *so = &ctx->constants[shader];
+   struct pipe_constant_buffer *so =
+      index == 0 ? &ctx->constants[shader]
+      : index <= SGX_MAX_UBOS ? &ctx->ubos[shader][index - 1] /* block */
+                              : NULL;
 
-   if (index != 0)
+   if (!so)
       return;
    if (!cb) {
       pipe_resource_reference(&so->buffer, NULL);
@@ -367,6 +376,38 @@ sgx_set_framebuffer_state(struct pipe_context *pctx,
    struct sgx_context *ctx = sgx_context(pctx);
 
    util_copy_framebuffer_state(&ctx->framebuffer, fb);
+   ctx->fs_gen++;
+   /* depth only: a colour buffer of the context's own to render into
+    * (begin_frame), at least the framebuffer's size, with the depth buffer's
+    * samples.  Made here, not in begin_frame, which runs with the screen
+    * lock held, as destroying the old one takes it. */
+   if (fb->nr_cbufs && fb->cbufs[0].texture)
+      return;
+   if (!fb->zsbuf.texture || !fb->width || !fb->height)
+      return;
+   unsigned samples = MAX2(fb->zsbuf.texture->nr_samples, 1);
+   struct pipe_resource *d = ctx->dummy_cb;
+
+   if (d && d->width0 >= fb->width && d->height0 >= fb->height &&
+       MAX2(d->nr_samples, 1) == samples)
+      return;
+
+   struct pipe_resource templ = {
+      .target = PIPE_TEXTURE_2D,
+      .format = PIPE_FORMAT_B8G8R8A8_UNORM,
+      .width0 = MAX2(fb->width, d ? d->width0 : 0),
+      .height0 = MAX2(fb->height, d ? d->height0 : 0),
+      .depth0 = 1,
+      .array_size = 1,
+      .nr_samples = samples > 1 ? samples : 0,
+      .nr_storage_samples = samples > 1 ? samples : 0,
+      .bind = PIPE_BIND_RENDER_TARGET,
+   };
+
+   if (d && ctx->recording == sgx_resource(d))
+      ctx->recording = NULL; /* its frame goes with it (resource destroy) */
+   pipe_resource_reference(&ctx->dummy_cb, NULL);
+   ctx->dummy_cb = pctx->screen->resource_create(pctx->screen, &templ);
 }
 
 static void
@@ -392,6 +433,7 @@ sgx_set_blend_color(struct pipe_context *pctx,
                     const struct pipe_blend_color *color)
 {
    sgx_context(pctx)->blend_color = *color;
+   sgx_context(pctx)->fs_gen++;
 }
 
 static void
@@ -422,10 +464,13 @@ static void *
 sgx_create_sampler_state(struct pipe_context *pctx,
                          const struct pipe_sampler_state *cso)
 {
-   struct pipe_sampler_state *so = CALLOC_STRUCT(pipe_sampler_state);
+   static uint32_t next_id;
+   struct sgx_sampler *so = CALLOC_STRUCT(sgx_sampler);
 
-   if (so)
-      *so = *cso;
+   if (so) {
+      so->base = *cso;
+      so->id = p_atomic_inc_return(&next_id);
+   }
    return so;
 }
 
@@ -434,18 +479,27 @@ sgx_bind_sampler_states(struct pipe_context *pctx, mesa_shader_stage shader,
                         unsigned start, unsigned nr, void **hwcso)
 {
    struct sgx_context *ctx = sgx_context(pctx);
+   struct pipe_sampler_state **s =
+      shader == MESA_SHADER_FRAGMENT ? ctx->samplers
+      : shader == MESA_SHADER_VERTEX ? ctx->vs_samplers
+                                     : NULL;
 
-   if (shader != MESA_SHADER_FRAGMENT)
+   if (!s)
       return;
+   if (shader == MESA_SHADER_FRAGMENT)
+      ctx->fs_gen++;
+   else
+      ctx->vs_gen++;
    for (unsigned i = 0; i < nr && start + i < PIPE_MAX_SAMPLERS; i++)
-      ctx->samplers[start + i] = hwcso ? hwcso[i] : NULL;
+      s[start + i] = hwcso ? hwcso[i] : NULL;
 }
 
 static struct pipe_sampler_view *
 sgx_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                         const struct pipe_sampler_view *cso)
 {
-   struct pipe_sampler_view *so = CALLOC_STRUCT(pipe_sampler_view);
+   struct sgx_view *v = CALLOC_STRUCT(sgx_view);
+   struct pipe_sampler_view *so = v ? &v->base : NULL;
 
    if (!so)
       return NULL;
@@ -472,16 +526,30 @@ sgx_set_sampler_views(struct pipe_context *pctx, mesa_shader_stage shader,
                       struct pipe_sampler_view **views)
 {
    struct sgx_context *ctx = sgx_context(pctx);
+   struct pipe_sampler_view **v = shader == MESA_SHADER_FRAGMENT ? ctx->views
+                                  : shader == MESA_SHADER_VERTEX ? ctx->vs_views
+                                                                 : NULL;
 
-   if (shader != MESA_SHADER_FRAGMENT)
+   if (!v)
       return;
+   if (shader == MESA_SHADER_FRAGMENT)
+      ctx->fs_gen++;
+   else
+      ctx->vs_gen++;
    for (unsigned i = 0; i < nr + unbind_num_trailing_slots; i++) {
       unsigned s = start + i;
 
       if (s < PIPE_MAX_SHADER_SAMPLER_VIEWS)
-         pipe_sampler_view_reference(&ctx->views[s],
-                                     i < nr && views ? views[i] : NULL);
+         pipe_sampler_view_reference(&v[s], i < nr && views ? views[i] : NULL);
    }
+   /* one past the highest bound (what a draw looks through) */
+   unsigned *n = shader == MESA_SHADER_FRAGMENT ? &ctx->n_views : &ctx->n_vs_views;
+   unsigned top = MIN2(MAX2(*n, start + nr + unbind_num_trailing_slots),
+                       PIPE_MAX_SHADER_SAMPLER_VIEWS);
+
+   while (top && !v[top - 1])
+      top--;
+   *n = top;
 }
 
 static void
@@ -489,10 +557,41 @@ sgx_texture_barrier(struct pipe_context *pctx, unsigned flags)
 {
 }
 
-/* queries: none of GLES2's need the GPU yet */
+/*
+ * Queries.  Occlusion queries (docs/GL3.md H5): while one counts, each
+ * draw's fragment program stores 1 to the query's slot from every pixel it
+ * shades (sgxws_blend.visible), past the depth and stencil tests and a
+ * discard, in a translucent pass, which shades in submission order: a pixel
+ * a later draw hides has still counted.  ANY_SAMPLES_PASSED is exact.  No
+ * counter is known in the hardware, so SAMPLES_PASSED is conservative: when
+ * the slot is set, the most samples any of the query's draws' framebuffers
+ * has (width x height x samples, what a draw covering it once passes), else
+ * 0.  An engine that culls what passes fewer than some number of samples
+ * (Red Eclipse's oqfrags, 8) then draws what it can see.  Without a kernel
+ * context nothing is stored, and a query with a draw counts as visible.
+ * The other queries return 0.
+ */
+#define SGX_QUERY_SLOTS 4096
+
 struct sgx_query {
    unsigned type;
+   unsigned slot; /* its slot in ctx->query_bo since its last begin */
+   /* the frame its result waits for: the last it was drawn in, or (results
+    * come in order) the last an earlier query was */
+   uint32_t seq;
+   uint64_t samples; /* the count it reports when visible */
+   /* exact: its draws store to its slot; drawn: a draw was recorded since
+    * its begin; stored: one of them stores */
+   bool exact, pending, drawn, stored;
 };
+
+static bool
+occlusion(unsigned type)
+{
+   return type == PIPE_QUERY_OCCLUSION_COUNTER ||
+          type == PIPE_QUERY_OCCLUSION_PREDICATE ||
+          type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE;
+}
 
 static struct pipe_query *
 sgx_create_query(struct pipe_context *pctx, unsigned query_type, unsigned index)
@@ -507,26 +606,128 @@ sgx_create_query(struct pipe_context *pctx, unsigned query_type, unsigned index)
 static void
 sgx_destroy_query(struct pipe_context *pctx, struct pipe_query *q)
 {
+   struct sgx_context *ctx = sgx_context(pctx);
+
+   if (ctx->occlusion == (struct sgx_query *)q)
+      ctx->occlusion = NULL;
    FREE(q);
 }
 
 static bool
-sgx_begin_end_query(struct pipe_context *pctx, struct pipe_query *q)
+sgx_begin_query(struct pipe_context *pctx, struct pipe_query *pq)
 {
+   struct sgx_context *ctx = sgx_context(pctx);
+   struct sgx_screen *screen = sgx_screen(pctx->screen);
+   struct sgx_query *q = (struct sgx_query *)pq;
+
+   if (!occlusion(q->type))
+      return true;
+   q->samples = 0;
+   q->drawn = q->stored = false;
+   q->exact = ctx->hw != NULL;
+   ctx->occlusion = q;
+   if (!q->exact)
+      return true;
+   if (!sgxws_bo_valid(&ctx->query_bo)) {
+      int e;
+
+      ctx->query_seq = calloc(SGX_QUERY_SLOTS, sizeof(*ctx->query_seq));
+      if (!ctx->query_seq)
+         goto fail;
+      simple_mtx_lock(&screen->lock);
+      e = sgxws_bo_alloc(screen->dev, &ctx->query_bo, SGXWS_MEM_VERTEX,
+                         SGX_QUERY_SLOTS * 4, 0x1000);
+      simple_mtx_unlock(&screen->lock);
+      if (e)
+         goto fail;
+   }
+   q->slot = ctx->query_next++ % SGX_QUERY_SLOTS;
+   /* a slot a frame in flight may still store to: that frame first */
+   if (sgxws_seq_after(ctx->query_seq[q->slot], sgxws_done_seq(ctx->hw)))
+      sgx_finish(ctx);
+   ctx->query_bo.map[q->slot] = 0;
+   q->pending = ctx->query_pending;
+   q->seq = ctx->query_last;
    return true;
+fail:
+   ctx->occlusion = NULL;
+   return false;
 }
 
 static bool
-sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *q, bool wait,
-                     union pipe_query_result *result)
+sgx_end_query(struct pipe_context *pctx, struct pipe_query *q)
 {
-   memset(result, 0, sizeof(*result));
+   struct sgx_context *ctx = sgx_context(pctx);
+
+   if (ctx->occlusion == (struct sgx_query *)q)
+      ctx->occlusion = NULL;
    return true;
 }
 
+uint32_t
+sgx_query_va(const struct sgx_context *ctx)
+{
+   if (!ctx->occlusion || !ctx->occlusion->exact || ctx->queries_off)
+      return 0;
+   return ctx->query_bo.va + ctx->occlusion->slot * 4 - 4;
+}
+
+void
+sgx_query_drawn(struct sgx_context *ctx, bool stored)
+{
+   struct sgx_query *q = ctx->occlusion;
+   const struct pipe_framebuffer_state *fb = &ctx->framebuffer;
+   uint64_t samples = (uint64_t)MAX2(fb->width, 1) * MAX2(fb->height, 1) *
+                      MAX2(fb->samples, 1);
+
+   q->samples = MAX2(q->samples, samples);
+   q->drawn = true;
+   if (!stored)
+      return;
+   q->seq = ctx->query_seq[q->slot] = ctx->query_last =
+      sgxws_next_seq(ctx->hw);
+   q->pending = q->stored = ctx->query_pending = true;
+   sgxws_use_bo(ctx->hw, &ctx->query_bo, true);
+}
+
+static bool
+sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *pq,
+                     bool wait, union pipe_query_result *result)
+{
+   struct sgx_context *ctx = sgx_context(pctx);
+   struct sgx_query *q = (struct sgx_query *)pq;
+   bool visible;
+
+   memset(result, 0, sizeof(*result));
+   if (!occlusion(q->type))
+      return true;
+   if (!q->exact) {
+      visible = q->drawn;
+   } else if (!q->pending) {
+      visible = false;
+   } else {
+      if (sgxws_seq_after(q->seq, sgxws_done_seq(ctx->hw))) {
+         /* its frame: still recorded, or in flight */
+         if (q->seq == sgxws_next_seq(ctx->hw))
+            sgx_flush_frame(ctx);
+         if (!wait)
+            return false;
+         sgx_finish(ctx);
+      }
+      visible = q->stored && ctx->query_bo.map[q->slot];
+   }
+   if (q->type == PIPE_QUERY_OCCLUSION_COUNTER)
+      result->u64 = visible ? q->samples : 0;
+   else
+      result->b = visible;
+   return true;
+}
+
+/* st turns queries off around its own draws (blits, util_blitter) */
 static void
 sgx_set_active_query_state(struct pipe_context *pctx, bool enable)
 {
+   sgx_context(pctx)->queries_off = !enable;
 }
 
 /* copies on the CPU: textures and buffers are CPU-visible, render targets are
@@ -654,7 +855,25 @@ sgx_blit_cpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
 
 /* A colour blit into a render target from anything the TPU samples, drawn
  * by u_blitter through our own shaders: the swap's copy of the back buffer
- * to fb0 (a CPU copy reads the back buffer out of uncached memory). */
+ * to fb0 (a CPU copy reads the back buffer out of uncached memory), and a
+ * game's FBO presented to its window.  Into a texture the PBE renders (an
+ * FBO's, in a render-target format) too: a post-processing chain's scaled
+ * copies between FBOs went through the CPU, reading every source back from
+ * the device (OpenArena's renderer_opengl2: a quarter of its frame time). */
+static bool
+blit_dst_ok(struct pipe_screen *pscreen, const struct sgx_resource *dst,
+            enum pipe_format format)
+{
+   if (!dst->texture)
+      return dst->bo.va && dst->pitch;
+   if (sgx_drv_debug & SGX_DEBUG_NO_TEX_BLITS)
+      return false;
+   return dst->base.target == PIPE_TEXTURE_2D && dst->base.array_size == 1 &&
+          dst->base.nr_samples <= 1 &&
+          pscreen->is_format_supported(pscreen, format, PIPE_TEXTURE_2D, 0, 0,
+                                       PIPE_BIND_RENDER_TARGET);
+}
+
 static bool
 sgx_blit_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
@@ -669,8 +888,9 @@ sgx_blit_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
        info->render_condition_enable || info->alpha_blend ||
        info->num_window_rectangles || info->src.box.depth != 1 ||
        info->dst.box.depth != 1 || info->dst.level || info->src.level ||
-       !sgx_resource_sampleable(src) || dst->texture || !dst->bo.va ||
-       !dst->pitch || util_format_get_blocksize(info->dst.format) != 4 ||
+       !sgx_resource_sampleable(src) || src == dst ||
+       !blit_dst_ok(pctx->screen, dst, info->dst.format) ||
+       util_format_get_blocksize(info->dst.format) != 4 ||
        util_format_is_pure_integer(info->src.format) ||
        util_format_is_depth_or_stencil(info->src.format))
       return false;
@@ -700,8 +920,282 @@ sgx_blit_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
    util_blitter_save_fragment_constant_buffer_slot(
       ctx->blitter, &ctx->constants[MESA_SHADER_FRAGMENT]);
    util_blitter_save_render_condition(ctx->blitter, NULL, false, 0);
+   SGX_DBG(DRAW, "GPU blit %s %ux%u (%d,%d %dx%d) -> %s %ux%u (%d,%d %dx%d)\n",
+           util_format_short_name(info->src.format), info->src.resource->width0,
+           info->src.resource->height0, info->src.box.x, info->src.box.y,
+           info->src.box.width, info->src.box.height,
+           util_format_short_name(info->dst.format), info->dst.resource->width0,
+           info->dst.resource->height0, info->dst.box.x, info->dst.box.y,
+           info->dst.box.width, info->dst.box.height);
    util_blitter_blit(ctx->blitter, info, NULL);
    return true;
+}
+
+/* A depth and/or stencil blit on the CPU: nearest (the only filter GL allows
+ * for them), any scale, mirrored or not, between formats util_format can
+ * unpack and pack.  The source map brings the CPU copy up from the ZLS
+ * buffer (sample 0 of a 4x one: a resolve may take any one sample) and the
+ * destination's unmap writes it back (sgx_resource.c, zls_write). */
+static bool
+sgx_blit_zs(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   const struct pipe_box *sb = &info->src.box, *db = &info->dst.box;
+   enum pipe_format sf = info->src.format, df = info->dst.format;
+   const struct util_format_description *sd = util_format_description(sf),
+                                        *dd = util_format_description(df);
+   bool z = (info->mask & PIPE_MASK_Z) && util_format_has_depth(sd) &&
+            util_format_has_depth(dd),
+        s = (info->mask & PIPE_MASK_S) && util_format_has_stencil(sd) &&
+            util_format_has_stencil(dd);
+   int sw = abs(sb->width), sh = abs(sb->height), dw = abs(db->width),
+       dh = abs(db->height);
+   struct pipe_transfer *st, *dt;
+   uint8_t *src, *dst;
+
+   if (!z && !s)
+      return true; /* nothing either side has */
+   if (info->scissor_enable || info->render_condition_enable ||
+       info->num_window_rectangles || sb->depth != 1 || db->depth != 1 ||
+       !sw || !sh || !dw || !dh)
+      return false;
+   src = pipe_texture_map(pctx, info->src.resource, info->src.level, sb->z,
+                          PIPE_MAP_READ, MIN2(sb->x, sb->x + sb->width),
+                          MIN2(sb->y, sb->y + sb->height), sw, sh, &st);
+   if (!src)
+      return false;
+   /* not a discard: a depth-only blit keeps the stencil (and the other way) */
+   dst = pipe_texture_map(pctx, info->dst.resource, info->dst.level, db->z,
+                          PIPE_MAP_READ_WRITE, MIN2(db->x, db->x + db->width),
+                          MIN2(db->y, db->y + db->height), dw, dh, &dt);
+   if (!dst) {
+      pipe_texture_unmap(pctx, st);
+      return false;
+   }
+   unsigned sbpp = util_format_get_blocksize(sf);
+   float *zr = malloc(sizeof(float) * dw);
+   uint8_t *sr = malloc(dw);
+
+   for (int y = 0; y < dh && zr && sr; y++) {
+      int sy = CLAMP((int)((y + 0.5f) * sh / dh), 0, sh - 1);
+      int yy = db->height < 0 ? dh - 1 - y : y;
+
+      if (sb->height < 0)
+         sy = sh - 1 - sy;
+      for (int x = 0; x < dw; x++) {
+         int sx = CLAMP((int)((x + 0.5f) * sw / dw), 0, sw - 1);
+         int xx = db->width < 0 ? dw - 1 - x : x;
+         const uint8_t *p = src + sy * st->stride +
+                            (sb->width < 0 ? sw - 1 - sx : sx) * sbpp;
+
+         if (z)
+            util_format_unpack_z_float(sf, &zr[xx], p, 1);
+         if (s)
+            util_format_unpack_s_8uint(sf, &sr[xx], p, 1);
+      }
+      if (z)
+         util_format_pack_z_float(df, dst + yy * dt->stride, zr, dw);
+      if (s)
+         util_format_pack_s_8uint(df, dst + yy * dt->stride, sr, dw);
+   }
+   free(zr);
+   free(sr);
+   pipe_texture_unmap(pctx, st);
+   pipe_texture_unmap(pctx, dt);
+   return true;
+}
+
+/* The colour of a blit out of a 4x buffer on the GPU: the buffer's memory is
+ * a one-sample image of the resolved pixels, so the blitter samples it as
+ * one, at any scale or format it draws.  The copy this replaces mapped the
+ * buffer on the CPU, waiting for the render and reading it back out of
+ * write-combined memory: about 21 ms a frame at 1024x600 (issue #43).
+ *
+ * The resource itself is presented as one-sample for the blit's length, not a
+ * copy of it: the draw marks what it samples (use_seq, the render's buffer
+ * list) on the resource it sees, and a later write to the 4x buffer must
+ * wait for this read.  Its render is flushed first, so no frame records
+ * into it while it reads as one-sample. */
+static bool
+sgx_blit_resolve_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   struct pipe_resource *src = info->src.resource;
+   unsigned samples = src->nr_samples, storage = src->nr_storage_samples;
+   bool ok;
+
+   if (sgx_drv_debug & SGX_DEBUG_CPU_RESOLVE)
+      return false;
+   sgx_flush_resource_writes(sgx_context(pctx), sgx_resource(src));
+   src->nr_samples = 0;
+   src->nr_storage_samples = 0;
+   ok = sgx_blit_gpu(pctx, info);
+   src->nr_samples = samples;
+   src->nr_storage_samples = storage;
+   if (ok)
+      sgx_context(pctx)->stats.blit_gpu++;
+   return ok;
+}
+
+/* A blit out of a 4x colour buffer: its memory holds the resolved pixels
+ * (the PBE resolves each tile as it stores it, sgx_draw.c begin_frame), so
+ * the resolve is a GPU blit from them (sgx_blit_resolve_gpu).  What that
+ * refuses (a scissored blit, a format the TPU can't sample) is a CPU copy;
+ * a scaled or converting one copies into a one-sample texture first and
+ * blits from that.  Depth and stencil go through the CPU (sgx_blit_zs),
+ * from sample 0 of the ZLS buffer. */
+static bool
+sgx_blit_resolve(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   const struct pipe_resource *src = info->src.resource;
+   struct pipe_blit_info b = *info;
+   struct pipe_resource templ, *tmp;
+   struct pipe_box box = info->src.box;
+
+   if (info->mask & PIPE_MASK_ZS) {
+      if (!sgx_blit_zs(pctx, info))
+         fprintf(stderr, "sgx: depth/stencil blit from a 4x buffer not done\n");
+      if (!(info->mask & PIPE_MASK_RGBA))
+         return true;
+      b.mask &= PIPE_MASK_RGBA;
+      pctx->blit(pctx, &b);
+      return true;
+   }
+   if (sgx_blit_resolve_gpu(pctx, info))
+      return true;
+   if (box.width < 0) {
+      box.x += box.width;
+      box.width = -box.width;
+   }
+   if (box.height < 0) {
+      box.y += box.height;
+      box.height = -box.height;
+   }
+   if (info->src.format == info->dst.format &&
+       info->src.format == src->format &&
+       info->dst.format == info->dst.resource->format &&
+       info->src.box.width == info->dst.box.width &&
+       info->src.box.height == info->dst.box.height && !info->scissor_enable &&
+       !info->render_condition_enable && info->mask == PIPE_MASK_RGBA) {
+      pctx->resource_copy_region(pctx, info->dst.resource, info->dst.level,
+                                 info->dst.box.x, info->dst.box.y,
+                                 info->dst.box.z, info->src.resource,
+                                 info->src.level, &box);
+      return true;
+   }
+   templ = (struct pipe_resource){
+      .target = PIPE_TEXTURE_2D,
+      .format = src->format,
+      .width0 = box.width,
+      .height0 = box.height,
+      .depth0 = 1,
+      .array_size = 1,
+      .bind = PIPE_BIND_SAMPLER_VIEW,
+   };
+   if (!(tmp = pctx->screen->resource_create(pctx->screen, &templ)))
+      return false;
+   pctx->resource_copy_region(pctx, tmp, 0, 0, 0, 0, info->src.resource,
+                              info->src.level, &box);
+   b.src.resource = tmp;
+   b.src.level = 0;
+   b.src.box.x = info->src.box.width < 0 ? box.width : 0;
+   b.src.box.y = info->src.box.height < 0 ? box.height : 0;
+   b.src.box.z = 0;
+   pctx->blit(pctx, &b);
+   pipe_resource_reference(&tmp, NULL);
+   return true;
+}
+
+/* A blit of boxes more than a layer deep on the CPU: a volume's mip level
+ * from the one before (util_gen_mipmap's glGenerateMipmap, two slices into
+ * one) and an array's layers.  Nearest, or LINEAR in each axis the blit
+ * scales (in z too: a 3D level's eight taps); not mirrored. */
+static bool
+sgx_blit_cpu_box(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   const struct pipe_box *sb = &info->src.box, *db = &info->dst.box;
+   enum pipe_format sf = info->src.format, df = info->dst.format;
+   struct pipe_transfer *st, *dt;
+   uint8_t *src, *dst;
+   int sw = sb->width, sh = sb->height, sd = sb->depth, dw = db->width,
+       dh = db->height, dd = db->depth;
+
+   /* every channel of a texel is written: a partial colour mask isn't
+    * honoured here, so such a blit is refused */
+   if (info->mask != PIPE_MASK_RGBA)
+      return false;
+   if (info->scissor_enable || info->render_condition_enable ||
+       info->alpha_blend || info->num_window_rectangles || sw <= 0 ||
+       sh <= 0 || sd <= 0 || dw <= 0 || dh <= 0 || dd <= 0 ||
+       util_format_is_depth_or_stencil(sf) ||
+       util_format_is_pure_integer(sf) ||
+       !util_format_unpack_description(sf)->unpack_rgba ||
+       !util_format_pack_description(df)->pack_rgba_float)
+      return false;
+   src = pctx->texture_map(pctx, info->src.resource, info->src.level,
+                           PIPE_MAP_READ, sb, &st);
+   if (!src)
+      return false;
+   dst = pctx->texture_map(pctx, info->dst.resource, info->dst.level,
+                           PIPE_MAP_WRITE, db, &dt);
+   if (!dst) {
+      pipe_texture_unmap(pctx, st);
+      return false;
+   }
+   unsigned sbpp = util_format_get_blocksize(sf);
+   bool lin = info->filter == PIPE_TEX_FILTER_LINEAR;
+   bool lx = lin && sw != dw, ly = lin && sh != dh, lz = lin && sd != dd;
+   float *row = malloc(sizeof(float) * 4 * dw);
+
+   for (int z = 0; z < dd && row; z++) {
+      for (int y = 0; y < dh; y++) {
+         for (int x = 0; x < dw; x++) {
+            float f[3] = {(x + 0.5f) * sw / dw - 0.5f,
+                          (y + 0.5f) * sh / dh - 0.5f,
+                          (z + 0.5f) * sd / dd - 0.5f};
+            const int n[3] = {sw, sh, sd};
+            const bool l[3] = {lx, ly, lz};
+            int i0[3], i1[3];
+            float a[3], c[4] = {0};
+
+            for (int k = 0; k < 3; k++) {
+               if (l[k]) {
+                  i0[k] = CLAMP((int)floorf(f[k]), 0, n[k] - 1);
+                  i1[k] = MIN2(i0[k] + 1, n[k] - 1);
+                  a[k] = CLAMP(f[k] - floorf(f[k]), 0.0f, 1.0f);
+                  if (f[k] < 0)
+                     a[k] = 0;
+               } else {
+                  i0[k] = i1[k] = CLAMP((int)floorf(f[k] + 0.5f), 0, n[k] - 1);
+                  a[k] = 0;
+               }
+            }
+            for (int t = 0; t < 8; t++) {
+               float w = 1, v[4];
+               int p[3];
+
+               for (int k = 0; k < 3; k++) {
+                  bool hi = t >> k & 1;
+                  w *= hi ? a[k] : 1 - a[k];
+                  p[k] = hi ? i1[k] : i0[k];
+               }
+               if (w == 0)
+                  continue;
+               util_format_unpack_rgba(sf, v,
+                                       src + p[2] * st->layer_stride +
+                                          p[1] * st->stride + p[0] * sbpp,
+                                       1);
+               for (int i = 0; i < 4; i++)
+                  c[i] += w * v[i];
+            }
+            memcpy(&row[4 * x], c, sizeof(c));
+         }
+         util_format_pack_rgba(df, dst + z * dt->layer_stride + y * dt->stride,
+                               row, dw);
+      }
+   }
+   free(row);
+   pipe_texture_unmap(pctx, st);
+   pipe_texture_unmap(pctx, dt);
+   return !!row;
 }
 
 static void
@@ -710,6 +1204,26 @@ sgx_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
    struct sgx_context *ctx = sgx_context(pctx);
    uint64_t t0;
 
+   if (info->src.resource->nr_samples > 1 &&
+       sgx_blit_resolve(pctx, info))
+      return;
+   /* depth and stencil: through their CPU copies and ZLS buffers; a blit of
+    * colour and depth together goes as two */
+   if (info->mask & PIPE_MASK_ZS) {
+      struct pipe_blit_info c = *info;
+
+      if (!util_try_blit_via_copy_region(pctx, info, false) &&
+          !sgx_blit_zs(pctx, info))
+         fprintf(stderr, "sgx: depth/stencil blit %s -> %s not supported\n",
+                 util_format_short_name(info->src.format),
+                 util_format_short_name(info->dst.format));
+      c.mask &= PIPE_MASK_RGBA;
+      if (!c.mask)
+         return;
+      info = &c;
+      sgx_blit(pctx, info);
+      return;
+   }
    if (sgx_blit_gpu(pctx, info)) {
       ctx->stats.blit_gpu++;
       return;
@@ -729,6 +1243,11 @@ sgx_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
               info->src.box.height, util_format_short_name(info->dst.format),
               info->dst.box.width, info->dst.box.height,
               sgx_resource(info->dst.resource)->texture);
+      return;
+   }
+   if ((info->src.box.depth != 1 || info->dst.box.depth != 1) &&
+       sgx_blit_cpu_box(pctx, info)) {
+      ctx->stats.blit_cpu++;
       return;
    }
    fprintf(stderr, "sgx: blit %s -> %s not supported yet\n",
@@ -774,8 +1293,8 @@ sgx_state_init(struct sgx_context *ctx)
    p->resource_release = u_default_resource_release;
    p->create_query = sgx_create_query;
    p->destroy_query = sgx_destroy_query;
-   p->begin_query = sgx_begin_end_query;
-   p->end_query = sgx_begin_end_query;
+   p->begin_query = sgx_begin_query;
+   p->end_query = sgx_end_query;
    p->get_query_result = sgx_get_query_result;
    p->set_active_query_state = sgx_set_active_query_state;
    p->resource_copy_region = sgx_resource_copy_region;

@@ -126,7 +126,8 @@ is higher on ours too.
 2. Item 3, from the traces.
 3. `SGX_DEBUG=zerocopy` as the default. It gave +6% walking and -4% standing
    in single runs: take medians first.
-4. Ring depth (`SGX_SLOTS`), once the SLOTS=6 hang is understood.
+4. Ring depth (`SGX_SLOTS`): done, six since 2026-11-16 (below). The SLOTS=6 hang was in
+   the jobs' contents, not the depth (`docs/log/entries/2026-11-08-2040-drm-queue-depth.md`).
 
 ### Measured 2026-11-09: the colour fast paths
 
@@ -650,6 +651,67 @@ Still open, in order:
 - 8-bit colour math (`sopwm`, `sop2` on texels and lowp colours, as libusc does);
 - the texel's channel swizzle in the sample, so a texel colour is 0 instructions.
 
+### The desktop's programs (glamor, xfwm4), 2026-11-11
+
+The X server's own programs, built the way glamor builds them on GL 2.1 / GLSL 1.20
+(`tools/usc/glamor_corpus.py` over the Debian trixie X server source, 21.1.16), compiled
+in driver mode (`run_corpus.py --driver-all`). Not yet checked against a shader dump from
+a running X server.
+
+- xfwm4 4.20 composites with XRender (`src/compositor.c`), so its drawing is glamor's
+  composite programs. Its GLX path only puts the finished frame on screen, a textured quad
+  in fixed function (`GL_REPLACE`): one sample, no ALU.
+- Rectangle fills, copy area and glyphs: 0-3 ALU instructions each. Nothing to win.
+- Composite (22 source × mask × combine programs that read a texture): 88-212 instructions
+  and 18-19 temporaries, because the repeat-mode branches (`rel_sampler`, `rel_tex_coord`,
+  on the `source_repeat_mode` / `mask_repeat_mode` uniforms) were flattened into selects, so
+  every pixel ran every repeat mode. dae9a8b keeps an `if` on a uniform condition
+  (divergence analysis) a branch when it holds more than a few instructions, so a pixel
+  runs only the path for its mode. Measured as the program with the mode a constant
+  (instructions, samples apart; the branch tests add one test and branch per `if`):
+
+  | mode | when glamor uses it | flattened → branch |
+  |---|---|---|
+  | RepeatNone / Normal / Pad / Reflect | every picture that fits one texture | 88-212 → 0-6 |
+  | RepeatFix + None | a pixmap larger than the texture limit, or an alpha-less transformed picture | 88-212 → 13-48 |
+  | RepeatFix + Normal | the same, repeating | 88-212 → 1-20 |
+
+  Corpus c1-c3, glmark2, Minecraft, loops: byte-identical (no existing program has such an
+  `if`). `SGX_COMPILER_DEBUG=flattenuniform` restores the selects. On the desktop
+  (the lag rig, `tests/desktop/lag`, `flatten` against `default`, CE5310 board 720x480, 2026-11-12,
+  one run each; X's draw + flush+wait time from `SGX_DEBUG=stats`), flattening costs more
+  than it saves, so branches stay the default:
+
+  | workload | X draw+flush ms/s, branches | flattened | X flushes/s, branches | flattened |
+  |---|---|---|---|---|
+  | `term` (glyphs) | 71 | 223 | 19.8 | 36.0 |
+  | `drag` | 96 | 83 | 30.7 | 21.5 |
+  | `drag-gl` | 646 | 732 | 88.9 | 77.0 |
+  | `menus`, `firefox` | 34, 44 | 31, 44 | 11.6, 16.8 | 9.5, 15.7 |
+
+  Xorg's CPU share is within a few points either way (`drag-gl` 27 % branches, 21 %
+  flattened). `nolevers` (no lazy clears or depth discards) is within noise of `default`
+  on every workload.
+- `nir_opt_preamble` (measure only, ALU cost 1): on the uniform program it lifts 35 of
+  131 ALU ops (comp_tex_tex_n), but those are mostly the repeat-mode tests, which still
+  cost a test into a predicate per branch when the result comes from the preamble. With the
+  mode fixed it lifts 0-1 NIR ops on the common path and 1-2 on RepeatFix. Fills,
+  copies and glyphs: 0.
+
+The fragment secondary preamble isn't worth building for the desktop. The gradients
+(15-34 ops a program, above) are the only glamor programs it would help, and those are rare.
+
+## GoldSrc's immediate mode (CE5300 board, 2026-11-20)
+
+Counter-Strike 1.6's renderer draws every world face as its own `glBegin(GL_POLYGON)`.
+Mesa's vbo module hands the faces between two state changes to the driver as one call
+of several draws (about 4.6 a call with a texture switch every 6 faces). Each draw cost
+about 9 us of CPU and each call about 14 us of state setup. `mesa/tests/sgx_gl1bench`
+reproduces the frame. The draws of one call are now one draw of their triangles or
+lines (`merged_draw`, `SGX_DEBUG=nomerge` to compare). The bench goes from 24.4 to 30.5
+fps (33.2 with `nozerocopy`). Details and what is left:
+`docs/log/entries/2026-11-20-0150-goldsrc-draw-merge.md`.
+
 ## Kernel driver (powervr_sgx)
 
 What a job costs on the CPU side, from a submit to its fence, measured with the
@@ -737,8 +799,14 @@ overlap. The DDK's hardware work per frame is not smaller.
   present. The sysfb damage commit stopped blocking (m2-drm e874e6f): X latency
   at four slots is 23 ms median (20-53, n=20) against 25 ms at three, no damage
   lost, Minecraft 13.6 / 11.0 fps standing / walking against 12.6 / 9.2 at
-  three. Four slots are the default since (`SGX_SLOTS=3` for the old
+  three. Four slots were the default from then (`SGX_SLOTS=3` for the old
   behaviour); gma500 never had the wait.
+- Six slots are the default since 2026-11-16
+  (`docs/log/entries/2026-11-16-2130-ring-slots-six.md`). A frame of four renders (Minecraft's two
+  plus a capture's blit and pack) left four slots one frame deep, and the CPU waited out the GPU's
+  whole previous frame: capture at 360x240 cost Minecraft 18.5 → 13 fps, and 17.1-17.8 at six (eight:
+  no better). Each slot is about 20 MB of rings per context, so six cost ~38 MB more per GL
+  program than four.
 - What is left of the idle at four slots is the vendor microkernel's too: 5.3%
   all-idle on ours against 6.5% on the vendor's, same TA and 3D a frame (a
   steady window; an earlier warm-up window had suggested 1-10 ms of

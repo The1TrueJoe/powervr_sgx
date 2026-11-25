@@ -22,15 +22,17 @@ powervr_sgx-y := \
 	pvrsgx_render.o \
 	pvrsgx_transfer.o \
 	pvrsgx_trace.o \
+	pvrsgx_usse.o \
 	pvrsgx_validate.o \
 	pvrsgx_vm.o \
 	pvrsgx_cmd_checks.o \
-	pvrsgx_stream.o \
-	pvrsgx_stream_defs.o
+	pvrsgx_cmd.o \
+	pvrsgx_cmd_defs.o
 
 powervr_sgx-$(CONFIG_DEBUG_FS) += pvrsgx_debugfs.o
 powervr_sgx-$(CONFIG_PM) += pvrsgx_pm.o
 powervr_sgx-$(CONFIG_DRM_POWERVR_SGX_GMA500) += pvrsgx_aux.o
+powervr_sgx-$(CONFIG_DRM_POWERVR_SGX_OF) += pvrsgx_of.o
 
 obj-$(CONFIG_DRM_POWERVR_SGX) += powervr_sgx.o
 else

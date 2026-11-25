@@ -76,6 +76,8 @@ struct sgxws_target {
     * 3 linear with the pitch rounded up to 8 texels, 0 twiddled, which the
     * PBE then writes twiddled too) */
    uint8_t pbe_format, t1_format, t1_layout;
+   /* the program's word is stored unchanged: no dither (integer formats) */
+   bool raw;
    /* Depth and stencil kept across renders (ZLS, TEX.md section 7): a buffer
     * of float32 depth for every pixel of the render's tile-padded size, then
     * a stencil byte each: 5 bytes per sgxws_zls_pixels.  The render stores both
@@ -83,6 +85,11 @@ struct sgxws_target {
     * depth and stencil live only within the render. */
    uint32_t zls_va;
    bool zls_load;
+   /* 4: the render target is 4x multisampled (its rt made with 4 samples):
+    * the PBE resolves each pixel's 2x2 samples (PBE word 2 downscale), and
+    * zls_va is then required, a buffer of 4x the bytes, a depth and a
+    * stencil per sample (STATE.md "Multisampling (4x)").  0 or 1: one. */
+   uint8_t samples;
 };
 
 /* A GPU reset since sgxws_reset_status last asked: this context's job
@@ -124,6 +131,8 @@ struct sgxws_prog {
    uint32_t tsp_sizes;   /* TA state: texcoord sizes, 3 bits per set */
    uint32_t tsp_prec;    /* TA state: sets with precision value <= 2 */
    bool point_size;      /* vertex: the last output dword is the point size */
+   uint32_t clip_planes; /* vertex: user clip planes, output select b0-5 */
+   bool colour; /* vertex: set 0 is the vertex colour (output select b11) */
    /* fragment: */
    uint32_t sec_dwords; /* constant dwords DMA'd for the secondary program */
    struct sgx_pds_douti douti[10]; /* DOUTIs, one per iterated input or sample */
@@ -177,7 +186,11 @@ struct sgxws_blend {
    /* the alpha side's products trade r0 and r1, so its subtract runs the
     * other way from the colour's (SUBTRACT against REVERSE_SUBTRACT) */
    uint8_t atrade;
+   /* every pixel shaded (past a discard's feedback) stores 1 at
+    * sa[SGXWS_VISIBLE_SA] + 4: occlusion queries */
+   uint8_t visible;
 };
+#define SGXWS_VISIBLE_SA 6
 
 /* a constant-colour blend's factors, in glBlendFunc's order */
 enum sgxws_bfactor {
@@ -289,9 +302,27 @@ struct sgxws_draw {
    struct sgxws_const_mem {
       const uint32_t *words;
       uint32_t dwords; /* 0: none */
-      uint8_t n_bases, base[8];
+      uint8_t n_bases, base[16]; /* SGX_MAX_MEM_BASES */
    } vs_mem, fs_mem;
+   /* Uniform blocks (the compiler's ld.a.d from a block's address): each
+    * copied to frame memory, the copy's address written into the program's
+    * SA register sa (an index into fs_consts or vs_consts, -1 none) and into
+    * word mem of its memory block (0 none). A block with a key the frame
+    * has copied already (the same key, bytes and contents' source) is
+    * copied once a frame; key 0: copied every draw */
+   const struct sgxws_ubo *ubos;
+   unsigned n_ubos;
 };
+
+struct sgxws_ubo {
+   const void *data;
+   uint32_t bytes;
+   uint64_t key;
+   bool fs; /* the fragment program's, else the vertex program's */
+   int16_t sa;
+   uint16_t mem;
+};
+#define SGXWS_MAX_UBOS 32
 
 /* where the winsys's time goes (SGX_STATS) */
 struct sgxws_stats {
@@ -300,13 +331,21 @@ struct sgxws_stats {
    uint64_t ns_target_wait,
       ns_slot_wait; /* a target's or ring slot's last render */
    uint64_t ns_sync_wait, ns_fence_wait;    /* a synchronous flush; fences */
-   uint64_t ns_latency, ns_latency_scanout; /* kick to seen done; of those, into
-                                               the scanout buffer */
+   uint64_t ns_latency, ns_latency_scanout; /* kick to done (renders a wait
+                                               saw end); of those, into the
+                                               scanout buffer */
    unsigned n_latency, n_latency_scanout;
    unsigned room_flushes; /* frames submitted early because a ring filled */
    uint64_t gpu_indices, gpu_verts; /* what the VDM was given: indices, and the
                                        vertices they index */
    unsigned state_sent, state_skipped; /* draws' TA state blocks */
+   unsigned bo_allocs, bo_cached, bo_busy; /* buffers allocated; from the
+                                              cache; cached ones still in use */
+   unsigned gem_live, gem_made, gem_closed, code_resets; /* GEM objects: live;
+                                              made, closed, code chunks emptied */
+   uint64_t gem_bytes;                     /* the live ones' bytes */
+   unsigned zombies, cached;               /* freed, held: for the GPU; cached */
+   uint64_t zombie_bytes, cached_bytes;
 };
 
 /* debugging aids the driver passes on (its SGX_DEBUG options) */
@@ -376,6 +415,9 @@ sgxws_bo_valid(const struct sgxws_bo *bo)
    return bo->impl != NULL;
 }
 /* wait for the submitted renders that write a render target (0 when done) */
+/* the CPU wrote a shared buffer (through its map): the next job that uses it
+ * has the kernel write the CPU's lines back first */
+void sgxws_bo_cpu_written(struct sgxws_bo *bo);
 /* a buffer to be rendered into: its sync data, for sgxws_bo_wait */
 void sgxws_bo_prepare_target(struct sgxws_dev *d, struct sgxws_bo *bo);
 /* the buffer the frame being recorded renders into, NULL when none is */
@@ -389,6 +431,9 @@ void sgxws_ctx_destroy(struct sgxws_ctx *c);
 
 enum sgxws_reset sgxws_reset_status(struct sgxws_ctx *c);
 struct sgxws_rt *sgxws_rt_create(struct sgxws_ctx *c, uint32_t w, uint32_t h);
+/* the same with samples 1 or 4, up to sgxws_dev_info's rt_max_samples */
+struct sgxws_rt *sgxws_rt_create_samples(struct sgxws_ctx *c, uint32_t w,
+                                         uint32_t h, unsigned samples);
 void sgxws_rt_destroy(struct sgxws_ctx *c, struct sgxws_rt *rt);
 
 /*
@@ -405,16 +450,30 @@ void sgxws_rt_destroy(struct sgxws_ctx *c, struct sgxws_rt *rt);
  */
 uint32_t sgxws_upload_vs(struct sgxws_ctx *c, const uint64_t *code, unsigned n,
                          unsigned temps);
+/* A fragment program's visibility feedback (docs/ISA.md "Phases, visibility
+ * feedback and discard"); the program's last instruction (phase 0's, when
+ * split) is the compiler's feedback nop.
+ *  - discard_pa >= 0: it discards (p1 = keep); the PDS iterates the depth
+ *    plane into pa<discard_pa>.. for pcoeff, and atst8 takes the nop's place.
+ *  - depth_pa >= 0: it writes gl_FragDepth, in pa<depth_pa> at the nop;
+ *    depthf takes the nop's place, predicated on p1 when it also discards.
+ *    Without a discard, pcoeff's slot is a no-op (`mov pa0, pa0`), as in
+ *    the vendor driver's points path. The draw's pass type is 5. */
+struct sgxws_fs_feedback {
+   int discard_pa;
+   int depth_pa;
+};
 uint32_t sgxws_upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned n,
                          unsigned color_pa, const struct sgxws_blend *blend,
-                         int discard_pa, unsigned temps);
+                         const struct sgxws_fs_feedback *fb, unsigned temps);
 /* a program split around its discard: code (phase 0) ends at the feedback
  * nop, code1 (phase 1, only for the pixels that pass) leaves the colour in
  * pa<color_pa1> */
 uint32_t sgxws_upload_fs_split(struct sgxws_ctx *c, const uint64_t *code,
                                unsigned n, const uint64_t *code1, unsigned n1,
                                unsigned color_pa1,
-                               const struct sgxws_blend *blend, int discard_pa,
+                               const struct sgxws_blend *blend,
+                               const struct sgxws_fs_feedback *fb,
                                unsigned temps);
 void sgxws_blend_words(const struct sgxws_blend *b, unsigned color_pa, bool end,
                        uint32_t w[2]);
@@ -444,6 +503,13 @@ uint32_t sgxws_f16(float x);
 int sgxws_begin(struct sgxws_ctx *c, struct sgxws_rt *rt,
                 const struct sgxws_target *t);
 bool sgxws_recording(struct sgxws_ctx *c);
+
+/* Hardware tests only (sgx_hwt): the frames begun from now on end their
+ * tiles with these words as the end-of-tile program instead of the
+ * target's (docs/GL3.md, test H1); NULL goes back to the target's.  At most
+ * SGXWS_EOT_OVERRIDE_WORDS. */
+#define SGXWS_EOT_OVERRIDE_WORDS 64
+void sgxws_hwt_eot(struct sgxws_ctx *c, const uint32_t *words, unsigned n);
 
 /* a shared buffer the frame being recorded reads (a texture) or writes */
 void sgxws_use_bo(struct sgxws_ctx *c, const struct sgxws_bo *bo, bool write);

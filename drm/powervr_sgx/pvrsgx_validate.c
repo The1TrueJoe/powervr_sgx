@@ -2,20 +2,20 @@
 /* Copyright © 2026 Joseph Telaak */
 
 /*
- * Shader validation, decision D9: a client's USSE program can read registers
- * with ldr and must not be able to; client stores to registers are refused
- * too until it is known why the three tested ones were dropped
- * (docs/UAPI.md section 7.2). The design is in docs/DRM-DRIVER.md section 6.
+ * Shader validation: what a client's USSE code may contain. The threat model
+ * is in Documentation/gpu/powervr_sgx/index.rst, "Shader validation".
  *
- * Client USSE code can run only from the two USSE heaps of its own VM (the
- * code-base registers cover exactly those), the USSE heaps take only code
- * objects, and a code object's contents arrive only through UPLOAD_CODE,
- * which scans every instruction against the form table generated from the
- * clean-room ISA description.
+ * Client USSE code runs only from the two USSE heaps of its own VM (the code
+ * base registers cover exactly those), the USSE heaps take only code objects,
+ * and a code object's contents arrive only through UPLOAD_CODE, which checks
+ * every instruction against the form table generated from the isaspec
+ * description: its form, what the form does, and each operand's register file
+ * and number.
  */
 
 #include <drm/drm_file.h>
 #include <drm/drm_gem.h>
+#include <drm/drm_gpuvm.h>
 #include <drm/drm_print.h>
 
 #include <linux/dma-resv.h>
@@ -27,71 +27,10 @@
 
 #include "pvrsgx_core.h"
 #include "pvrsgx_device.h"
+#include "pvrsgx_fw.h"
 #include "pvrsgx_gem.h"
+#include "pvrsgx_usse.h"
 #include "pvrsgx_validate.h"
-
-enum pvrsgx_usse_kind {
-	PVRSGX_USSE_OK,
-	PVRSGX_USSE_LDR,
-	PVRSGX_USSE_STR,
-	PVRSGX_USSE_BR,
-	PVRSGX_USSE_SETL,
-	PVRSGX_USSE_SAVL,
-};
-
-struct pvrsgx_usse_form {
-	u64 mask, match;
-	u8 kind;
-};
-
-#include "pvrsgx_usse_table.h"
-
-/* The forms of each instruction set (pvrsgx_core.h). */
-static const struct {
-	const struct pvrsgx_usse_form *forms;
-	u32 n;
-} isas[] = {
-	[PVRSGX_ISA_SGX545] = { pvrsgx_usse_forms, ARRAY_SIZE(pvrsgx_usse_forms) },
-};
-
-/* br's target: l0-17, signed, in instructions from the branch. */
-#define USSE_BR_OFFSET		GENMASK_ULL(17, 0)
-
-/*
- * Check n instructions that will sit at instruction index first of an object
- * of obj_insts instructions. Returns the index (from w) of the first bad one,
- * or -1. Linear in n, no allocation.
- */
-static s64 usse_scan(enum pvrsgx_isa isa, const u64 *w, u32 n, u32 first, u32 obj_insts)
-{
-	const struct pvrsgx_usse_form *forms = isas[isa].forms;
-
-	for (u32 i = 0; i < n; i++) {
-		const struct pvrsgx_usse_form *f = NULL;
-		s64 target;
-
-		for (u32 k = 0; k < isas[isa].n; k++) {
-			if ((w[i] & forms[k].mask) == forms[k].match) {
-				f = &forms[k];
-				break;
-			}
-		}
-		if (!f)
-			return i;
-		switch (f->kind) {
-		case PVRSGX_USSE_OK:
-			break;
-		case PVRSGX_USSE_BR:
-			target = (s64)first + i + sign_extend64(w[i] & USSE_BR_OFFSET, 17);
-			if (target < 0 || target >= obj_insts)
-				return i;
-			break;
-		default:
-			return i;
-		}
-	}
-	return -1;
-}
 
 static bool bo_is_code(struct pvrsgx_bo *bo)
 {
@@ -110,6 +49,80 @@ int pvrsgx_validate_vm_map(struct pvrsgx_device *sdev, struct pvrsgx_vm *vm,
 	return heap_is_usse(heap) == bo_is_code(bo) ? 0 : -EINVAL;
 }
 
+static_assert(PVRSGX_USSE_WINDOW_INSTS * 8 == 1u << PVRSGX_USSE_WINDOW_LOG2);
+
+/*
+ * Where a mapping at addr of the object from offset puts the object's start,
+ * in instructions from the start of its code base window: what phas.i's
+ * targets count from when the task's PDS program names the window its first
+ * word is in. One window per object makes that base the same for every entry.
+ */
+static s64 code_place(const struct pvrsgx_heap_layout *h, u64 addr, u64 offset)
+{
+	u64 base = addr >= h->usse_vertex.base ? h->usse_vertex.base : h->usse_pixel.base;
+	s64 start = (s64)(addr - base) - (s64)offset;
+
+	if (start < 0)
+		return PVRSGX_USSE_PLACE_NONE;
+	return (start / 8) & (PVRSGX_USSE_WINDOW_INSTS - 1);
+}
+
+/*
+ * Once code with absolute targets is in an object, every mapping of it puts it
+ * where those targets were checked. Called with the object's reservation held.
+ */
+int pvrsgx_validate_vm_link(struct pvrsgx_bo *bo, u64 addr, u64 offset)
+{
+	const struct pvrsgx_heap_layout *h;
+	const struct pvrsgx_va_range *r;
+
+	if (!bo_is_code(bo))
+		return 0;
+	h = pvrsgx_heaps(to_pvrsgx_device(bo->base.base.dev));
+	/*
+	 * The whole object, from where the mapping puts its start, in one USSE
+	 * heap: a branch the scan allowed anywhere in it stays in that heap.
+	 */
+	r = addr >= h->usse_vertex.base ? &h->usse_vertex : &h->usse_pixel;
+	if (offset > addr - r->base || addr - offset + bo->base.base.size > r->end)
+		return -EINVAL;
+	if (!bo->code_abs)
+		return 0;
+	return code_place(h, addr, offset) == bo->code_place ? 0 : -EINVAL;
+}
+
+/* Whether obj has a mapping, not just a VM link a failed VM_BIND left. */
+static bool code_mapped(struct drm_gem_object *obj)
+{
+	struct drm_gpuvm_bo *vm_bo;
+
+	drm_gem_for_each_gpuvm_bo(vm_bo, obj) {
+		if (!list_empty(&vm_bo->list.gpuva))
+			return true;
+	}
+	return false;
+}
+
+/* The one place every mapping of obj puts it, or PVRSGX_USSE_PLACE_NONE. */
+static s64 code_place_mapped(struct drm_gem_object *obj)
+{
+	const struct pvrsgx_heap_layout *h = pvrsgx_heaps(to_pvrsgx_device(obj->dev));
+	struct drm_gpuvm_bo *vm_bo;
+	struct drm_gpuva *va;
+	s64 place = PVRSGX_USSE_PLACE_NONE;
+
+	drm_gem_for_each_gpuvm_bo(vm_bo, obj) {
+		drm_gpuvm_bo_for_each_va(va, vm_bo) {
+			s64 p = code_place(h, va->va.addr, va->gem.offset);
+
+			if (place != PVRSGX_USSE_PLACE_NONE && p != place)
+				return PVRSGX_USSE_PLACE_NONE;
+			place = p;
+		}
+	}
+	return place;
+}
+
 u32 pvrsgx_validate_pte_flags(struct pvrsgx_bo *bo)
 {
 	return bo_is_code(bo) ? SGX_MMU_PTE_READONLY : 0;
@@ -121,6 +134,52 @@ int pvrsgx_validate_job(struct pvrsgx_device *sdev, struct pvrsgx_job *job)
 	return 0;
 }
 
+/*
+ * Words into code the GPU may be fetching: it sees each word whole or still
+ * zero. A 32-bit CPU stores halves: the low halves go first, so a fetch in
+ * between sees a word with its high half zero, which the scan checked too.
+ */
+static void code_write(struct iosys_map *map, u64 offset, const u64 *src, u32 n)
+{
+	u64 *dst = map->vaddr + offset;
+
+	if (IS_ENABLED(CONFIG_64BIT)) {
+		for (u32 i = 0; i < n; i++)
+			WRITE_ONCE(dst[i], src[i]);
+	} else {
+		u32 *d = (u32 *)dst;
+
+		for (u32 i = 0; i < n; i++)
+			WRITE_ONCE(d[2 * i], lower_32_bits(src[i]));
+		/* Every low half in memory before any high half. */
+		wmb();
+		for (u32 i = 0; i < n; i++)
+			WRITE_ONCE(d[2 * i + 1], upper_32_bits(src[i]));
+	}
+	/* Whole before the upload returns and any job can be sent for it. */
+	wmb();
+}
+
+/* On a 32-bit CPU, also each word as code_write() leaves it half-written. */
+static s64 scan_halves(struct pvrsgx_device *sdev, const u64 *buf, u32 n, u32 first,
+		       u32 obj_insts, s64 place, enum pvrsgx_usse_refusal *why)
+{
+	bool abs = false;
+	u64 *lo;
+	s64 bad;
+
+	if (IS_ENABLED(CONFIG_64BIT))
+		return -1;
+	lo = kvmalloc_array(n, sizeof(*lo), GFP_KERNEL);
+	if (!lo)
+		return -ENOMEM;
+	for (u32 i = 0; i < n; i++)
+		lo[i] = lower_32_bits(buf[i]);
+	bad = pvrsgx_usse_scan(sdev->family->isa, lo, n, first, obj_insts, place, &abs, why);
+	kvfree(lo);
+	return bad;
+}
+
 int pvrsgx_ioctl_upload_code(struct drm_device *drm, void *data, struct drm_file *file)
 {
 	struct drm_powervr_sgx_ioctl_upload_code_args *args = data;
@@ -129,7 +188,9 @@ int pvrsgx_ioctl_upload_code(struct drm_device *drm, void *data, struct drm_file
 	struct pvrsgx_bo *bo;
 	struct iosys_map map;
 	u64 end, *buf;
-	s64 bad;
+	enum pvrsgx_usse_refusal why;
+	s64 bad, place;
+	bool abs = false;
 	int err;
 
 	args->bad_offset = ~0ull;
@@ -155,27 +216,48 @@ int pvrsgx_ioctl_upload_code(struct drm_device *drm, void *data, struct drm_file
 		err = -EFAULT;
 		goto out_buf;
 	}
-	bad = usse_scan(sdev->family->isa, buf, args->size / 8, args->offset / 8, obj->size / 8);
-	if (bad >= 0) {
-		args->bad_offset = args->offset + bad * 8;
-		err = -EINVAL;
-		goto out_buf;
-	}
-
-	/* VM_MAP links a mapping under the same lock. */
+	/* VM_BIND links a mapping under the same lock. */
 	err = dma_resv_lock_interruptible(obj->resv, NULL);
 	if (err)
 		goto out_buf;
-	if (!list_empty(&obj->gpuva.list) && args->offset < bo->code_end) {
+	/* An unmapped mapping counts until its jobs and the BIF invalidate are done. */
+	if ((code_mapped(obj) || atomic_read(&bo->code_unmapping)) &&
+	    args->offset < bo->code_end) {
 		err = -EBUSY;
+		goto out_unlock;
+	}
+	place = code_place_mapped(obj);
+	bad = pvrsgx_usse_scan(sdev->family->isa, buf, args->size / 8, args->offset / 8,
+			       obj->size / 8, place, &abs, &why);
+	if (bad < 0)
+		bad = scan_halves(sdev, buf, args->size / 8, args->offset / 8, obj->size / 8,
+				  place, &why);
+	if (bad == -ENOMEM) {
+		err = -ENOMEM;
+		goto out_unlock;
+	}
+	/* Absolute targets: no mapping on its way out may put the object elsewhere. */
+	if (bad < 0 && abs && atomic_read(&bo->code_unmapping)) {
+		err = -EBUSY;
+		goto out_unlock;
+	}
+	if (bad >= 0) {
+		args->bad_offset = args->offset + bad * 8;
+		drm_dbg_driver(drm, "UPLOAD_CODE: word at 0x%llx refused: %s\n",
+			       args->bad_offset, pvrsgx_usse_refusal_name(why));
+		err = -EINVAL;
 		goto out_unlock;
 	}
 	err = drm_gem_shmem_vmap_locked(&bo->base, &map);
 	if (err)
 		goto out_unlock;
-	iosys_map_memcpy_to(&map, args->offset, buf, args->size);
+	code_write(&map, args->offset, buf, args->size / 8);
 	drm_gem_shmem_vunmap_locked(&bo->base, &map);
 	bo->code_end = max(bo->code_end, end);
+	if (abs) {
+		bo->code_abs = true;
+		bo->code_place = place;
+	}
 
 out_unlock:
 	dma_resv_unlock(obj->resv);
@@ -185,3 +267,7 @@ out_obj:
 	drm_gem_object_put(obj);
 	return err;
 }
+
+#if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_KUNIT_TEST)
+#include "tests/pvrsgx_validate_test.c"
+#endif

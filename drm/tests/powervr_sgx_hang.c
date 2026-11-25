@@ -159,7 +159,7 @@ static void eot_place(void)
 
 /* A transfer job copying surface s to `copy`, waiting on `wait` (0: nothing). */
 struct xjob {
-	uint32_t s[12];
+	struct drm_powervr_sgx_cmd_transfer t;
 	struct drm_powervr_sgx_sync_op op[2];
 	struct drm_powervr_sgx_job job;
 };
@@ -184,22 +184,22 @@ static void transfer_job_va(struct xjob *x, uint32_t src_va, uint32_t src_pitch,
 	__sync_synchronize();
 
 	memset(x, 0, sizeof(*x));
-	x->s[0] = 48;			/* CMD_TRANSFER (UAPI.md 3.5) */
-	x->s[2] = X.bg;
-	x->s[4] = b.cmd[9];
-	x->s[6] = b.cmd[10];
-	x->s[7] = b.cmd[12] >> 16;
-	x->s[8] = b.cmd[12] & 0xffff;
-	x->s[9] = b.cmd[13] >> 16;
-	x->s[10] = b.cmd[13] & 0xffff;
-	x->s[11] = b.cmd[2];
+	x->t.head.size = sizeof(x->t);	/* the transfer command (uAPI revision 3) */
+	x->t.bg_block_addr = X.bg;
+	x->t.pixel_event_pds_addr = b.cmd[9];
+	x->t.pixel_event_pds_rows = b.cmd[10];
+	x->t.first_tile_x = b.cmd[12] >> 16;
+	x->t.first_tile_y = b.cmd[12] & 0xffff;
+	x->t.last_tile_x = b.cmd[13] >> 16;
+	x->t.last_tile_y = b.cmd[13] & 0xffff;
+	x->t.bg_depth_f32 = b.cmd[2];
 	if (wait)
 		x->op[n++] = (struct drm_powervr_sgx_sync_op){ .handle = wait,
 							       .flags = DRM_POWERVR_SGX_SYNC_OP_FLAG_WAIT };
 	x->op[n++] = (struct drm_powervr_sgx_sync_op){ .handle = xsync, .flags = DRM_POWERVR_SGX_SYNC_OP_FLAG_SIGNAL };
 	x->job = (struct drm_powervr_sgx_job){
 		.type = DRM_POWERVR_SGX_JOB_TYPE_TRANSFER, .context_handle = xctx,
-		.cmd_stream = (uintptr_t)x->s, .cmd_stream_len = 48,
+		.cmd = (uintptr_t)&x->t,
 		.sync_ops = OBJ_ARRAY(n, x->op),
 	};
 }
@@ -429,8 +429,8 @@ static int rpm_status(char *buf, size_t n)
 	return ok ? 0 : -1;
 }
 
-/* 1 once suspended, 0 if not within ms, -1 without runtime PM. */
-static int rpm_wait_suspended(unsigned ms)
+/* 1 once suspended, 0 if not within ms, -1 without runtime PM; *took: ms waited. */
+static int rpm_wait_suspended(unsigned ms, unsigned *took)
 {
 	FILE *fp = power_file("control");
 	char st[32] = "";
@@ -444,6 +444,7 @@ static int rpm_wait_suspended(unsigned ms)
 			return -1;
 	}
 	for (unsigned t = 0; t <= ms; t += 20) {
+		*took = t;
 		if (rpm_status(st, sizeof(st)) || !strcmp(st, "unsupported"))
 			return -1;
 		if (!strcmp(st, "suspended"))
@@ -477,7 +478,9 @@ static int hang(struct rc *a, unsigned f)
 	CHECK(sb.reset_count == s0.reset_count + 1);
 	CHECK(state(a->c->ctx).state == DRM_POWERVR_SGX_CONTEXT_STATE_OK);
 	CHECK(state(xctx).state == DRM_POWERVR_SGX_CONTEXT_STATE_OK);
-	dump = coredump_take();
+	/* Written by a worker, possibly after the fence: give it two seconds. */
+	for (int t = 0; (dump = coredump_take()) <= 0 && t < 100; t++)
+		usleep(20000);
 	printf("  devcoredump: %ld bytes\n", dump);
 	CHECK(dump > 1000);
 
@@ -591,16 +594,23 @@ static int hang_bystander(unsigned f)
 static int idle(struct rc *a, unsigned f)
 {
 	char st[32] = "";
+	unsigned took = 0;
 	int bad = 0, s;
 
-	/* A render context holds the GPU awake: no runtime suspend while a exists. */
-	s = rpm_wait_suspended(1500);
+	/*
+	 * Only jobs hold the GPU awake: it suspends while a's context is idle.
+	 * Whether, not how fast: the autosuspend delay is 0.5 s, and the stop's
+	 * power-off handshake takes far longer on a debug kernel.
+	 */
+	s = rpm_wait_suspended(5000, &took);
 	if (s < 0) {
 		printf("  no runtime PM\n");
 		return 1;
 	}
-	printf("  idle with a render context: %s\n", s ? "SUSPENDED" : "stays active");
-	CHECK(s == 0);
+	printf("  idle with a render context: %s after %u ms\n", s ? "SUSPENDED" : "stays active",
+	       took);
+	CHECK(s == 1);
+	/* A render resumes it, and the context's state survived the suspend. */
 	CHECK(render(a, f));
 	rpm_status(st, sizeof(st));
 	CHECK(!strcmp(st, "active"));

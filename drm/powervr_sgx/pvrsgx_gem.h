@@ -6,6 +6,8 @@
 
 #include <drm/drm_gem_shmem_helper.h>
 
+#include <linux/atomic.h>
+#include <linux/iosys-map.h>
 #include <linux/types.h>
 
 struct drm_device;
@@ -16,6 +18,26 @@ struct pvrsgx_bo {
 	u64 flags;
 	/** @code_end: A code object's end of the furthest upload (under the resv lock). */
 	u64 code_end;
+	/**
+	 * @code_abs: The code has absolute targets, checked for the object's start
+	 * at @code_place instructions from its USSE heap's base (resv lock).
+	 */
+	bool code_abs;
+	s64 code_place;
+	/**
+	 * @code_unmapping: A code object's mappings that are unmapped but that the
+	 * GPU may still fetch from: the jobs before the unmap or the BIF invalidate
+	 * after it are not done. UPLOAD_CODE treats them as live mappings.
+	 */
+	atomic_t code_unmapping;
+	/** @import_map: An import's CPU mapping, from its exporter, for the cache flushes. */
+	struct iosys_map import_map;
+	/**
+	 * @import_uncached: The exporter maps the import write-combined or
+	 * uncached, so no CPU cache holds its bytes and the flushes around a
+	 * job are skipped (pvrsgx_prime.c).
+	 */
+	bool import_uncached;
 };
 
 static inline struct pvrsgx_bo *to_pvrsgx_bo(struct drm_gem_object *obj)

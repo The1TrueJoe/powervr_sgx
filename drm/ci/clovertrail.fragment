@@ -1,0 +1,22 @@
+# Clover Trail (Atom Z2760) test kernel: powervr_sgx drives the SGX545, which sits
+# behind the display engine's BAR 0 with no driver of its own. The display stays
+# on the firmware's framebuffer through simpledrm; gma500 is useless here (it
+# never supported Cloverview) and must stay off, or it would claim 00:02.0.
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+CONFIG_DRM=y
+CONFIG_DRM_POWERVR_SGX=m
+# CONFIG_DRM_GMA500 is not set
+CONFIG_DRM_SIMPLEDRM=y
+CONFIG_SYSFB=y
+CONFIG_SYSFB_SIMPLEFB=y
+CONFIG_DRM_FBDEV_EMULATION=y
+CONFIG_DEBUG_FS=y
+CONFIG_FW_LOADER=y
+CONFIG_DEV_COREDUMP=y
+CONFIG_FTRACE=y
+CONFIG_ENABLE_DEFAULT_TRACERS=y
+
+# /dev/mem is how sgx-ident reads the SGX window before the driver does.
+# STRICT_DEVMEM can stay on: it guards System RAM, not this MMIO window.
+CONFIG_DEVMEM=y

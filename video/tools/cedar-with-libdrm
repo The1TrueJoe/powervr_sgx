@@ -1,0 +1,6 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Opt in to the private Cedar auxiliary-device discovery build.
+prefix=${CEDAR_LIBDRM_PREFIX:-/opt/cedar-libdrm}
+export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$@"

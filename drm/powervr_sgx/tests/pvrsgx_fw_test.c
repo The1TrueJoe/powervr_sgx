@@ -2,7 +2,7 @@
 /* Copyright © 2026 Joseph Telaak */
 
 /*
- * KUnit tests of the open microkernel's file checks (docs/UKERNEL.md 4a),
+ * KUnit tests of the microkernel file's checks,
  * included from pvrsgx_fw.c so they reach its static functions.
  */
 
@@ -137,7 +137,7 @@ static void ukfw_test_tables(struct kunit *test)
 		{ false, 0, T_IMAGE - 4, UKFW_TA3DCTL },	/* patch past the image */
 		{ false, 0, 0xc, UKFW_TA3DCTL },	/* patch not on an instruction */
 		{ false, 1, 0x48, 0 },		/* value 0 */
-		{ false, 1, 0x48, UKFW_MISC + 1 },	/* unknown value */
+		{ false, 1, 0x48, UKFW_PDTABLE + 1 },	/* unknown value */
 	};
 
 	for (u32 i = 0; i < ARRAY_SIZE(bad); i++) {

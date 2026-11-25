@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright © 2026 Joseph Telaak */
 
+#include <drm/drm_managed.h>
 #include <drm/drm_print.h>
 #if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_GMA500)
 #include <drm/gma500_sgx.h>
@@ -14,8 +15,6 @@
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
-
-#include <asm/set_memory.h>
 
 #include "pvrsgx_ccb.h"
 #include "pvrsgx_core.h"
@@ -43,10 +42,11 @@ int pvrsgx_poll(struct pvrsgx_device *sdev, const u32 *addr, u32 mask, u32 val,
 
 /*
  * Kernel-owned memory at a fixed device address, mapped in the firmware's
- * directory. Pages below 4 GiB, write-combined in every CPU mapping.
+ * directory. Pages below 4 GiB, write-combined in every CPU mapping. gfp adds
+ * to GFP_KERNEL: __GFP_ACCOUNT for what a client's ioctl allocates.
  */
 int pvrsgx_kmem_alloc(struct pvrsgx_device *sdev, struct pvrsgx_kmem *km,
-		      u32 dev_addr, u32 size, u32 pte_flags)
+		      u32 dev_addr, u32 size, u32 pte_flags, gfp_t gfp)
 {
 	unsigned int i;
 	int err = -ENOMEM;
@@ -54,15 +54,15 @@ int pvrsgx_kmem_alloc(struct pvrsgx_device *sdev, struct pvrsgx_kmem *km,
 	km->dev_addr = dev_addr;
 	km->size = PAGE_ALIGN(size);
 	km->npages = km->size >> PAGE_SHIFT;
-	km->pages = kvcalloc(km->npages, sizeof(*km->pages), GFP_KERNEL);
+	km->pages = kvcalloc(km->npages, sizeof(*km->pages), GFP_KERNEL | gfp);
 	if (!km->pages)
 		return -ENOMEM;
 	for (i = 0; i < km->npages; i++) {
-		km->pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO | __GFP_DMA32);
+		km->pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO | __GFP_DMA32 | gfp);
 		if (!km->pages[i])
 			goto err_free;
 	}
-	if (set_pages_array_wc(km->pages, km->npages))
+	if (pvrsgx_pages_wc(sdev->base.dev, km->pages, km->npages))
 		goto err_free;
 	km->cpu = vmap(km->pages, km->npages, VM_MAP, pgprot_writecombine(PAGE_KERNEL));
 	if (!km->cpu)
@@ -77,7 +77,7 @@ int pvrsgx_kmem_alloc(struct pvrsgx_device *sdev, struct pvrsgx_kmem *km,
 err_unmap:
 	vunmap(km->cpu);
 err_wb:
-	set_pages_array_wb(km->pages, km->npages);
+	pvrsgx_pages_wb(km->pages, km->npages);
 err_free:
 	while (i--)
 		__free_page(km->pages[i]);
@@ -100,7 +100,7 @@ void pvrsgx_kmem_release(struct pvrsgx_kmem *km)
 	if (!km->pages)
 		return;
 	vunmap(km->cpu);
-	set_pages_array_wb(km->pages, km->npages);
+	pvrsgx_pages_wb(km->pages, km->npages);
 	for (unsigned int i = 0; i < km->npages; i++)
 		__free_page(km->pages[i]);
 	kvfree(km->pages);
@@ -132,7 +132,7 @@ static void inval_dc(struct pvrsgx_device *sdev)
  * The reset sequence for a single-core SGX5xx: reset everything, clear the directory
  * lists, take the cores out of reset with list 0 on a scratch directory that
  * absorbs faults left over from before, then give the microkernel its own
- * directory on list 15.
+ * directory on the last list (list 15 on the SGX545).
  */
 void pvrsgx_reset(struct pvrsgx_device *sdev, bool recovery)
 {
@@ -140,8 +140,8 @@ void pvrsgx_reset(struct pvrsgx_device *sdev, bool recovery)
 	reset_sleep(sdev);
 
 	sgx_wr(sdev, SGX_CR_BIF_CTRL, 0);
-	sgx_wr(sdev, SGX_CR_BIF_BANK_SET, 0);
-	sgx_wr(sdev, SGX_CR_BIF_BANK0, 0);
+	sgx_wr_opt(sdev, sdev->cr->bif_bank_set, 0);
+	sgx_wr_opt(sdev, sdev->cr->bif_bank0, 0);
 	for (unsigned int i = 0; i < sdev->family->num_dir_lists; i++)
 		sgx_wr(sdev, sgx_cr_bif_dir_list_base(i), 0);
 
@@ -152,64 +152,118 @@ void pvrsgx_reset(struct pvrsgx_device *sdev, bool recovery)
 		reset_sleep(sdev);
 		inval_dc(sdev);
 
-		/* Let each faulting request complete on a scratch page. */
+		/* Each faulting request completes on the scratch page every address maps. */
 		for (int n = 0; n < 32; n++) {
 			u32 stat = sgx_rd(sdev, SGX_CR_BIF_INT_STAT), addr;
 
 			if (!(stat & sdev->cr->bif_int_stat_fault_req))
 				break;
-			addr = sgx_rd(sdev, SGX_CR_BIF_FAULT) & SGX_MMU_ADDR_MASK;
+			addr = sgx_rd(sdev, SGX_CR_BIF_FAULT) & sdev->cr->bif_fault_addr;
 			drm_warn(&sdev->base, "reset: page fault 0x%x at 0x%08x\n", stat, addr);
 			soft_reset(sdev, true);
-			pvrsgx_mmu_map_pages(sdev->reset_mmu, addr, &sdev->reset_page, 1, 0);
 			sgx_wr(sdev, SGX_CR_EVENT_HOST_CLEAR, sgx_rd(sdev, SGX_CR_EVENT_STATUS));
 			sgx_wr(sdev, SGX_CR_EVENT_HOST_CLEAR2, sgx_rd(sdev, SGX_CR_EVENT_STATUS2));
-			/* The reset page's PTE is in memory before the cores leave reset. */
-			wmb();
 			reset_sleep(sdev);
 			soft_reset(sdev, false);
 			reset_sleep(sdev);
 			inval_dc(sdev);
-			pvrsgx_mmu_unmap(sdev->reset_mmu, addr, SGX_MMU_PAGE_SIZE);
 		}
 	} else {
 		soft_reset(sdev, false);
 		reset_sleep(sdev);
 	}
 
-	sgx_wr(sdev, SGX_CR_BIF_BANK0,
-	       FIELD_PREP(SGX_CR_BIF_BANK0_INDEX_EDM, pvrsgx_dirlist_edm(sdev)));
-	sgx_wr(sdev, sgx_cr_bif_dir_list_base(pvrsgx_dirlist_edm(sdev)),
-	       pvrsgx_mmu_pd_addr(sdev->kernel_mmu));
+	sgx_wr_opt(sdev, sdev->cr->bif_bank0,
+		   FIELD_PREP(SGX_CR_BIF_BANK0_INDEX_EDM, pvrsgx_dirlist_edm(sdev)));
+	/* With one directory list the EDM's is list 0, set below. */
+	if (pvrsgx_dirlist_edm(sdev))
+		sgx_wr(sdev, sgx_cr_bif_dir_list_base(pvrsgx_dirlist_edm(sdev)),
+		       pvrsgx_mmu_pd_addr(sdev->kernel_mmu));
 	sgx_wr(sdev, sgx_cr_bif_dir_list_base(0),
-	       pvrsgx_mmu_pd_addr(sdev->idle_mmu));
+	       pvrsgx_mmu_pd_addr(pvrsgx_idle_mmu(sdev)));
 	inval_dc(sdev);
 
 	sgx_wr(sdev, SGX_CR_SOFT_RESET, 0);
 	reset_sleep(sdev);
 }
 
+/*
+ * Behind the display engine (Clover Trail) the SGX's request is latched in the
+ * display's IDENTITY register, and the MSI is sent on that latch's edge: a bit
+ * left set blocks every later MSI.
+ */
+static void vdc_ack(struct pvrsgx_device *sdev)
+{
+	if (sdev->vdc)
+		writel(PVRSGX_VDC_IRQ_SGX, sdev->vdc + PVRSGX_VDC_INT_IDENTITY);
+}
+
+/* Lets the SGX's bit through the display's mask and enable, or stops it. */
+static void vdc_irq_enable(struct pvrsgx_device *sdev, bool on)
+{
+	void __iomem *vdc = sdev->vdc;
+	u32 mask = readl(vdc + PVRSGX_VDC_INT_MASK);
+	u32 enable = readl(vdc + PVRSGX_VDC_INT_ENABLE);
+
+	if (on) {
+		vdc_ack(sdev);
+		writel(mask & ~PVRSGX_VDC_IRQ_SGX, vdc + PVRSGX_VDC_INT_MASK);
+		writel(enable | PVRSGX_VDC_IRQ_SGX, vdc + PVRSGX_VDC_INT_ENABLE);
+	} else {
+		writel(enable & ~PVRSGX_VDC_IRQ_SGX, vdc + PVRSGX_VDC_INT_ENABLE);
+		writel(mask | PVRSGX_VDC_IRQ_SGX, vdc + PVRSGX_VDC_INT_MASK);
+		vdc_ack(sdev);
+	}
+}
+
 /* The microkernel raises SW_EVENT when it wants the host. */
 static irqreturn_t pvrsgx_irq(int irq, void *arg)
 {
 	struct pvrsgx_device *sdev = arg;
+	unsigned int events = 0;
 	u32 status;
 
-	if (!READ_ONCE(sdev->powered))
+	if (!READ_ONCE(sdev->powered)) {
+		vdc_ack(sdev);
 		return IRQ_NONE;
-	status = sgx_rd(sdev, SGX_CR_EVENT_STATUS) & sgx_rd(sdev, SGX_CR_EVENT_HOST_ENABLE);
-	if (!(status & SGX_CR_EVENT_STATUS_SW_EVENT))
+	}
+	for (;;) {
+		status = sgx_rd(sdev, SGX_CR_EVENT_STATUS) &
+			 sgx_rd(sdev, SGX_CR_EVENT_HOST_ENABLE);
+		if (!(status & SGX_CR_EVENT_STATUS_SW_EVENT)) {
+			vdc_ack(sdev);
+			break;
+		}
+		trace_pvrsgx_irq(status);
+		sgx_wr(sdev, SGX_CR_EVENT_HOST_CLEAR,
+		       SGX_CR_EVENT_HOST_CLEAR_SW_EVENT | SGX_CR_EVENT_HOST_CLEAR_MASTER_INTERRUPT);
+		/* The display latches the SGX's line: clear it after the source. */
+		vdc_ack(sdev);
+		atomic_inc(&sdev->irq_count);
+		/* Counted before the test below, which ends the loop without a latch. */
+		if (events++)
+			atomic_inc(&sdev->irq_late);
+		/*
+		 * An event between the two clears found the latch still set and
+		 * sent no MSI of its own: look again behind the display, a few
+		 * times at most.
+		 */
+		if (!sdev->vdc || events == 4)
+			break;
+	}
+	if (!events)
 		return IRQ_NONE;
-	trace_pvrsgx_irq(status);
-	sgx_wr(sdev, SGX_CR_EVENT_HOST_CLEAR,
-	       SGX_CR_EVENT_HOST_CLEAR_SW_EVENT | SGX_CR_EVENT_HOST_CLEAR_MASTER_INTERRUPT);
-	atomic_inc(&sdev->irq_count);
+	if (!READ_ONCE(sdev->fw_running))
+		return IRQ_HANDLED;
 	/*
-	 * The DDK microkernel interrupts at TA and 3D completion too: wake the
-	 * thread only for a finished job or a lockup report.
+	 * The microkernel may interrupt at TA and 3D completion too: wake the
+	 * thread only for a finished job, an idle notice not yet acknowledged, or
+	 * a lockup not yet reported.
 	 */
-	if (!sdev->fw_running || pvrsgx_job_oldest_done(sdev) ||
-	    (pvrsgx_fw_hostctl(sdev, HOSTCTL_INTERRUPT_FLAGS) & HOSTCTL_INTERRUPT_HWR))
+	if (pvrsgx_job_oldest_done(sdev) ||
+	    (pvrsgx_fw_hostctl(sdev, HOSTCTL_INTERRUPT_FLAGS) &
+	     ~pvrsgx_fw_hostctl(sdev, HOSTCTL_INTERRUPT_CLEAR) & HOSTCTL_INTERRUPT_ACTIVE_POWER) ||
+	    pvrsgx_fw_hostctl(sdev, HOSTCTL_UK_LOCKUPS) != READ_ONCE(sdev->uk_lockups))
 		return IRQ_WAKE_THREAD;
 	return IRQ_HANDLED;
 }
@@ -217,18 +271,21 @@ static irqreturn_t pvrsgx_irq(int irq, void *arg)
 static irqreturn_t pvrsgx_irq_thread(int irq, void *arg)
 {
 	struct pvrsgx_device *sdev = arg;
-	u32 flags, clear;
+	u32 flags, clear, lockups;
 
-	if (!sdev->fw_running)
+	if (!READ_ONCE(sdev->fw_running))
 		return IRQ_HANDLED;
 
 	flags = pvrsgx_fw_hostctl(sdev, HOSTCTL_INTERRUPT_FLAGS);
 	clear = pvrsgx_fw_hostctl(sdev, HOSTCTL_INTERRUPT_CLEAR);
-	if ((flags & HOSTCTL_INTERRUPT_HWR) && !(clear & HOSTCTL_INTERRUPT_HWR))
-		drm_err_ratelimited(&sdev->base, "microkernel reports a lockup (%u)\n",
-				    pvrsgx_fw_hostctl(sdev, HOSTCTL_UK_LOCKUPS));
+	/* Reported once per count; the job's timeout does the recovery. */
+	lockups = pvrsgx_fw_hostctl(sdev, HOSTCTL_UK_LOCKUPS);
+	if (lockups != READ_ONCE(sdev->uk_lockups)) {
+		WRITE_ONCE(sdev->uk_lockups, lockups);
+		drm_err_ratelimited(&sdev->base, "microkernel reports a lockup (%u)\n", lockups);
+	}
 	/*
-	 * The microkernel's idle notice: acknowledge it, as the DDK's host does.
+	 * The microkernel's idle notice: acknowledge it in the interrupt clear word.
 	 * Powering down is runtime PM's business, so nothing else happens here.
 	 */
 	if ((flags & ~clear) & HOSTCTL_INTERRUPT_ACTIVE_POWER)
@@ -255,6 +312,24 @@ static int identify(struct pvrsgx_device *sdev)
 	sdev->core_id = sgx_rd(sdev, sdev->cr->core_id);
 	sdev->core_rev = sgx_rd(sdev, sdev->cr->core_revision);
 
+	if (!pvrsgx_core_family_usable(sdev->family)) {
+		drm_info(&sdev->base,
+			 "%s core id 0x%08x revision 0x%08x: this driver can't run an %s yet; not touching it further\n",
+			 sdev->family->name, sdev->core_id, sdev->core_rev, sdev->family->name);
+		return -ENODEV;
+	}
+	if (pvrsgx_core_single_context(sdev->family)) {
+		if (!pvrsgx_allow_unisolated) {
+			drm_err(&sdev->base,
+				"%s has one memory context: every client could reach the firmware and the other clients' commands. Not running it; powervr_sgx.allow_unisolated=1 runs it anyway.\n",
+				sdev->family->name);
+			return -ENODEV;
+		}
+		drm_warn(&sdev->base,
+			 "%s has one memory context: clients are not isolated from the firmware or from each other (allow_unisolated=1)\n",
+			 sdev->family->name);
+	}
+
 	sdev->core = pvrsgx_core_lookup(sdev->family, sdev->core_id, sdev->core_rev);
 	if (!sdev->core) {
 		drm_err(&sdev->base,
@@ -262,9 +337,44 @@ static int identify(struct pvrsgx_device *sdev)
 			sdev->family->name, sdev->core_id, sdev->core_rev);
 		return -ENODEV;
 	}
-	drm_info(&sdev->base, "SGX core id 0x%08x revision 0x%08x: %s\n",
-		 sdev->core_id, sdev->core_rev, sdev->core->name);
+	if (sdev->part)
+		drm_info(&sdev->base, "SGX core id 0x%08x revision 0x%08x: %s (%s, %u MHz)\n",
+			 sdev->core_id, sdev->core_rev, sdev->part->name, sdev->core->name,
+			 pvrsgx_clock_hz(sdev) / 1000000);
+	else
+		drm_info(&sdev->base, "SGX core id 0x%08x revision 0x%08x: %s\n",
+			 sdev->core_id, sdev->core_rev, sdev->core->name);
 	return 0;
+}
+
+/*
+ * On a single-context core the microkernel runs on the job's directory, so
+ * every VM maps the firmware heaps. They get their page tables now, so the
+ * directory entries every VM copies never change.
+ */
+static int share_fw_heaps_init(struct pvrsgx_device *sdev)
+{
+	const struct pvrsgx_heap_layout *h = pvrsgx_heaps(sdev);
+	const struct pvrsgx_va_range *r[] = { &h->kernel_code, &h->kernel_data, &h->sync };
+	int err = 0;
+
+	if (!pvrsgx_core_single_context(sdev->family))
+		return 0;
+	for (unsigned int i = 0; i < ARRAY_SIZE(r) && !err; i++)
+		err = pvrsgx_mmu_prealloc(sdev->kernel_mmu, r[i]->base, r[i]->end);
+	return err;
+}
+
+/* Point a VM's directory at the firmware heaps' page tables, on a single-context core. */
+void pvrsgx_share_fw_heaps(struct pvrsgx_device *sdev, struct pvrsgx_mmu *mmu)
+{
+	const struct pvrsgx_heap_layout *h = pvrsgx_heaps(sdev);
+
+	if (!pvrsgx_core_single_context(sdev->family))
+		return;
+	pvrsgx_mmu_share(mmu, sdev->kernel_mmu, h->kernel_code.base, h->kernel_code.end);
+	pvrsgx_mmu_share(mmu, sdev->kernel_mmu, h->kernel_data.base, h->kernel_data.end);
+	pvrsgx_mmu_share(mmu, sdev->kernel_mmu, h->sync.base, h->sync.end);
 }
 
 #if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_GMA500)
@@ -275,7 +385,8 @@ static irqreturn_t pvrsgx_gma_irq(void *data)
 	irqreturn_t ret = pvrsgx_irq(sdev->irq, sdev);
 
 	if (ret == IRQ_WAKE_THREAD) {
-		queue_work(system_highpri_wq, &sdev->irq_work);
+		/* Reclaim-safe: it signals fences. */
+		queue_work(sdev->wq, &sdev->irq_work);
 		return IRQ_HANDLED;
 	}
 	return ret;
@@ -289,16 +400,32 @@ static void pvrsgx_gma_irq_work(struct work_struct *work)
 }
 #endif
 
+/* No interrupt handler still running once this returns, bottom half included. */
+void pvrsgx_irq_sync(struct pvrsgx_device *sdev)
+{
+	synchronize_irq(sdev->irq);
+#if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_GMA500)
+	if (sdev->gma_sgx)
+		flush_work(&sdev->irq_work);
+#endif
+}
+
 static int irq_setup(struct pvrsgx_device *sdev)
 {
+	int err;
+
 #if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_GMA500)
 	if (sdev->gma_sgx) {
 		INIT_WORK(&sdev->irq_work, pvrsgx_gma_irq_work);
 		return sdev->gma_sgx->set_irq_handler(sdev->gma_sgx, pvrsgx_gma_irq, sdev);
 	}
 #endif
-	return request_threaded_irq(sdev->irq, pvrsgx_irq, pvrsgx_irq_thread, IRQF_SHARED,
-				    "powervr_sgx", sdev);
+	err = request_threaded_irq(sdev->irq, pvrsgx_irq, pvrsgx_irq_thread, IRQF_SHARED,
+				   "powervr_sgx", sdev);
+	/* Only with the handler in place. */
+	if (!err && sdev->vdc)
+		vdc_irq_enable(sdev, true);
+	return err;
 }
 
 static void irq_teardown(struct pvrsgx_device *sdev)
@@ -310,7 +437,31 @@ static void irq_teardown(struct pvrsgx_device *sdev)
 		return;
 	}
 #endif
+	if (sdev->vdc)
+		vdc_irq_enable(sdev, false);
 	free_irq(sdev->irq, sdev);
+}
+
+/*
+ * The software state, at the DRM device's release: after unbind, and after the
+ * last file is closed, so nothing a file can reach goes before the file does.
+ */
+static void pvrsgx_device_release(struct drm_device *drm, void *arg)
+{
+	struct pvrsgx_device *sdev = arg;
+
+	pvrsgx_render_dbg_fini(sdev);
+	pvrsgx_job_fini(sdev);
+	pvrsgx_ccb_inval_reap(sdev, true);
+	pvrsgx_pb_put(sdev->pb);
+	mutex_destroy(&sdev->pb_lock);
+	pvrsgx_kobj_fini(sdev);
+	pvrsgx_fw_fini(sdev);
+	__free_page(sdev->reset_page);
+	/* The reset directory still names the scratch page's tables, never the page. */
+	pvrsgx_mmu_destroy(sdev->reset_mmu);
+	pvrsgx_mmu_destroy(sdev->idle_mmu);
+	pvrsgx_mmu_destroy(sdev->kernel_mmu);
 }
 
 int pvrsgx_device_init(struct pvrsgx_device *sdev)
@@ -319,6 +470,9 @@ int pvrsgx_device_init(struct pvrsgx_device *sdev)
 
 	mutex_init(&sdev->ccb_lock);
 	mutex_init(&sdev->done_lock);
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+	spin_lock_init(&sdev->dbg_render.lock);
+#endif
 	spin_lock_init(&sdev->ccb_spin);
 	spin_lock_init(&sdev->inval_lock);
 	INIT_LIST_HEAD(&sdev->inval_waits);
@@ -332,8 +486,15 @@ int pvrsgx_device_init(struct pvrsgx_device *sdev)
 		err = -ENOMEM;
 		goto err_mmu;
 	}
+	/* A reset, in the fence-signalling path, then maps nothing. */
+	err = pvrsgx_mmu_fill(sdev->reset_mmu, sdev->reset_page, 0);
+	if (err)
+		goto err_mmu;
 
 	err = identify(sdev);
+	if (err)
+		goto err_mmu;
+	err = share_fw_heaps_init(sdev);
 	if (err)
 		goto err_mmu;
 
@@ -347,20 +508,22 @@ int pvrsgx_device_init(struct pvrsgx_device *sdev)
 	if (err)
 		goto err_fw;
 
+	/* From here the release frees the software state, on success or failure. */
+	err = drmm_add_action_or_reset(&sdev->base, pvrsgx_device_release, sdev);
+	if (err)
+		return err;
+
 	err = irq_setup(sdev);
 	if (err)
-		goto err_job;
+		return err;
 
 	err = pvrsgx_fw_start(sdev);
-	if (err)
-		goto err_irq;
-	return 0;
+	if (err) {
+		pvrsgx_fw_stop(sdev);
+		irq_teardown(sdev);
+	}
+	return err;
 
-err_irq:
-	pvrsgx_fw_stop(sdev);
-	irq_teardown(sdev);
-err_job:
-	pvrsgx_job_fini(sdev);
 err_fw:
 	pvrsgx_fw_fini(sdev);
 	pvrsgx_kobj_fini(sdev);
@@ -373,18 +536,13 @@ err_mmu:
 	return err;
 }
 
-void pvrsgx_device_fini(struct pvrsgx_device *sdev)
+/*
+ * The hardware, at unbind or when registration fails: no job reaches the GPU
+ * again, the firmware stops, the interrupt goes. Open files keep working
+ * against the software state until they close.
+ */
+void pvrsgx_device_unplug(struct pvrsgx_device *sdev)
 {
-	pvrsgx_job_fini(sdev);
-	pvrsgx_fw_stop(sdev);
+	pvrsgx_job_unplug(sdev);
 	irq_teardown(sdev);
-	pvrsgx_pb_put(sdev->pb);
-	mutex_destroy(&sdev->pb_lock);
-	pvrsgx_kobj_fini(sdev);
-	pvrsgx_fw_fini(sdev);
-	__free_page(sdev->reset_page);
-	/* The reset directory still names the scratch page's tables, never the page. */
-	pvrsgx_mmu_destroy(sdev->reset_mmu);
-	pvrsgx_mmu_destroy(sdev->idle_mmu);
-	pvrsgx_mmu_destroy(sdev->kernel_mmu);
 }

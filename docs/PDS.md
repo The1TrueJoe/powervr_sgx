@@ -288,7 +288,10 @@ unknown. The notation shows it as `.hi`, and nothing should emit it.
 **Word 0:**
 
 - bits 0–3: USE code base register (`EUR_CR_USE_CODE_BASE_n`). Hardware.
-- bits 4–21: code offset / 8 inside that base's 512 KB window. Hardware.
+- bits 4–21: code offset / 8 from that base. Hardware. The field is 18 bits
+  and reaches past the base's 512 KB window: base 0 with offset 0x88380 runs
+  the code at 0x37088380, not window 0's (**hardware** (`hwt_window`, 2026-11-11, CE5300 board)). Windows
+  are where the registers point, not a limit on the offset.
   - `off = pc - heap_base`, then `w0 = (off>>19) + base_index |
     (off*2 & mask)` (the open stack's formula).
   - Pixel programs use bases 0–9 at 0x37000000 + n·512K; vertex and state
@@ -360,7 +363,7 @@ and every field below that it sets is hardware.
 
 | bits | meaning | status |
 |---|---|---|
-| 11–16 | source: texture coordinate set + 1 (TC slot from the GL varying map); 0 = the fragment's position (gl_FragCoord: `27800000` x3, `27c00000` x4: x and y at pixel centers in the target's memory order, z, then 1/w; capture `fragcoord`, `fragcoordw`, 2026-11-02); 0x20 = color (`0x1c10000`); 0x22 = the depth plane a discard's `pcoeff` reads, x3 (ISA.md "Phases, visibility feedback and discard") | capture |
+| 11–16 | source: texture coordinate set + 1 (TC slot from the GL varying map); 0 = the fragment's position (gl_FragCoord: `27800000` x3, `27c00000` x4: x and y at pixel centers in the target's memory order, z, then 1/w; capture `fragcoord`, `fragcoordw`, 2026-11-02); 0x20 = color (`0x1c10000`; with b21 = 0 it arrives packed BGRA8 in one dword, pa0: STATE.md "Output select and TSP words"); 0x22 = the depth plane a discard's `pcoeff` reads, x3 (ISA.md "Phases, visibility feedback and discard") | capture |
 | 21 | color iterator at precision < 2 | capture; meaning of the precision values guessed |
 | 22–23 | components − 1 (forced 4 for color) | hardware; capture |
 | 24 | plain iteration enabled | hardware; capture |

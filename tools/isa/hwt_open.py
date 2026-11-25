@@ -9,8 +9,13 @@ last line moves its result to o0 and ends the program (hwt_lib.out), before the
 winsys's colour epilogue. Tests that poke the replay (a fourth field) don't
 apply and are skipped. A suite may give BUFS = {name: [dwords]}:
 the data buffer's first dwords for that test; BUF in a line is its address.
-TEXS = {name: texel} gives that test an 8x8 RGBA8 texture in the texture heap,
-every texel the same; TEX in a line is its address.
+TEXS = {name: texel} fills that test's texture heap (4 KiB) with one dword;
+"pat" instead fills dword i with 0x5a5a0000 | i, so a texel names where it came
+from; "idx" fills a 16 MiB heap with dword i = i. TEX in a line is the heap's
+address. EOTS = {name: [insn, ...]} gives
+that test's end-of-tile program in place of the target's (sgx_hwt's `eot`
+lines); RT and RT2 in it are the two render targets' addresses, and the
+result line then ends with RT2's middle pixel.
 
 Environment: BOX_SH (an ssh helper: `$BOX_SH 'cmd'` runs cmd on the box, stdin
 passed through), SGX_HWT (the box's path to sgx_hwt; default: the one the
@@ -45,6 +50,7 @@ def main():
     suite = importlib.import_module(a.suite)
     bufs = getattr(suite, "BUFS", {})
     texs = getattr(suite, "TEXS", {})
+    eots = getattr(suite, "EOTS", {})
     tests, text = [], []
     for t in suite.TESTS:
         name, lines, expect = t[0], t[1], t[2]
@@ -59,7 +65,9 @@ def main():
         if name in bufs:
             text.append("buf " + " ".join(f"{w:08x}" for w in bufs[name]))
         if name in texs:
-            text.append(f"tex {texs[name]:08x}")
+            v = texs[name]
+            text.append({"pat": "texpat", "idx": "texidx"}.get(v) or f"tex {v:08x}")
+        text += ["eot " + ln for ln in eots.get(name, [])]
         text += conv + ["end"]
     src = "\n".join(text) + "\n"
     if a.dry:

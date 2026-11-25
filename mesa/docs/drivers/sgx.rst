@@ -23,10 +23,13 @@ Kernel driver
 The driver runs on the ``powervr_sgx`` DRM driver. It reads the core's ID,
 revision and render-target limits with ``DRM_IOCTL_POWERVR_SGX_DEV_QUERY``
 and submits render jobs only. The SGX is a render-only device: scanout goes
-through a separate display driver, paired with ``kmsro``: ``simpledrm`` on
-the CE5300, ``gma500`` on Cedarview, where ``powervr_sgx`` binds to an
-auxiliary device of the display's PCI function and the loader takes the
-render node of that child device.
+through a separate display driver, paired with ``kmsro``: ``ce5300`` or
+``simpledrm`` on the CE5300, ``gma500`` on Cedarview. On Cedarview,
+``powervr_sgx`` binds to an auxiliary device of the display's PCI function
+and the loader takes the render node of that child device. On the CE5300,
+the display controller and the SGX are two PCI functions on one bus, and the
+loader takes the render node of the display's sibling. A scanout buffer is
+the display driver's dumb buffer, imported, and rendered into directly.
 
 Supported APIs
 --------------
@@ -96,6 +99,9 @@ Environment variables
       coordinate set, not of another
    ``nozerocopy``
       vertex inputs gathered into f32 x 4, not DMAed where they are
+   ``novboslabs``
+      every buffer's device copy a BO of its own, not small ones (64 KiB
+      or less) cut from shared slabs
    ``nozls``
       depth and stencil not kept across renders
    ``nolazyscanout``

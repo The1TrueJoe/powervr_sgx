@@ -6,10 +6,9 @@
  * needs for a TA kick and the 3D after it, built by the kernel from the
  * client's CMD_RENDER and CMD_TA_KICK streams.
  *
- * Layouts and values: docs/STATE.md sections 1 and 6, docs/UAPI.md section 4.
  * A render job is one scene of one TA kick, which starts the scene and the 3D
- * (TA flags 0x63). Scenes of several kicks need the middle-kick flags, which no
- * capture shows yet (G12).
+ * (TA flags 0x63). Scenes of several kicks need the middle-kick flags, which
+ * are not known yet.
  */
 
 #include <drm/drm_file.h>
@@ -25,7 +24,8 @@
 
 #include <uapi/drm/powervr_sgx_drm.h>
 
-#include "pvrsgx_stream.h"
+#include "pvrsgx_cmd.h"
+#include "pvrsgx_cmd_checks.h"
 #include "pvrsgx_ccb.h"
 #include "pvrsgx_device.h"
 #include "pvrsgx_drv.h"
@@ -45,12 +45,14 @@
 #define CCB_BYTES		0x10420
 /* The background object's middle PDS word, a constant. */
 #define BG_PDS_MIDDLE		0x00030001
-/* Constant TA command words (docs/STATE.md section 1). */
+/* Constant TA command words. */
 #define TA_CTL			0x50000000
 #define TE_AA			0x20000000
+#define TE_AA_4X		(TE_AA | BIT(31) | BIT(30))	/* 2x in X and in Y */
 #define VDM_CTL			0xa2
 #define F32_1E_6		0x358637bd
 #define RT_FLAGS		0x88
+#define RT_FLAGS_4X		0xeaa26e26	/* the RT flags of a 4x render */
 #define RT_MAX_DIM		2048
 
 static u32 f32_one(void)
@@ -67,7 +69,7 @@ static void pb_init(struct pvrsgx_pb *pb)
 	struct pvrsgx_fw_pb_desc *pd;
 
 	/* Free list: prev<<16 | next per page, indexed from the range's base. */
-	first = (kobj_va(pb->buf) - PVRSGX_HEAP_3D_PARAMS) >> PAGE_SHIFT;
+	first = (kobj_va(pb->buf) - pvrsgx_heaps(pb->sdev)->params_3d.base) >> PAGE_SHIFT;
 	last = first + pages - 1;
 	fl = kobj_cpu(pb->freelist);
 	for (u32 i = first; i <= last; i++)
@@ -97,17 +99,17 @@ static void pb_init(struct pvrsgx_pb *pb)
 
 /*
  * The device's parameter buffer: PB, free list, PB descriptor and block list,
- * shared by every render context of every client, as the DDK shares one PB
- * descriptor (pb.c). The DPM's free-list state is one set of registers that the
- * microkernel doesn't switch between PBs, so two PBs would run each other's
- * lists off their ends. The DPM numbers PB pages from the 3D-params heap base, so
- * the PB starts there, at the same address in every VM (pvrsgx_pb_map). The
- * first context sets the size; later requests are ignored, as the DDK does.
+ * shared by every render context of every client. The DPM's free-list state is
+ * one set of registers that the microkernel doesn't switch between PBs, so two
+ * PBs would run each other's lists off their ends. The DPM numbers PB pages from
+ * the 3D-params heap base, so the PB starts there, at the same address in every
+ * VM (pvrsgx_pb_map). The first context sets the size; later requests for
+ * another size are refused.
  */
 static struct pvrsgx_pb *pb_create(struct pvrsgx_device *sdev, u32 req_pages)
 {
 	struct pvrsgx_pb *pb = kzalloc_obj(*pb);
-	u32 pages = (req_pages ?: PVRSGX_PB_DEFAULT_PAGES) + PB_EXTRA_PAGES;
+	u32 pages = (req_pages ?: pvrsgx_pb_default_pages(sdev)) + PB_EXTRA_PAGES;
 	int err;
 
 	if (!pb)
@@ -119,6 +121,11 @@ static struct pvrsgx_pb *pb_create(struct pvrsgx_device *sdev, u32 req_pages)
 	err = pvrsgx_kobj_new(sdev, &pb->buf, PVRSGX_KRANGE_3DPARAMS, pages << PAGE_SHIFT, 0, NULL);
 	if (err)
 		goto fail;
+	/* The DPM numbers PB pages from the heap's base: anywhere else hangs it. */
+	if (kobj_va(pb->buf) != pvrsgx_heaps(sdev)->params_3d.base) {
+		err = -EBUSY;
+		goto fail;
+	}
 	pb->base = kobj_va(pb->buf) & 0xfff00000;
 	err = pvrsgx_kobj_new(sdev, &pb->freelist, PVRSGX_KRANGE_3DPARAMS, FREELIST_BYTES, pb->base,
 			      NULL);
@@ -136,7 +143,12 @@ static struct pvrsgx_pb *pb_create(struct pvrsgx_device *sdev, u32 req_pages)
 	return pb;
 
 fail:
-	pvrsgx_pb_put(pb);
+	/* Never sent to the GPU: freed now, so a retry gets the heap's base again. */
+	pvrsgx_kobj_free_unused(sdev, &pb->blocks);
+	pvrsgx_kobj_free_unused(sdev, &pb->desc);
+	pvrsgx_kobj_free_unused(sdev, &pb->freelist);
+	pvrsgx_kobj_free_unused(sdev, &pb->buf);
+	kfree(pb);
 	return ERR_PTR(err);
 }
 
@@ -172,6 +184,10 @@ static struct pvrsgx_pb *dev_pb_get(struct pvrsgx_device *sdev, u32 req_pages)
 		}
 		sdev->pb = pb;
 		drm_info(&sdev->base, "parameter buffer: %#x pages\n", pb->pages);
+	} else if (req_pages && req_pages != sdev->pb->pages - PB_EXTRA_PAGES) {
+		/* A size the live buffer doesn't have is refused, not ignored. */
+		mutex_unlock(&sdev->pb_lock);
+		return ERR_PTR(-EINVAL);
 	}
 	pb = sdev->pb;
 	kref_get(&pb->ref);
@@ -255,16 +271,6 @@ int pvrsgx_render_ctx_init(struct pvrsgx_device *sdev, struct pvrsgx_context *ct
 		return -ENOMEM;
 	ctx->render = r;
 
-	/*
-	 * No runtime suspend while a render context exists: a restart between a
-	 * client's renders can hang its next render (the debug-kernel desktop
-	 * hang). Until the restart path is fixed.
-	 */
-	err = pvrsgx_power_get(sdev);
-	if (err)
-		goto fail;
-	r->awake = true;
-
 	r->pb = dev_pb_get(sdev, req_pages);
 	if (IS_ERR(r->pb)) {
 		err = PTR_ERR(r->pb);
@@ -288,7 +294,7 @@ int pvrsgx_render_ctx_init(struct pvrsgx_device *sdev, struct pvrsgx_context *ct
 	/* HW render context: the microkernel points list 0 at word 2's directory. */
 	hw = (void *)kobj_cpu(r->hwctx);
 	hw->flags = PVRSGX_HW_RENDER_CTX_VALID | PVRSGX_HW_RENDER_CTX_OWN_PB;
-	hw->page_dir = pvrsgx_mmu_pd_addr(vm->mmu);
+	hw->page_dir = pvrsgx_vm_pd_word(vm);
 	hw->ccb = kobj_va(r->ccb);
 	hw->ccb_ctl = kobj_va(r->ccbctl);
 	hw->pb_desc = kobj_va(r->pb->desc);
@@ -304,75 +310,92 @@ fail:
 void pvrsgx_render_ctx_fini(struct pvrsgx_device *sdev, struct pvrsgx_context *ctx)
 {
 	struct pvrsgx_render_ctx *r = ctx->render;
+	bool sent;
 
 	if (!r)
 		return;
-	pvrsgx_kobj_drop(sdev, &r->hwctx);
-	pvrsgx_kobj_drop(sdev, &r->sync3d);
-	pvrsgx_kobj_drop(sdev, &r->ccbctl);
-	pvrsgx_kobj_drop(sdev, &r->ccb);
-	pvrsgx_kobj_drop(sdev, &r->scratch);
+	sent = READ_ONCE(r->sent);
+	pvrsgx_kobj_drop_sent(sdev, &r->hwctx, sent);
+	pvrsgx_kobj_drop_sent(sdev, &r->sync3d, sent);
+	pvrsgx_kobj_drop_sent(sdev, &r->ccbctl, sent);
+	pvrsgx_kobj_drop_sent(sdev, &r->ccb, sent);
+	pvrsgx_kobj_drop_sent(sdev, &r->scratch, sent);
 	pvrsgx_pb_put(r->pb);
-	if (r->awake)
-		pvrsgx_power_put(sdev, 1);
 	kfree(r);
 	ctx->render = NULL;
 }
 
 /* ---------------------------------------------------------------- RT datasets */
 
-static void rt_numbers(struct pvrsgx_rt_numbers *r, u32 w, u32 h)
+/*
+ * At 4x (2x2 samples) the TE tiles samples: twice the tiles in X and in Y,
+ * and the region and tail pointer arrays follow. Its macrotile registers
+ * stay in pixel tiles, as does the screen.
+ */
+static void rt_numbers(struct pvrsgx_rt_numbers *r, u32 w, u32 h, u32 samples)
 {
-	u32 n, big, m;
+	u32 aa = samples == 4 ? 2 : 1, xt, yt, mx, my, n, big, m;
 
 	r->xt = (w + 31) >> 5;
 	r->yt = (h + 15) >> 4;
-	if (w * h < 0x4b000) {
-		r->mx = (((r->xt + 1) >> 1) + 3) & ~3u;
-		r->my = (((r->yt + 1) >> 1) + 3) & ~3u;
-		r->mtile1 = r->mx << 22 | r->mx << 12 | r->mx;
-		r->mtile2 = r->my << 22 | r->my << 12 | r->my;
+	xt = r->xt * aa;
+	yt = r->yt * aa;
+	if (w * h * samples < 0x4b000) {
+		mx = (((xt + 1) >> 1) + 3) & ~3u;
+		my = (((yt + 1) >> 1) + 3) & ~3u;
 		n = 2;
 	} else {
-		r->mx = (((r->xt + 3) >> 2) + 3) & ~3u;
-		r->my = (((r->yt + 3) >> 2) + 3) & ~3u;
-		r->mtile1 = BIT(31) | r->mx << 22 | 2 * r->mx << 12 | 3 * r->mx;
-		r->mtile2 = r->my << 22 | 2 * r->my << 12 | 3 * r->my;
+		mx = (((xt + 3) >> 2) + 3) & ~3u;
+		my = (((yt + 3) >> 2) + 3) & ~3u;
 		n = 4;
 	}
-	r->padx = r->mx * n;
-	r->pady = r->my * n;
+	r->mx = mx / aa;
+	r->my = my / aa;
+	if (n == 2) {
+		r->mtile1 = r->mx << 22 | r->mx << 12 | r->mx;
+		r->mtile2 = r->my << 22 | r->my << 12 | r->my;
+	} else {
+		r->mtile1 = BIT(31) | r->mx << 22 | 2 * r->mx << 12 | 3 * r->mx;
+		r->mtile2 = r->my << 22 | 2 * r->my << 12 | 3 * r->my;
+	}
+	r->zls_xt = xt;
+	r->padx = mx * n;
+	r->pady = my * n;
 	r->te_screen = (r->yt - 1) << 12 | (r->xt - 1);
 	r->mt_tiles = r->mx * r->my;
+	r->rt_mt_tiles = mx * my;
 	r->region_bytes = r->padx * r->pady * 12;
 	m = max(r->padx, r->pady) - 1;
 	for (big = 1; m; m >>= 1)
 		big <<= 1;
 	r->tailptr_bytes = big * big * 4;
+	r->te_aa = aa == 2 ? TE_AA_4X : TE_AA;
+	r->rt_flags = aa == 2 ? RT_FLAGS_4X : RT_FLAGS;
 }
 
 static void rtds_release(struct kref *ref)
 {
 	struct pvrsgx_rt_dataset *s = container_of(ref, struct pvrsgx_rt_dataset, ref);
 	struct pvrsgx_device *sdev = s->ctx->sdev;
+	bool sent = READ_ONCE(s->sent);
 
-	pvrsgx_kobj_drop(sdev, &s->rtword);
-	pvrsgx_kobj_drop(sdev, &s->rtdata);
-	pvrsgx_kobj_drop(sdev, &s->done);
-	pvrsgx_kobj_drop(sdev, &s->tailptr);
-	pvrsgx_kobj_drop(sdev, &s->ta40);
-	pvrsgx_kobj_drop(sdev, &s->ta50);
+	pvrsgx_kobj_drop_sent(sdev, &s->rtword, sent);
+	pvrsgx_kobj_drop_sent(sdev, &s->rtdata, sent);
+	pvrsgx_kobj_drop_sent(sdev, &s->done, sent);
+	pvrsgx_kobj_drop_sent(sdev, &s->tailptr, sent);
+	pvrsgx_kobj_drop_sent(sdev, &s->ta40, sent);
+	pvrsgx_kobj_drop_sent(sdev, &s->ta50, sent);
 	for (int i = 0; i < 2; i++) {
-		pvrsgx_kobj_drop(sdev, &s->bgblock[i]);
-		pvrsgx_kobj_drop(sdev, &s->rd[i]);
-		pvrsgx_kobj_drop(sdev, &s->rd_w8[i]);
-		pvrsgx_kobj_drop(sdev, &s->rd_w4[i]);
-		pvrsgx_kobj_drop(sdev, &s->hwsync[i]);
-		pvrsgx_kobj_drop(sdev, &s->rd_sync[i]);
-		pvrsgx_kobj_drop(sdev, &s->hwsync_access[i]);
-		pvrsgx_kobj_drop(sdev, &s->entword[i]);
-		pvrsgx_kobj_drop(sdev, &s->rgn[i]);
-		pvrsgx_kobj_drop(sdev, &s->ta88[i]);
+		pvrsgx_kobj_drop_sent(sdev, &s->bgblock[i], sent);
+		pvrsgx_kobj_drop_sent(sdev, &s->rd[i], sent);
+		pvrsgx_kobj_drop_sent(sdev, &s->rd_w8[i], sent);
+		pvrsgx_kobj_drop_sent(sdev, &s->rd_w4[i], sent);
+		pvrsgx_kobj_drop_sent(sdev, &s->hwsync[i], sent);
+		pvrsgx_kobj_drop_sent(sdev, &s->rd_sync[i], sent);
+		pvrsgx_kobj_drop_sent(sdev, &s->hwsync_access[i], sent);
+		pvrsgx_kobj_drop_sent(sdev, &s->entword[i], sent);
+		pvrsgx_kobj_drop_sent(sdev, &s->rgn[i], sent);
+		pvrsgx_kobj_drop_sent(sdev, &s->ta88[i], sent);
 	}
 	pvrsgx_context_put(s->ctx);
 	kfree(s);
@@ -396,13 +419,13 @@ static void rtds_init_entry(struct pvrsgx_rt_dataset *s, int i)
 	rd->req_base_3d = r->pb->base;
 	rd->unk_08 = 0x80;
 	rd->unk_0c = 0x000f0000;
-	rd->rt_ctl = BIT(31);
+	rd->rt_ctl = BIT(31) | (s->samples == 4 ? BIT(1) : 0);
 	rd->stencil[0] = BIT(31);
 	rd->stencil[1] = BIT(31);
 	rd->bg_depth = f32_one();
 	rd->unk_44 = 0x300;
 	rd->bg_object = 0x2000000 | (kobj_va(s->bgblock[i]) - r->pb->base) >> 4;
-	rd->rt_flags = RT_FLAGS;
+	rd->rt_flags = s->n.rt_flags;
 	rd->unk_58 = 0x30;
 	rd->unk_64 = 1;
 	rd->unk_68 = 1;
@@ -439,8 +462,8 @@ static void rtds_init(struct pvrsgx_rt_dataset *s)
 		struct pvrsgx_fw_rt_entry *e = &rt->entry[i];
 
 		e->hw_render_ctx = kobj_va(r->hwctx);
-		e->mt_units = s->n.mt_tiles >> 4;
-		e->mt_bytes = s->n.mt_tiles * 0xc;
+		e->mt_units = s->n.rt_mt_tiles >> 4;
+		e->mt_bytes = s->n.rt_mt_tiles * 0xc;
 		e->bg_block = kobj_va(s->bgblock[i]);
 		e->ta_data[0] = kobj_va(s->ta88[i]);
 		e->ta_data[1] = kobj_va(s->ta40);
@@ -470,7 +493,7 @@ static void rtds_init(struct pvrsgx_rt_dataset *s)
 	}
 }
 
-static struct pvrsgx_rt_dataset *rtds_create(struct pvrsgx_context *ctx, u32 w, u32 h)
+struct pvrsgx_rt_dataset *pvrsgx_rtds_create(struct pvrsgx_context *ctx, u32 w, u32 h, u32 samples)
 {
 	struct pvrsgx_device *sdev = ctx->sdev;
 	struct pvrsgx_render_ctx *r = ctx->render;
@@ -485,7 +508,8 @@ static struct pvrsgx_rt_dataset *rtds_create(struct pvrsgx_context *ctx, u32 w, 
 	s->ctx = ctx;
 	s->w = w;
 	s->h = h;
-	rt_numbers(&s->n, w, h);
+	s->samples = samples;
+	rt_numbers(&s->n, w, h, samples);
 
 	err = pvrsgx_kobj_new(sdev, &s->rtword, PVRSGX_KRANGE_KDATA, 4, 0, NULL);
 	err = err ?: pvrsgx_kobj_new(sdev, &s->rtdata, PVRSGX_KRANGE_KDATA,
@@ -555,9 +579,12 @@ int pvrsgx_ioctl_create_rt_dataset(struct drm_device *drm, void *data, struct dr
 	struct pvrsgx_context *ctx;
 	int err;
 
-	if (args->flags || args->samples != 1 || !args->width || !args->height ||
+	if (args->flags || (args->samples > 1 && args->samples != 4) || !args->width ||
+	    !args->height ||
 	    args->width > RT_MAX_DIM || args->height > RT_MAX_DIM)
 		return -EINVAL;
+	if (args->samples > to_pvrsgx_device(drm)->family->cmds->max_samples)
+		return -EOPNOTSUPP;
 	ctx = pvrsgx_context_lookup(sfile, args->context_handle);
 	if (!ctx)
 		return -ENOENT;
@@ -565,14 +592,17 @@ int pvrsgx_ioctl_create_rt_dataset(struct drm_device *drm, void *data, struct dr
 		pvrsgx_context_put(ctx);
 		return -EINVAL;
 	}
-	s = rtds_create(ctx, args->width, args->height);
+	s = pvrsgx_rtds_create(ctx, args->width, args->height, args->samples ?: 1);
 	pvrsgx_context_put(ctx);
 	if (IS_ERR(s))
 		return PTR_ERR(s);
-	err = xa_alloc(&sfile->rtds, &args->handle, s, xa_limit_32b, GFP_KERNEL);
-	if (err)
+	err = xa_alloc(&sfile->rtds, &args->handle, s, XA_LIMIT(1, PVRSGX_MAX_FILE_RTDS),
+		       GFP_KERNEL);
+	if (err) {
 		pvrsgx_rtds_put(s);
-	return err;
+		return err == -EBUSY ? -ENOSPC : err;
+	}
+	return 0;
 }
 
 int pvrsgx_ioctl_destroy_rt_dataset(struct drm_device *drm, void *data, struct drm_file *file)
@@ -591,7 +621,7 @@ int pvrsgx_ioctl_destroy_rt_dataset(struct drm_device *drm, void *data, struct d
 
 /* ---------------------------------------------------------------- streams */
 
-bool pvrsgx_stream_mapped(const void *priv, u64 addr, u64 size)
+bool pvrsgx_cmd_mapped(const void *priv, u64 addr, u64 size)
 {
 	struct pvrsgx_vm *vm = (struct pvrsgx_vm *)priv;
 	u64 cur = addr, end = addr + size;
@@ -609,41 +639,72 @@ bool pvrsgx_stream_mapped(const void *priv, u64 addr, u64 size)
 	return cur >= end;
 }
 
-bool pvrsgx_stream_no_quirk(const void *priv, u32 quirk)
+/* The core's command of @type: what a client's command is checked against. */
+const struct pvrsgx_cmd_def *pvrsgx_cmd_def(struct pvrsgx_device *sdev, enum pvrsgx_cmd_type type)
 {
-	return false;
+	return sdev->family->cmds->cmds[type];
 }
 
-/* Copy one stream in, decode and check it field by field, then against the VM. */
-int pvrsgx_stream_take(const struct pvrsgx_stream_cmd_defs *defs,
-		       struct pvrsgx_stream_ctx *sctx, struct pvrsgx_vm *vm,
-		       u64 uptr, u32 len, void *dest)
+/* A copied command, field by field, then against the VM (under its lock). */
+int pvrsgx_cmd_take(struct pvrsgx_device *sdev, const struct pvrsgx_cmd_def *def,
+		    const struct pvrsgx_cmd_ctx *ctx, struct pvrsgx_vm *vm, const void *all,
+		    u64 present)
 {
-	void *buf;
-	int err;
+	const struct pvrsgx_cmd_core *core = sdev->family->cmds;
+	int err = pvrsgx_cmd_check(core, def, ctx, all, present);
 
-	if (!len || len > PVRSGX_STREAM_MAX_SIZE || (uptr & 7))
-		return -EINVAL;
-	buf = memdup_user(u64_to_user_ptr(uptr), len);
-	if (IS_ERR(buf))
-		return PTR_ERR(buf);
-	err = pvrsgx_stream_process(defs, sctx, buf, len, dest);
-	kfree(buf);
 	if (err)
 		return err;
 	mutex_lock(&vm->lock);
-	err = pvrsgx_stream_check_mapped(defs, sctx, dest);
+	err = pvrsgx_cmd_check_mapped(core, def, ctx, all, present);
 	mutex_unlock(&vm->lock);
 	return err;
 }
 
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+/*
+ * debugfs "render" keeps the last render submitted: a reference, swapped in
+ * the ioctl, so the old one is put outside fence signalling. A new dataset
+ * forgets the last kick, so a freed dataset's address can't match it.
+ */
+static struct pvrsgx_rt_dataset *dbg_track(struct pvrsgx_render_dbg *d,
+					   struct pvrsgx_rt_dataset *s)
+{
+	struct pvrsgx_rt_dataset *old;
+
+	kref_get(&s->ref);
+	spin_lock(&d->lock);
+	old = d->rtds;
+	d->rtds = s;
+	if (old != s)
+		d->kicked = NULL;
+	spin_unlock(&d->lock);
+	return old;
+}
+
+/* From run_job: no reference taken or dropped. */
+static void dbg_kicked(struct pvrsgx_render_dbg *d, struct pvrsgx_rt_dataset *s, u32 off,
+		       u32 p)
+{
+	spin_lock(&d->lock);
+	d->kicked = s;
+	d->cmd_off = off;
+	d->entry = p;
+	spin_unlock(&d->lock);
+}
+#endif
+
 int pvrsgx_render_job_init(struct drm_file *file, struct pvrsgx_job *job,
 			   const struct drm_powervr_sgx_job *in)
 {
+	struct pvrsgx_device *sdev = job->ctx->sdev;
+	const struct pvrsgx_cmd_def *rdef = pvrsgx_cmd_def(sdev, PVRSGX_CMD_RENDER);
+	const struct pvrsgx_cmd_def *kdef = pvrsgx_cmd_def(sdev, PVRSGX_CMD_TA_KICK);
 	struct pvrsgx_render_job *rj = &job->render;
-	struct pvrsgx_stream_ctx sctx = {};
-	struct drm_powervr_sgx_ta_kick *kicks;
+	struct drm_powervr_sgx_cmd_ta_kick *kicks;
 	struct pvrsgx_vm *vm = job->ctx->vm;
+	struct pvrsgx_cmd_ctx cctx = {};
+	u64 present;
 	int err;
 
 	if (in->flags & ~DRM_POWERVR_SGX_SUBMIT_JOB_RENDER_FLAGS_MASK)
@@ -657,26 +718,27 @@ int pvrsgx_render_job_init(struct drm_file *file, struct pvrsgx_job *job,
 		return -EINVAL;
 	if (!in->ta_kicks.count)
 		return -EINVAL;
-	/* Scenes of more than two kicks need the middle-kick flags (G12). */
+	/* Scenes of more than two kicks need the middle-kick flags, not known yet. */
 	if (in->ta_kicks.count > PVRSGX_MAX_TA_KICKS)
+		return -EINVAL;
+
+	if (!rdef || !kdef)
 		return -EOPNOTSUPP;
 
-	sctx.heaps[PVRSGX_STREAM_HEAP_PDS_PIXEL].base = PVRSGX_HEAP_PDS_PIXEL;
-	sctx.heaps[PVRSGX_STREAM_HEAP_PDS_PIXEL].size =
-		PVRSGX_HEAP_KERNEL_CODE - PVRSGX_HEAP_PDS_PIXEL;
-	sctx.limits[PVRSGX_STREAM_LIMIT_TILES_X] = rj->rtds->n.xt - 1;
-	sctx.limits[PVRSGX_STREAM_LIMIT_TILES_Y] = rj->rtds->n.yt - 1;
-	sctx.has_quirk = pvrsgx_stream_no_quirk;
-	sctx.rt_pad_width = rj->rtds->n.xt * 32;
-	sctx.rt_pad_height = rj->rtds->n.yt * 16;
-	sctx.mapped = pvrsgx_stream_mapped;
-	sctx.priv = vm;
+	cctx.heaps[PVRSGX_CMD_HEAP_PDS_PIXEL].base = pvrsgx_heaps(sdev)->pds_pixel.base;
+	cctx.heaps[PVRSGX_CMD_HEAP_PDS_PIXEL].size =
+		pvrsgx_heaps(sdev)->pds_pixel.end - pvrsgx_heaps(sdev)->pds_pixel.base;
+	cctx.limits[PVRSGX_CMD_LIMIT_TILES_X] = rj->rtds->n.xt - 1;
+	cctx.limits[PVRSGX_CMD_LIMIT_TILES_Y] = rj->rtds->n.yt - 1;
+	cctx.rt_pad_width = rj->rtds->n.xt * 32;
+	cctx.rt_pad_height = rj->rtds->n.yt * 16;
+	cctx.rt_samples = rj->rtds->samples;
+	cctx.mapped = pvrsgx_cmd_mapped;
+	cctx.priv = vm;
 
-	err = pvrsgx_stream_take(&pvrsgx_stream_render_defs, &sctx, vm, in->cmd_stream,
-				 in->cmd_stream_len, &rj->render);
-	if (err)
-		return err;
-	err = pvrsgx_check_render(&rj->render);
+	err = pvrsgx_cmd_copy(rdef, in->cmd, &rj->render, &present);
+	err = err ?: pvrsgx_cmd_take(sdev, rdef, &cctx, vm, &rj->render, present);
+	err = err ?: pvrsgx_check_render(sdev->family->cmds, &rj->render, rj->rtds->samples);
 	if (err)
 		return err;
 
@@ -684,12 +746,16 @@ int pvrsgx_render_job_init(struct drm_file *file, struct pvrsgx_job *job,
 	if (IS_ERR(kicks))
 		return PTR_ERR(kicks);
 	rj->nkicks = in->ta_kicks.count;
-	for (u32 k = 0; k < rj->nkicks && !err; k++)
-		err = kicks[k].flags ? -EINVAL :
-		      pvrsgx_stream_take(&pvrsgx_stream_ta_kick_defs, &sctx, vm,
-					 kicks[k].cmd_stream, kicks[k].cmd_stream_len,
-					 &rj->kick[k]);
+	for (u32 k = 0; k < rj->nkicks && !err; k++) {
+		err = pvrsgx_cmd_take_elem(kdef, &kicks[k], in->ta_kicks.stride, &rj->kick[k],
+					   &present);
+		err = err ?: pvrsgx_cmd_take(sdev, kdef, &cctx, vm, &rj->kick[k], present);
+	}
 	kvfree(kicks);
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+	if (!err)
+		pvrsgx_rtds_put(dbg_track(&sdev->dbg_render, rj->rtds));
+#endif
 	return err;
 }
 
@@ -699,9 +765,9 @@ void pvrsgx_render_job_fini(struct pvrsgx_job *job)
 	job->render.rtds = NULL;
 }
 
-static u32 pds_word(u64 addr, u32 rows)
+static u32 pds_word(u64 pds, u64 addr, u32 rows)
 {
-	return rows << 26 | (u32)(addr - PVRSGX_HEAP_PDS_PIXEL) >> 4;
+	return rows << 26 | (u32)(addr - pds) >> 4;
 }
 
 /*
@@ -711,16 +777,15 @@ static u32 pds_word(u64 addr, u32 rows)
  * dataset are ours.
  *
  * One kick both starts the scene and renders it (TA flags 0x63, the form Mesa
- * uses). Two kicks are the captured form of a single-draw frame (STATE.md, "A
- * frame, end to end"): 0x71 runs the stream, 0x62 runs the terminate words and
- * starts the 3D.
+ * uses). A single-draw frame can also take two kicks: 0x71 runs the stream,
+ * 0x62 runs the terminate words and starts the 3D.
  */
 /*
  * A restart (a reset, or a runtime resume) starts a fresh microkernel, but a
  * VM's PB lives through it. After a hang the pages the TA took are still off
  * its free list: the next render on any of the VM's contexts hangs, and the
  * next restart fails. The PB's first job after a restart sets it up as new.
- * Nothing else needs it (log 2026-11-03-0600): the HW contexts and RT datasets
+ * Nothing else needs it: the HW contexts and RT datasets
  * carry on as they are.
  */
 static void pb_rearm(struct pvrsgx_device *sdev, struct pvrsgx_pb *pb)
@@ -736,16 +801,20 @@ int pvrsgx_render_job_build(struct pvrsgx_job *job, u32 k, u32 data[6])
 	struct pvrsgx_render_job *rj = &job->render;
 	struct pvrsgx_render_ctx *r = job->ctx->render;
 	struct pvrsgx_rt_dataset *s = rj->rtds;
-	const struct pvrsgx_stream_render *in = &rj->render;
+	const struct drm_powervr_sgx_cmd_render *in = &rj->render.base;
+	const struct drm_powervr_sgx_ext_sgx545_render *x545 = &rj->render.sgx545_render;
 	bool first = k == 0, last = k == rj->nkicks - 1;
 	struct pvrsgx_fw_ta_cmd *cmd;
 	struct pvrsgx_fw_rt_deps *deps;
 	struct pvrsgx_fw_render_details *rd;
 	u32 f, odd, p, rgn_this, rgn_next, entry, *s3d, *done, *b;
 	u32 woff = r->ccb_woff, zls_base = 0;
+	u64 pds = pvrsgx_heaps(job->ctx->sdev)->pds_pixel.base;
 
 	if (first)
 		pb_rearm(job->ctx->sdev, r->pb);
+	WRITE_ONCE(r->sent, true);
+	WRITE_ONCE(s->sent, true);
 	f = s->frames;
 	odd = f & 1;
 	/* This frame's RT-data entry and everything that goes with it. */
@@ -755,7 +824,7 @@ int pvrsgx_render_job_build(struct pvrsgx_job *job, u32 k, u32 data[6])
 	entry = kobj_va(s->rtdata) + 0x18 + 0x38 * p;
 	rd = (struct pvrsgx_fw_render_details *)kobj_cpu(s->rd[p]);
 	if (first) {
-		/* Render details (STATE.md 6; UAPI.md 4.2). */
+		/* Render details. */
 		if (in->depth_addr || in->stencil_addr) {
 			u64 lo = in->depth_addr ?: in->stencil_addr;
 
@@ -766,29 +835,29 @@ int pvrsgx_render_job_build(struct pvrsgx_job *job, u32 k, u32 data[6])
 		}
 		rd->zls_base = zls_base;
 		rd->depth_bias_units = in->depth_bias_units;
-		rd->depth_bias_factor = in->depth_bias_factor;
+		rd->depth_bias_factor = in->depth_bias_factor_f32;
 		rd->region_headers = rgn_this;
 		rd->region_headers_next = rgn_next;
-		rd->zls_ctl = in->zls_control ? in->zls_control | (s->n.xt - 1) << 3 : 0;
+		rd->zls_ctl = x545->zls_control ? x545->zls_control | (s->n.zls_xt - 1) << 3 : 0;
 		rd->depth[0] = in->depth_addr ? (u32)in->depth_addr - zls_base : 0;
 		rd->depth[1] = rd->depth[0];
 		rd->stencil[0] = BIT(31) |
 				 (in->stencil_addr ? (u32)in->stencil_addr - zls_base : 0);
 		rd->stencil[1] = rd->stencil[0];
-		rd->bg_depth = in->bg_depth;
+		rd->bg_depth = in->bg_depth_f32;
 		rd->pixel_event_pds = (u32)in->pixel_event_pds_addr;
 		rd->pixel_event_rows = in->pixel_event_pds_rows;
 		rd->rt_data_entry = entry;
-		kobj_cpu(s->rd_w4[p])[0] = pds_word(in->bg_pds_primary_addr,
+		kobj_cpu(s->rd_w4[p])[0] = pds_word(pds, in->bg_pds_primary_addr,
 						    in->bg_pds_primary_rows);
 
 		/*
-		 * The background object's PDS words, as the DDK microkernel copies them
-		 * at the 3D start (secondary, middle, primary): the open microkernel
-		 * leaves them to the host, so it never runs on the job's directory.
+		 * The background object's PDS words (secondary, middle, primary),
+		 * written by the host so the microkernel never runs on the job's
+		 * directory.
 		 */
 		b = kobj_cpu(s->bgblock[p]);
-		b[0] = pds_word(in->bg_pds_secondary_addr, in->bg_pds_secondary_rows);
+		b[0] = pds_word(pds, in->bg_pds_secondary_addr, in->bg_pds_secondary_rows);
 		b[1] = BG_PDS_MIDDLE;
 		b[2] = kobj_cpu(s->rd_w4[p])[0];
 
@@ -804,14 +873,14 @@ int pvrsgx_render_job_build(struct pvrsgx_job *job, u32 k, u32 data[6])
 	cmd->size = sizeof(*cmd);
 	cmd->ta_flags = PVRSGX_TA_FLAGS_BASE | (first ? PVRSGX_TA_FIRST_KICK : 0) |
 			(last ? PVRSGX_TA_LAST_KICK : 0) |
-			(first && !f ? PVRSGX_TA_FIRST_RENDER : 0);
-	cmd->bg_pds[0] = pds_word(in->bg_pds_secondary_addr, in->bg_pds_secondary_rows);
+			(first && !f ? PVRSGX_TA_INVAL_USE : 0);
+	cmd->bg_pds[0] = pds_word(pds, in->bg_pds_secondary_addr, in->bg_pds_secondary_rows);
 	cmd->bg_pds[1] = BG_PDS_MIDDLE;
-	cmd->bg_pds[2] = pds_word(in->bg_pds_primary_addr, in->bg_pds_primary_rows);
+	cmd->bg_pds[2] = pds_word(pds, in->bg_pds_primary_addr, in->bg_pds_primary_rows);
 	cmd->ta_ctl[0] = TA_CTL;
 	cmd->ta_ctl[1] = TA_CTL;
 	if (last)
-		cmd->flags_3d = in->flags_3d | PVRSGX_3D_RENDER | f << PVRSGX_3D_FRAME_SHIFT;
+		cmd->flags_3d = x545->flags_3d | PVRSGX_3D_RENDER | f << PVRSGX_3D_FRAME_SHIFT;
 	cmd->frame = f;
 	cmd->pb_desc = kobj_va(r->pb->desc);
 	cmd->render_details = kobj_va(s->rd[p]);
@@ -841,13 +910,13 @@ int pvrsgx_render_job_build(struct pvrsgx_job *job, u32 k, u32 data[6])
 		job->done_val = deps->write_pending + 1;
 	}
 
-	cmd->te_aa = TE_AA;
+	cmd->te_aa = s->n.te_aa;
 	cmd->te_mtile[0] = s->n.mtile1;
 	cmd->te_mtile[1] = s->n.mtile2;
 	cmd->te_screen = s->n.te_screen;
 	cmd->mt_tiles = s->n.mt_tiles;
-	cmd->ta_flags2 = rj->kick[k].ta_flags2 | (last ? PVRSGX_TA2_RENDER : 0);
-	cmd->vdm_base = (u32)rj->kick[k].vdm_base;
+	cmd->ta_flags2 = rj->kick[k].sgx545_ta_kick.ta_flags2 | (last ? PVRSGX_TA2_RENDER : 0);
+	cmd->vdm_base = (u32)rj->kick[k].base.vdm_base;
 	cmd->vdm_ctl = VDM_CTL;
 	cmd->region_headers = rgn_this;
 	cmd->tail_pointers = kobj_va(s->tailptr);
@@ -855,7 +924,7 @@ int pvrsgx_render_job_build(struct pvrsgx_job *job, u32 k, u32 data[6])
 	cmd->eps[1] = F32_1E_6;
 	cmd->screen_size = (s->h - 1) << 16 | (s->w - 1);
 	cmd->params_base = r->pb->base;
-	cmd->rt_flags = RT_FLAGS;
+	cmd->rt_flags = s->n.rt_flags;
 
 	r->ccb_woff = (woff + sizeof(*cmd)) & (CCB_RING - 1);
 	/* The command is in memory before the write offset that hands it over. */
@@ -864,6 +933,9 @@ int pvrsgx_render_job_build(struct pvrsgx_job *job, u32 k, u32 data[6])
 	if (last) {
 		rj->cmd_off = woff;
 		rj->entry = p;
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+		dbg_kicked(&job->ctx->sdev->dbg_render, s, woff, p);
+#endif
 		trace_pvrsgx_render_kick(cmd, s->w, s->h, rgn_next, woff);
 		s->frames++;
 	}
@@ -889,7 +961,8 @@ static void render_dump(struct seq_buf *sb, struct pvrsgx_device *sdev, struct p
 	pvrsgx_kobj_dump(sb, "pbdesc", r->pb->desc, 0, sizeof(struct pvrsgx_fw_pb_desc));
 	pvrsgx_kobj_dump(sb, "pbblocks", r->pb->blocks, 0, 0x10);
 	pvrsgx_kobj_dump(sb, "freelist[first..]", r->pb->freelist,
-			 ((kobj_va(r->pb->buf) - PVRSGX_HEAP_3D_PARAMS) >> PAGE_SHIFT) * 4, 0x20);
+			 ((kobj_va(r->pb->buf) - pvrsgx_heaps(sdev)->params_3d.base) >>
+			  PAGE_SHIFT) * 4, 0x20);
 	pvrsgx_kobj_dump(sb, "scratch", r->scratch, 0, 0x40);
 	pvrsgx_kobj_dump(sb, "sync3d", r->sync3d, 0, SYNC_DATA_BYTES);
 	pvrsgx_kobj_dump(sb, "ta_cmd", r->ccb, cmd_off, sizeof(struct pvrsgx_fw_ta_cmd));
@@ -927,12 +1000,53 @@ void pvrsgx_job_dump(struct seq_buf *sb, struct pvrsgx_job *job)
 {
 	struct pvrsgx_device *sdev = job->ctx->sdev;
 
+	seq_buf_printf(sb, "job ccb %llu done word 0x%x for 0x%x, sent %llu ns ago\n", job->ccb_seq,
+		       job->done_cpu ? READ_ONCE(*job->done_cpu) : 0, job->done_val,
+		       ktime_get_ns() - job->start_ns);
 	if (job->type == DRM_POWERVR_SGX_JOB_TYPE_RENDER && job->render.rtds)
 		render_dump(sb, sdev, job->render.rtds, job->render.cmd_off, job->render.entry);
 	else if (job->type == DRM_POWERVR_SGX_JOB_TYPE_TRANSFER)
 		pvrsgx_transfer_dump(sb, job);
 }
 
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+/* The last render submitted, read from memory only: never the registers, never the GPU. */
+void pvrsgx_render_dump_last(struct seq_buf *sb, struct pvrsgx_device *sdev)
+{
+	struct pvrsgx_render_dbg *d = &sdev->dbg_render;
+	struct pvrsgx_rt_dataset *s;
+	bool kicked;
+	u32 off, p;
+
+	spin_lock(&d->lock);
+	s = d->rtds;
+	if (s)
+		kref_get(&s->ref);
+	kicked = s && d->kicked == s;
+	off = d->cmd_off;
+	p = d->entry;
+	spin_unlock(&d->lock);
+	if (!s) {
+		seq_buf_puts(sb, "no render submitted\n");
+		return;
+	}
+	seq_buf_printf(sb, "dataset %ux%u, %u frames (read live, not a snapshot)\n", s->w, s->h,
+		       READ_ONCE(s->frames));
+	if (kicked)
+		render_dump(sb, sdev, s, off, p);
+	else
+		seq_buf_puts(sb, "its kick is not written yet\n");
+	pvrsgx_rtds_put(s);
+}
+
+void pvrsgx_render_dbg_fini(struct pvrsgx_device *sdev)
+{
+	pvrsgx_rtds_put(sdev->dbg_render.rtds);
+	sdev->dbg_render.rtds = NULL;
+}
+#endif
+
 #if IS_ENABLED(CONFIG_DRM_POWERVR_SGX_KUNIT_TEST)
 #include "tests/pvrsgx_kobj_test.c"
+#include "tests/pvrsgx_rt_test.c"
 #endif

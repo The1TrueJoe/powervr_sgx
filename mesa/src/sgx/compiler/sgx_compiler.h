@@ -5,11 +5,10 @@
 
 /*
  * SGX545 shader compiler: NIR in, USSE code out, plus what the driver needs
- * to run it (constants, iterations, texture samples, branches). The USP
- * container is not written here: tools/usc/sgx_usp.c builds it from
- * struct sgx_shader for the A/B harness (docs/COMPILER-UPSTREAM.md §3).
+ * to run it (constants, iterations, texture samples, branches). No
+ * container format is written here: the caller packages struct sgx_shader.
  *
- * The input/output conventions (ISA.md "What a compiler needs"):
+ * The input/output conventions:
  *  - uniforms: one 32-bit constant per component, constant k of the driver's
  *    constant buffer loaded into sa[base + k] (fragment base 9, vertex 10);
  *  - fragment varyings: iterated by the PDS into pa, F32, one register per
@@ -20,8 +19,7 @@
  *  - vertex outputs: position o0-o3, then the texture coordinate sets in
  *    order, each its size, then the point size.
  * Constant numbers, attribute slots and sampler units are the caller's to
- * choose (sgx_compile_options.layout); sgxc chooses the corpus's numbers for
- * the A/B harness.
+ * choose (sgx_compile_options.layout).
  */
 #ifndef SGX_COMPILER_H
 #define SGX_COMPILER_H
@@ -36,6 +34,7 @@ extern "C" {
 
 struct nir_shader;
 struct nir_shader_compiler_options;
+struct nir_tex_instr;
 
 #define SGX_MAX_SETS 10
 
@@ -61,12 +60,12 @@ struct sgx_compile_options {
    const struct sgx_layout *layout; /* NULL: the compiler's own numbering */
    bool verbose;
    /* mediump/lowp arithmetic in F16 (NIR from Mesa's precision lowering):
-    * F16 iteration, fmad16, F16/C10 uniforms (corpus *_m, *_l) */
+    * F16 iteration, fmad16, F16/C10 uniforms */
    bool f16;
    /* gl_FrontFacing = ((g16 ^ sa[front_sa]) & 1) != 0: g16 bit 0 is the
-    * primitive's winding in memory (docs/ISA.md "Fragment shaders"), and the
+    * primitive's winding in memory, and the
     * driver loads this SA register with what makes that winding front.
-    * 0: constant true (the A/B harness can't load it) */
+    * 0: constant true */
    unsigned front_sa;
    /* the driver loads constant formats the USP has no list C kind for
     * (sgx_const_map fmt 0x10 / 0x11): a lowp vector's xyz pre-converted
@@ -81,22 +80,30 @@ struct sgx_compile_options {
     * attribute (enum sgx_vtx_fmt); 0, f32 x 4, is the default */
    uint8_t vtx_fmt[16];
    /* fragment shader: bit n set, texture unit n's texels arrive with red and
-    * blue swapped (an RGBA8 view sampled as T1 0x0d: docs/TEX.md):
+    * blue swapped (an RGBA8 view sampled as T1 0x0d):
     * byte 0 is blue, 2 red, the colour output's order. A texel that is the
     * colour as it is then needs no instruction; other reads unpack zyxw */
    uint32_t tex_bgra;
+   /* bit n set, texture unit n's texel is one 32-bit value in the first
+    * register (a depth texture, R32F, R32UI, R32I), read as (d, 0, 0, 1),
+    * an integer 1 for an integer sampler */
+   uint32_t tex_f32;
+   /* bit n set, texture unit n is a 4 (RGBA32) or 2 (RG32) channel 32-bit
+    * texture stored as N R32 planes of its size, channel c in plane c
+    * (sgx_lower_tex: one dependent read per plane, sgx_sample_info.plane) */
+   uint32_t tex_r32x4, tex_r32x2;
    /* fragment shader: the driver's PDS samples a non-dependent texture from
     * the coordinate set itself, so a varying only such samples read needs no
-    * plain iteration of its own (capture: one PDS sample, no iteration).
-    * Off for the A/B harness, whose finalizer may read it */
+    * plain iteration of its own (one PDS sample, no iteration).
+    * Off when other code may read that iteration */
    bool pds_samples_alone;
    /* fragment shader: the driver can have a non-dependent sample return F16
-    * (the T3 word's F16-return bits: docs/STATE.md §5):
+    * (the T3 word's F16-return bits):
     * a texel read at mediump then arrives as F16, two channels per register
     * (sgx_sample_info.f16), and is not unpacked */
    bool f16_samples;
-   /* fragment shader with a discard: split it at the visibility feedback
-    * (ISA.md "Phases, visibility feedback and discard"). Phase 0 (code)
+   /* fragment shader with a discard: split it at the visibility feedback.
+    * Phase 0 (code)
     * runs for every rasterized fragment and computes only the discard test,
     * ending in the feedback nop; phase 1 (code1) runs for visible pixels
     * only and computes the colour from the inputs again. Only PA carries
@@ -106,9 +113,23 @@ struct sgx_compile_options {
    bool split_phases;
    /* with f16_samples: the driver also sets the F16-return T3 bits in a
     * dependent sample's state words (sgx_sample_info.f16), so a mediump
-    * texel a dependent smp reads arrives as F16 in two registers (ISA.md
-    * "hw 1c: smp": the result format is the state's) */
+    * texel a dependent smp reads arrives as F16 in two registers (the
+    * result format is the state's) */
    bool dep_f16_samples;
+   /* GLSL 1.30 and later: 32-bit integers and 0 / ~0 booleans in the
+    * integer units. Off: GLSL ES 1.00, whose integers and booleans are
+    * computed as floats, as the DDK's compiler does */
+   bool native_integers;
+   /* the constant number whose word the driver loads with uniform block
+    * 0's GPU address; block n's is constant ubo_base_k + n (raw 32 bits).
+    * 0: the program has no uniform blocks */
+   unsigned ubo_base_k;
+   /* fragment: bit i, output i (FRAG_RESULT_DATA0 + i) arrives as one 32-bit
+    * word already packed for its render target's format (the driver's
+    * nir_format_pack): it goes to colour_pa as it is, with no BGRA8
+    * conversion. Only output 0 so far. A load_output of output 0 reads the
+    * tile's word in o0, for a blend the driver writes in NIR */
+   uint8_t rt_packed;
 };
 
 /* a vertex attribute's raw format in PA, unpacked by the shader. Components
@@ -130,19 +151,47 @@ struct sgx_varying {
    unsigned comp; /* first component in its sets: varyings may share a set */
    unsigned rows, comps;
    unsigned precision; /* GLSL: 0 none, 1 high, 2 medium, 3 low */
+   /* an integer varying: each row's 16-bit halves as exact floats, the
+    * low ones in set + 2 * row, the high ones in the next (rows counts
+    * both) */
+   bool split;
+   /* noperspective in the stage the layout came from (the gallium driver's
+    * fragment layouts): a vertex shader compiled to it writes v * w and w
+    * (SGX_NOPERSPECTIVE_W) though its own output doesn't say noperspective,
+    * as a TGSI vertex shader's never do */
+   bool noperspective;
 };
+
+/* noperspective: the vertex shader writes v * w (gl_Position.w) and w
+ * itself, a float varying of this name, and the fragment shader divides by
+ * w: the iteration is perspective-correct, the quotient is linear. The
+ * layout needs this varying (high precision, one component) whenever a
+ * varying is noperspective */
+#define SGX_NOPERSPECTIVE_W "sgx_w"
 
 struct sgx_varyings {
    unsigned n;
    struct sgx_varying v[32];
    /* set 0 reserved (vertex shaders that write gl_PointSize) */
    bool point_size;
+   /* set 0 is the TA's vertex colour (output select b11): four F32
+    * components after the position, iterated by the PDS as the colour source
+    * into one register as BGRA8 (B in byte 0, R in byte 2),
+    * the one source it iterates flat */
+   bool colour;
    unsigned set_comps[SGX_MAX_SETS];
 };
 
 /* where the driver puts what the program reads (the USP's lists, decoded) */
 #define SGX_SLOT_NONE     0xffff
-#define SGX_MAX_CONST_MAP (1024 + 32) /* every constant number and literal */
+/* constant numbers: uniforms from 0, the driver's own above them, from 2024
+ * (docs/GL3.md) */
+#define SGX_MAX_CONST_K   2304
+#define SGX_MAX_CONST_MAP (SGX_MAX_CONST_K + 32) /* every constant and literal */
+/* a memory block window per 128 words (ld.a.d's offset is 7 bits): enough
+ * for every constant a program can name (a vertex program's 1572 uniform
+ * dwords, the driver's and the literals); more fails the compile */
+#define SGX_MAX_MEM_BASES 16
 
 struct sgx_const_map {
    uint16_t k; /* constant number: uniform component (sgx_nir.c's numbering) */
@@ -170,9 +219,12 @@ struct sgx_iter_info {
    uint8_t proj;   /* ... with a projected coordinate (x/w, y/w) */
    uint8_t sampler;    /* ... of this sampler */
    uint8_t pointcoord; /* gl_PointCoord (set 0) */
+   /* not interpolated: every varying in the set is flat, the provoking
+    * vertex's value (DOUTI b25-26 = 2; 3 interpolates) */
+   uint8_t flat;
 };
 
-/* A texture sample (docs/ISA.md "The texture-sample sequence"). A
+/* A texture sample. A
  * non-dependent one is the PDS's: the raw RGBA8 texel lands in pa `reg`. A
  * dependent one is an smp the driver puts in before code[at], with the
  * sampler's state words as its src1, writing the raw texel to temporary
@@ -182,7 +234,7 @@ struct sgx_sample_info {
    uint16_t id;
    uint8_t sampler;
    uint8_t set; /* non-dependent: the coordinate's set */
-   uint8_t dim; /* 2 = 2D, 3 = cube */
+   uint8_t dim; /* 2 = 2D, 3 = cube or volume (smp.3d) */
    uint8_t dependent, proj;
    uint8_t reg; /* the raw texel: pa (non-dependent), r (dependent) */
    /* non-dependent: the coordinate's plain iteration, -1 none */
@@ -192,6 +244,18 @@ struct sgx_sample_info {
     * and reg + 1 (B lo, A hi), not RGBA8 into reg; RGBA order for a
     * tex_bgra unit too (the TAG converts by channel) */
    uint8_t f16;
+   /* dependent: a texelFetch (sgx_lower_tex), at the texel's center with an
+    * explicit LOD; the driver gives it state of its own: NEAREST filtering
+    * and mip selection, clamped, whatever the bound sampler says */
+   uint8_t fetch;
+   /* dependent: a tex_r32x4 / tex_r32x2 unit's plane (channel), 0-3; the
+    * driver's state addresses that plane */
+   uint8_t plane;
+   /* dependent: its texture state block, 0 .. n_dep_states - 1. Dependent
+    * samples that read a unit the same way (sampler, f16, fetch, plane)
+    * share one; the driver puts block k's four words in SA after the
+    * constants, at 4k on */
+   uint8_t state;
    uint64_t smp; /* dependent: the smp, destination r0, texture state #0 */
 };
 
@@ -213,7 +277,9 @@ struct sgx_block {
    unsigned at, n;
 };
 
-#define SGX_MAX_SAMPLES 16
+/* texture reads a program may make (a game's post-processing pass: a blur's
+ * taps, each effect's own reads under a uniform branch) */
+#define SGX_MAX_SAMPLES 256
 
 struct sgx_shader {
    unsigned stage; /* MESA_SHADER_VERTEX / _FRAGMENT */
@@ -237,6 +303,10 @@ struct sgx_shader {
    unsigned set_comps[SGX_MAX_SETS];
    bool point_size; /* vertex: writes the point size (f32), after the sets */
    unsigned n_out_regs; /* vertex: o registers written */
+   /* vertex: user clip distances 0..n_clip-1, plane p's in o<clip_o + p>
+    * through fdpc into cp<p>; the driver enables planes 0..n_clip-1 in the
+    * TA's output select (b0-5) and counts n_clip more output dwords */
+   unsigned n_clip, clip_o;
    /* SA registers used from sa_base on (constants and the compiler's own) */
    unsigned sa_slots;
    /* Constants past sa127 (counting 4 per dependent sample of a fragment
@@ -247,13 +317,16 @@ struct sgx_shader {
     * 512 * j. 0: no block */
    unsigned mem_dwords;
    unsigned n_mem_bases;
-   uint8_t mem_base_slot[8];
+   uint8_t mem_base_slot[SGX_MAX_MEM_BASES];
    /* fragment: reads sa[front_sa], so it must be loaded */
    bool uses_front_face;
    uint64_t *code; /* main program, flat (branch targets resolved) */
    unsigned n_code;
    unsigned n_samples;
    struct sgx_sample_info samples[SGX_MAX_SAMPLES];
+   /* fragment: the dependent samples' texture state blocks (4 SA dwords
+    * each, after sa_slots) */
+   unsigned n_dep_states;
    struct sgx_block *blocks;
    unsigned n_blocks;
    /* split_phases: phase 1's program and its blocks (0: one block) */
@@ -264,13 +337,12 @@ struct sgx_shader {
    unsigned n_alu, n_tex, n_flow; /* instruction counts */
    unsigned n_temps;
    unsigned n_pa; /* PA registers: inputs and colour */
-   char *log; /* listing / errors (malloc'd) */
+   char *log;     /* listing / errors (malloc'd) */
 };
 
 const struct nir_shader_compiler_options *sgx_nir_options(void);
 
-/* GLSL ES varyings to texture coordinate sets (ISA.md "What a compiler
- * needs", varyings to sets); call on each stage's NIR
+/* GLSL ES varyings to texture coordinate sets; call on each stage's NIR
  * before linking removes unused ones */
 void sgx_assign_varyings(struct nir_shader *nir, bool vertex,
                          struct sgx_varyings *out);
@@ -281,6 +353,27 @@ void sgx_assign_varyings(struct nir_shader *nir, bool vertex,
  * stages with the same list agree. Anything that already fits is left as it
  * is. False: more than 10 x 4 components */
 bool sgx_pack_varyings(struct sgx_varyings *v);
+
+/* GL user clip planes per pixel: discard where any plane in ucp_enables
+ * has a negative distance. The distances are the vertex shader's clip
+ * distances (nir_lower_clip_vs: vec4 outputs clipdist_0 / clipdist_1 at
+ * VARYING_SLOT_CLIP_DIST0 / 1), read here as inputs of the same names and
+ * slots, which the driver places as it places other built-in varyings.
+ * Call on the fragment shader before sgx_compile. Not for lines: a
+ * discarding program breaks a lines draw. */
+bool sgx_lower_clip_fs(struct nir_shader *fs, unsigned ucp_enables);
+
+/* GLSL 1.30's texture functions on what smp has: textureGrad as an
+ * explicit LOD, the Offset variants and rectangle textures through the
+ * texture's size, 1D as 2D, texelFetch as an explicit-LOD read at the
+ * texel's center (marked sgx_sample_info.fetch), and the reads of
+ * opts->tex_r32x4 / tex_r32x2 units as one read per plane. The txs
+ * instructions it adds (and the program's own textureSize) are the driver's
+ * to lower before sgx_compile. Call after the texture and sampler indices
+ * are final */
+bool sgx_txd_lowered(const struct nir_tex_instr *tex, const void *data);
+bool sgx_lower_tex(struct nir_shader *s,
+                   const struct sgx_compile_options *opts);
 
 /* lower and compile; 0 on success */
 int sgx_compile(struct nir_shader *nir, const struct sgx_compile_options *opts,

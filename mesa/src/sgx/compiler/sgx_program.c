@@ -24,7 +24,7 @@ phys(struct sgx_ctx *c, const struct sgx_ref *r)
 }
 
 /* A dependent sample's smp: destination r0 and texture state #0, which the
- * driver replaces (docs/ISA.md "The texture-sample sequence"). */
+ * driver replaces. */
 static int
 smp_template(struct sgx_ctx *c, const struct sgx_sample *s, uint64_t *w)
 {
@@ -33,7 +33,7 @@ smp_template(struct sgx_ctx *c, const struct sgx_sample *s, uint64_t *w)
    sgx_form_init(&m, SGX_OP_SMP);
    m.skipinv = true;
    m.dim = s->dim == 3 ? 2 : 1;
-   m.lod = s->lod == 1 ? 1 : 0;
+   m.lod = s->lod;
    m.dst = (struct sgx_isa_src){.file = SGX_ISA_FILE_R};
    struct sgx_ref cr = i->op[1];
    unsigned cn = cr.file == SGX_F_U ? sgx_const_sa(c, cr.n) : phys(c, &cr);
@@ -149,6 +149,9 @@ sgx_finish_program(struct sgx_ctx *c, struct sgx_shader *out)
          o->proj = s->proj;
          o->coord_pa = s->coord_pa;
          o->f16 = s->f16_return;
+         o->fetch = s->fetch;
+         o->plane = s->plane;
+         o->state = s->state;
          o->reg = s->dependent ? phys(c, &s->ins->op[0]) : s->pa;
          if (s->dependent && smp_template(c, s, &o->smp))
             goto fail;
@@ -209,6 +212,7 @@ sgx_finish_program(struct sgx_ctx *c, struct sgx_shader *out)
 
    out->sa_base = c->sa_base;
    out->sa_slots = c->n_sa_phys;
+   out->n_dep_states = c->n_dep_states;
    out->mem_dwords = c->mem_dwords;
    out->n_mem_bases = c->n_mem_bases;
    for (unsigned j = 0; j < c->n_mem_bases; j++)
@@ -255,14 +259,16 @@ sgx_finish_program(struct sgx_ctx *c, struct sgx_shader *out)
       o->set = it->set;
       o->comps = it->comps;
       o->pa = it->pa;
-      o->regs = it->sample ? (it->f16 ? 2 : 1)
-                : it->f16  ? (it->comps + 1) / 2
-                           : it->comps;
+      o->regs = it->sample   ? (it->f16 ? 2 : 1)
+                : it->colour ? 1
+                : it->f16    ? (it->comps + 1) / 2
+                             : it->comps;
       o->f16 = it->f16;
       o->sample = it->sample;
       o->proj = it->proj;
       o->sampler = it->sampler;
       o->pointcoord = it->pointcoord;
+      o->flat = it->flat;
    }
    out->colour_pa = c->colour_pa;
    out->discards = c->discards;
@@ -273,10 +279,12 @@ sgx_finish_program(struct sgx_ctx *c, struct sgx_shader *out)
       out->set_comps[i] = frag ? 0 : c->vary->set_comps[i];
    out->point_size = !frag && c->vary->point_size;
    out->n_out_regs = frag ? 0 : c->n_out_regs;
+   out->n_clip = frag ? 0 : c->n_clip;
+   out->clip_o = frag ? 0 : c->clip_o;
    out->n_code = util_dynarray_num_elements(&flat, uint64_t);
    out->code = malloc(MAX2(flat.size, 8));
    memcpy(out->code, flat.data, flat.size);
-   /* the words as sgxc's .code (high, low), for tools/isa/dis.py */
+   /* the words (high, low) */
    if (c->opts->verbose) {
       for (unsigned i = 0; i < out->n_code; i++)
          fprintf(stderr, "%08x %08x\n", (unsigned)(out->code[i] >> 32),

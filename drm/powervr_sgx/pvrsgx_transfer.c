@@ -9,7 +9,8 @@
 
 #include <uapi/drm/powervr_sgx_drm.h>
 
-#include "pvrsgx_stream.h"
+#include "pvrsgx_cmd.h"
+#include "pvrsgx_cmd_checks.h"
 #include "pvrsgx_device.h"
 #include "pvrsgx_fw.h"
 #include "pvrsgx_fwif.h"
@@ -23,12 +24,12 @@
 /*
  * A transfer is a 3D-only render: the background object covers the
  * destination, its pixel program samples the source and its end-of-tile
- * program writes the destination, all client memory (TEX.md 3, 10). The
+ * program writes the destination, all client memory. The
  * kernel owns the HW transfer context, its command ring and the completion
  * sync, and writes the command from the client's CMD_TRANSFER stream.
  */
 #define XFER_CCB_BYTES		0x104c8	/* 0x10000 ring + slack for a command that wraps */
-#define XFER_TILES_X_MAX	127	/* 4096 pixels: G14 has the real limit */
+#define XFER_TILES_X_MAX	127	/* 4096 pixels; the real limit is not known */
 #define XFER_TILES_Y_MAX	255
 
 int pvrsgx_transfer_ctx_init(struct pvrsgx_device *sdev, struct pvrsgx_context *ctx)
@@ -48,11 +49,16 @@ int pvrsgx_transfer_ctx_init(struct pvrsgx_device *sdev, struct pvrsgx_context *
 				     sizeof(struct pvrsgx_fw_hw_transfer_ctx), 0, NULL);
 	if (err)
 		goto fail;
+	/* Freed after a transfer, not a render, has finished. */
+	x->ccb->transfer = true;
+	x->ccbctl->transfer = true;
+	x->done->transfer = true;
+	x->hwctx->transfer = true;
 
 	/* The words a transfer context needs; the rest stays zero. */
 	hw = (void *)kobj_cpu(x->hwctx);
 	hw->flags = 1;
-	hw->page_dir = pvrsgx_mmu_pd_addr(ctx->vm->mmu);
+	hw->page_dir = pvrsgx_vm_pd_word(ctx->vm);
 	hw->ccb = kobj_va(x->ccb);
 	hw->ccb_ctl = kobj_va(x->ccbctl);
 	hw->pid = task_tgid_nr(current);
@@ -66,13 +72,15 @@ fail:
 void pvrsgx_transfer_ctx_fini(struct pvrsgx_device *sdev, struct pvrsgx_context *ctx)
 {
 	struct pvrsgx_transfer_ctx *x = ctx->transfer;
+	bool sent;
 
 	if (!x)
 		return;
-	pvrsgx_kobj_drop(sdev, &x->hwctx);
-	pvrsgx_kobj_drop(sdev, &x->done);
-	pvrsgx_kobj_drop(sdev, &x->ccbctl);
-	pvrsgx_kobj_drop(sdev, &x->ccb);
+	sent = READ_ONCE(x->sent);
+	pvrsgx_kobj_drop_sent(sdev, &x->hwctx, sent);
+	pvrsgx_kobj_drop_sent(sdev, &x->done, sent);
+	pvrsgx_kobj_drop_sent(sdev, &x->ccbctl, sent);
+	pvrsgx_kobj_drop_sent(sdev, &x->ccb, sent);
 	kfree(x);
 	ctx->transfer = NULL;
 }
@@ -80,9 +88,12 @@ void pvrsgx_transfer_ctx_fini(struct pvrsgx_device *sdev, struct pvrsgx_context 
 int pvrsgx_transfer_job_init(struct drm_file *file, struct pvrsgx_job *job,
 			     const struct drm_powervr_sgx_job *in)
 {
+	struct pvrsgx_device *sdev = job->ctx->sdev;
+	const struct pvrsgx_cmd_def *def = pvrsgx_cmd_def(sdev, PVRSGX_CMD_TRANSFER);
 	struct pvrsgx_transfer_job *tj = &job->transfer;
-	struct pvrsgx_stream_ctx sctx = {};
 	struct pvrsgx_vm *vm = job->ctx->vm;
+	struct pvrsgx_cmd_ctx cctx = {};
+	u64 present;
 	int err;
 
 	if (in->flags & ~DRM_POWERVR_SGX_SUBMIT_JOB_TRANSFER_FLAGS_MASK)
@@ -91,36 +102,36 @@ int pvrsgx_transfer_job_init(struct drm_file *file, struct pvrsgx_job *job,
 		return -EINVAL;
 	tj->dst_twiddled = in->flags & DRM_POWERVR_SGX_SUBMIT_JOB_TRANSFER_DST_TWIDDLED;
 
-	sctx.heaps[PVRSGX_STREAM_HEAP_PDS_PIXEL].base = PVRSGX_HEAP_PDS_PIXEL;
-	sctx.heaps[PVRSGX_STREAM_HEAP_PDS_PIXEL].size =
-		PVRSGX_HEAP_KERNEL_CODE - PVRSGX_HEAP_PDS_PIXEL;
-	sctx.limits[PVRSGX_STREAM_LIMIT_TILES_X] = XFER_TILES_X_MAX;
-	sctx.limits[PVRSGX_STREAM_LIMIT_TILES_Y] = XFER_TILES_Y_MAX;
-	sctx.has_quirk = pvrsgx_stream_no_quirk;
-	sctx.mapped = pvrsgx_stream_mapped;
-	sctx.priv = vm;
+	if (!def)
+		return -EOPNOTSUPP;
+	cctx.heaps[PVRSGX_CMD_HEAP_PDS_PIXEL].base = pvrsgx_heaps(sdev)->pds_pixel.base;
+	cctx.heaps[PVRSGX_CMD_HEAP_PDS_PIXEL].size =
+		pvrsgx_heaps(sdev)->pds_pixel.end - pvrsgx_heaps(sdev)->pds_pixel.base;
+	cctx.limits[PVRSGX_CMD_LIMIT_TILES_X] = XFER_TILES_X_MAX;
+	cctx.limits[PVRSGX_CMD_LIMIT_TILES_Y] = XFER_TILES_Y_MAX;
+	cctx.mapped = pvrsgx_cmd_mapped;
+	cctx.priv = vm;
 
-	err = pvrsgx_stream_take(&pvrsgx_stream_transfer_defs, &sctx, vm, in->cmd_stream,
-				 in->cmd_stream_len, &tj->xfer);
-	if (err)
-		return err;
-	return pvrsgx_check_transfer(&tj->xfer);
+	err = pvrsgx_cmd_copy(def, in->cmd, &tj->xfer, &present);
+	err = err ?: pvrsgx_cmd_take(sdev, def, &cctx, vm, &tj->xfer, present);
+	return err ?: pvrsgx_check_transfer(&tj->xfer);
 }
 
-/* Write the 0x1c0-byte transfer command into the context's ring (UAPI.md 3.5). */
+/* Write the 0x1c0-byte transfer command into the context's ring. */
 void pvrsgx_transfer_job_build(struct pvrsgx_job *job, u32 data[6])
 {
 	struct pvrsgx_transfer_ctx *x = job->ctx->transfer;
-	const struct pvrsgx_stream_transfer *in = &job->transfer.xfer;
+	const struct drm_powervr_sgx_cmd_transfer *in = &job->transfer.xfer.base;
 	u32 woff = x->ccb_woff, base = (u32)in->bg_block_addr & 0xfff00000;
 	struct pvrsgx_fw_transfer_cmd *cmd = (void *)((u8 *)kobj_cpu(x->ccb) + woff);
 	u32 *done = kobj_cpu(x->done);
 
+	WRITE_ONCE(x->sent, true);
 	job->transfer.cmd_off = woff;
 	memset(cmd, 0, sizeof(*cmd));
 	cmd->bg_object = 0x2000000 | ((u32)in->bg_block_addr - base) >> 4;
 	cmd->unk_04 = 0x200;
-	cmd->bg_depth = in->bg_depth;
+	cmd->bg_depth = in->bg_depth_f32;
 	cmd->unk_0c = 3;
 	cmd->unk_14 = 0x100;
 	cmd->req_base_3d = base;
@@ -132,7 +143,8 @@ void pvrsgx_transfer_job_build(struct pvrsgx_job *job, u32 data[6])
 	cmd->first_tile = in->first_tile_x << 16 | in->first_tile_y;
 	cmd->last_tile = in->last_tile_x << 16 | in->last_tile_y;
 	cmd->unk_38 = 0x80;
-	cmd->pds_exec_base = PVRSGX_HEAP_PDS_PIXEL;	/* never the client's */
+	/* Never the client's. */
+	cmd->pds_exec_base = pvrsgx_heaps(job->ctx->sdev)->pds_pixel.base;
 	cmd->size = sizeof(*cmd);
 	cmd->flags = job->transfer.dst_twiddled ? PVRSGX_TRANSFER_DST_TWIDDLED : 0;
 	cmd->unk_194 = 0x07c00000;

@@ -119,3 +119,12 @@ ported to modern Linux, and our own client library. The current stack doesn't us
 - `kernel/src/`: GPL-2.0, Imagination Technologies, as published by Intel.
 - `libpvr/`: GPL-2.0-only (built against and generated from `kernel/src`'s headers).
 - Everything else here (the microkernel, the Mesa driver, the tools, the test sticks): MIT.
+
+Compatibility patches under `video/patches/` retain their upstream licenses.
+
+## Cedarview H.264 decoding
+
+The optional [VAAPI driver and broker](video/README.md) use the separately
+proposed gma500 MSVDX host. They support CPU-copy playback; direct import
+additionally needs NV12 SGX sampling and the player compatibility change.
+Firmware is supplied separately and the private kernel interface is opt-in.

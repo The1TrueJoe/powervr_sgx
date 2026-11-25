@@ -80,12 +80,28 @@ struct sgxws_dev {
    unsigned slots;
    int dry_run;
    unsigned ta_split; /* sgxws_dev_options */
+   /* buffers allocated; of those, the backend's cache gave; and cached ones
+    * of the size passed over, still in use (SGX_STATS) */
+   unsigned bo_allocs, bo_cached, bo_busy;
+   /* the backend's GEM objects (SGX_STATS): live, and their bytes; made and
+    * closed since the last report; of those made, code chunks emptied */
+   unsigned gem_live, gem_made, gem_closed, code_resets;
+   uint64_t gem_bytes;
+   /* freed buffers the backend holds: for the GPU to finish, and cached */
+   unsigned zombies, cached;
+   uint64_t zombie_bytes, cached_bytes;
 };
+
+/* the PBE writes the target twiddled, not in rows */
+bool sgxws_target_twiddled(const struct sgxws_target *t);
 
 /* a buffer's backend side; a backend's buffer embeds it first */
 struct sgxws_bo_impl {
    const struct sgxws_kif *kif;
    uint32_t size;
+   /* the CPU may have written it since a job last flushed it (shared buffers:
+    * the kernel then flushes it for the next job that uses it) */
+   bool cpu_dirty;
 };
 
 /* A ring: the persistent part up to mark, then one equal part per frame in
@@ -129,6 +145,7 @@ struct sgxws_rt_numbers {
 /* the TA/3D structures for one w x h target */
 struct sgxws_rt {
    uint32_t w, h;
+   uint8_t samples; /* 1, or 4: 2x2 a pixel (STATE.md "Multisampling (4x)") */
    uint32_t ctx_gen; /* the backend's context it was made in (a reset makes
                         another) */
    struct sgxws_rt_numbers n;
@@ -143,7 +160,8 @@ struct sgxws_rt {
 
 struct sgxws_eot {
    uint32_t va, stride, w, h;
-   uint8_t pbe_format, t1_layout;
+   uint8_t pbe_format, t1_layout, samples;
+   bool raw; /* sgxws_target.raw: no dither */
    uint32_t code;
 };
 
@@ -161,6 +179,9 @@ struct sgxws_ctx {
    struct sgxws_ring eot_pool[2];
    unsigned eot_cur, n_eot;
    struct sgxws_eot eot[SGXWS_EOT_CACHE];
+   /* a hardware test's own end-of-tile program (sgxws_hwt_eot) */
+   uint32_t eot_override[SGXWS_EOT_OVERRIDE_WORDS];
+   unsigned n_eot_override;
    /* fixed programs */
    uint32_t empty_v, empty_p, copy_fs, clear_vs, vpgen_vs, pe_ptoff, pe_emit,
       state_emit[33];
@@ -189,6 +210,13 @@ struct sgxws_ctx {
    uint32_t last_blk[32];
    unsigned last_blk_n;
    uint32_t *last_u, last_u_cap, last_u_dwords, last_u_va;
+   /* the uniform blocks the frame has copied, by key (sgxws_ubo) */
+   struct {
+      uint64_t key;
+      const void *data;
+      uint32_t bytes, va;
+   } ubo_copy[16]; /* a ring of them, ubo_copy_next the oldest */
+   unsigned n_ubo_copy, ubo_copy_next;
    /* the frame's depth bias (render details +0x14, +0x18), once a draw
     * with it is recorded */
    bool bias_set;
@@ -196,6 +224,9 @@ struct sgxws_ctx {
    float bias_factor;
    struct sgxws_rect
       clip; /* what the visible bits and the region clip are now */
+   /* what the frame's draws and clears may change: the union of their clips
+    * (empty: x1 <= x0) */
+   struct sgxws_rect damage;
    /* shared buffers it reads or writes (sgxws_use_bo) */
    unsigned n_use;
    struct {
@@ -218,7 +249,7 @@ struct sgxws_ctx {
    uint64_t ns_flush, ns_cmd, ns_sync_wait; /* all of sgxws_flush; the command;
                                                a synchronous flush's wait */
    uint64_t ns_latency;
-   unsigned n_latency; /* kick to seen done, renders that were waited for */
+   unsigned n_latency; /* kick to done, renders a wait saw end */
    uint64_t ns_latency_scanout;
    unsigned n_latency_scanout; /* of those, the ones into the scanout buffer */
    unsigned frames;

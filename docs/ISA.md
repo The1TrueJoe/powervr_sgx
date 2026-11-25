@@ -309,6 +309,7 @@ reproduced all 650 recorded values exactly; open-stack logs are in `hwt_out/open
 | hwt_p4 | fminmax/fmaxmin (all orders); fmad16 swizzles x 3 sources; pck dmask lanes, u8/s16/f16 rounding, rint rnd 0-3, u8 unpack lanes | confirmed; swizzle 0-3 = lohi, lolo, hihi, f32; rnd = nearest-even, down, up, zero; **f32 -> f16 truncates** |
 | hwt_p5 | fadm/fmsa on new inputs; h2 partial write; C10 chan 3 and range | as above |
 | hwt_ba | ba absolute target | instruction index from the code base |
+| hwt_window | code base windows 0-2; ba from bases 0-2; DOUTU offset and ba target past 512 KiB | base n runs heap + n·512K + offset; **ba, and phas.i, count from the task's code base, not the heap**; both fields reach past the window |
 | hwt_p6 | sop2 U8 select/add/sub/mul; C10 operands with each setfc | **setfc's 2nd argument is the C10 enable, on at start** |
 | hwt_p7 | efo F16 numbering; fmad fused?/rounding; fmad16 rounding; C10 alpha; testmask byte/word; call + lapc; fdp; bitwise | efo F16 counts halves; **fmad rounds the product (not fused)**; fmad16 rounds to nearest; fdp writes only the last iteration's dst |
 | hwt_p8 | setfc's first argument; C10 alpha source; C10 -> U8 byte order | **setfc's 1st argument is the efo F16 enable, off at start**; C10 alpha reads channel 0 |
@@ -316,6 +317,7 @@ reproduced all 650 recorded values exactly; open-stack logs are in `hwt_out/open
 | hwt_p11 | a repeat over an F16 operand | moe / inc step it by one half |
 | hwt_p13 | pck.u8.u8 lane picks per dmask (3, 12, 6, 9) and RGBA8 -> BGRA8 in two; and / or of 0 and 0xffffffff test masks; test.and.eq into p0 on a mask | an 8-bit source's lane picks its byte, the first source filling the lowest dmask lane; and / or are bitwise on masks; test.and.eq is true for a zero mask, false for 0xffffffff (2026-11-09, all 11 ok) |
 | hwt_gaps (open stack) | ld.a.d/w/b offsets and sizes; i0 across loads and a wdf, with and without nosched; test with a dest and with mask=15; fddp's i<n>; ima32 hi | see "hw 1d: ld", "Dual issue", "test vs testmask", fddp, ima32 (2026-11-11, `tools/isa/hwt_open.py` through `sgx_hwt`: powervr_sgx and the open microkernel, nothing from the vendor stack) |
+| hwt_int (open stack) | ima32 add/sub/multiply low words, immediates, `-a` as `a * c56`, high words unsigned and `.sgn`; testmask.xor eq/ne and testmask.or neg/pos/gt/le dwords; test.xor / test.and into p0; and.inv with a register src2, xor.inv #0, asr / shl by a register; pck.f32.s16/u16 lanes, pck.u16.f32 pairs and clamping; frcp | all 50 expected words (the integer forms the compiler's native_integers path emits: COMPILER-GL3.md); frcp exactly rounded on 3, 7, 1000003, 4294967040, 1.5 (2026-11-11, pvrsrvkm normal boot, `sgx_hwt` services backend) |
 | hwt_p12 | efo's m/a/i/d modes, wi, negates, chaining; fdual's every secondary and primary, i0s0, slot sharing, negates, rpt=2, same-word timing | all units as tabled; secondary sources settled (sd = 1st, sb, sc); sec 3 is fsubflr; neg1/neg2 primary only; same-word read of an internal register being written is a **race** (efo d, fdual primary) |
 
 hwt_p7-p9's `test` lines with `.f16` / `.c10` were drawn before the assembler
@@ -771,6 +773,11 @@ Notes:
   src2; dmask 9 -> byte 0 src1, byte 3 src2; dmask 15 -> bytes 0/2 src1,
   1/3 src2; a single enabled byte takes src1). Disabled bytes keep the old
   value. `pck.s16.f32 d, a, b` puts a in bits 0-15, b in 16-31.
+- 16-bit integer halves, **hardware** (hwt_int): `pck.f32.s16 d, r.l2, #0`
+  converts r's signed high half (0xfffe0003 -> -2.0), `.l0` the low one;
+  `pck.f32.u16` the same unsigned (low 3.0, high 65534.0). `pck.u16.f32 d,
+  a, b` puts a in bits 0-15 and b in 16-31, each rounded and clamped to
+  0-65535 (-5.0 -> 0, 70000.0 -> 0xffff; `#0` as b leaves 0).
 - Conversions, **hardware** (hwt_p4): f32 -> u8 `scale` is x*255 rounded to
   nearest and clamped to 0-255 (-0.1 -> 0, 1.5 -> 255, 0.7 -> 178, 1/510 ->
   1), whatever rnd says. f32 -> s16 rounds to nearest-even (2.5 -> 2, 1.7 ->
@@ -831,7 +838,7 @@ test sources (oracle); a subtract is the `fsub` ALU op.
 | 0x20-0x26 | 2 | 0-6 | `i8op0`..`i8op6` | oracle; outside a test i8op0-i8op3 encode as ima8 (add, or swapped-negated sub); i8op4 and i8op6 exist only as tests. Names unknown |
 | 0x27 | 2 | 7 | `fpadd8` | oracle (test only, takes C10 operands); name **guess** |
 | 0x28 | 2 | 8 | `fpsub8` | corpus: every lowp compare (fl_*_l) is fpsub8 with C10 sources; hardware (hwt_p10); name **guess** |
-| 0x30-0x35, 0x37 | 3 | 0-5, 7 | `and or xor shl shr rol asr` | oracle; corpus (`test.and.ne p0, #0, #0` clears p0; `test.shl.pos/neg p2, x, #31` in step_l); hardware (hwt_p13 `test.and.eq` on a mask) |
+| 0x30-0x35, 0x37 | 3 | 0-5, 7 | `and or xor shl shr rol asr` | oracle; corpus (`test.and.ne p0, #0, #0` clears p0; `test.shl.pos/neg p2, x, #31` in step_l); hardware (hwt_p13 `test.and.eq` on a mask; hwt_int: `testmask.xor.eq/ne.dword`, `testmask.or.neg/pos/gt/le.dword` on the whole 32-bit result, its sign bit 31, register and `#0` sources; `test.xor.ne` into p0) |
 
 Other values print as `alu<hex>`; the vendor assembler never produces them.
 
@@ -898,7 +905,9 @@ writes 0xffffffff when the test passes and 0 when it fails.
 xor, shl, shr (logical), asr (arithmetic), rol by an immediate, shr by a
 register, `and #0xff00 [rot=16]` = & 0xff000000 and `and.inv #1` = &
 ~1 all give the expected words; a register shift by 33 gives 0 (the count
-is not taken mod 32).
+is not taken mod 32). hwt_int adds asr and shl by a register (0x80000010
+asr 4 = 0xf8000001, 0x11 shl 31 = 0x80000000) and `and #0x3f80 [rot=16]`
+on ~0 = 0x3f800000.
 
 All **oracle**; no corpus instance (the vendor compiler uses these ALU ops
 only under test). Mnemonic names are ours and match the test ALU codes;
@@ -907,7 +916,7 @@ rol and asr are **hardware** (above), rlp's semantics a **guess**.
 | bits | field | values | tag |
 |---|---|---|---|
 | h27-31, h3 | opcode, sub-op | table above | oracle |
-| h11 | inv (`.inv`) | src2 inverted (src1 takes no modifier) | oracle; hardware (hwt_p7 `and.inv #1`) |
+| h11 | inv (`.inv`) | src2 inverted (src1 takes no modifier) | oracle; hardware (hwt_p7 `and.inv #1`; hwt_int `and.inv` with a register src2, `xor.inv #0` = not) |
 | h2 | partial | stops the immediate compression | oracle; "16-bit/partial operation" meaning **guess** |
 | h6-10 | rot | immediate rotate-left count. The field exists whatever src2 is; with a register src2, the vendor assembler leaves it 0 | oracle; hardware (hwt_p7 `and #0xff00 [rot=16]`) |
 | l0-6, l14-20, h4-5 | src2 immediate | when src2's bank is `#` (l28-29 = 2, h16): a 16-bit value, bits 0-6 / 7-13 / 14-15 | oracle |
@@ -1289,6 +1298,15 @@ Operand slots: the generic dst, src0 (bank h2, no extension), src1 and src2 unle
 - cin h10-11: carry-in from i0-i2: 0 none, 1 i0, 2 i1, 3 i2.
 - negp h8 = src0 neg xor src1 neg.
 - src2 neg h7.
+- **hardware** (hwt_int, open stack, 2026-11-11): the destination is the
+  low 32 bits of `src0 * src1 + src2`, wrapping (0x7fffffff + 1 =
+  0x80000000, 0xffffffff + 2 = 1, 0x12345678 * 0x9abcdef = 0xe242d208,
+  -3 * 5 = -15); src2 negate subtracts (`ima32 d, a, #1, -b`: 5 - 7 = -2,
+  0x80000000 - 1 = 0x7fffffff), on an immediate too (`-#7`); a 7-bit
+  immediate without `.sgn` is unsigned (`#100`); `a * c56` (~0) is -a.
+  The high word in i1 is the unsigned product's (0xffffffff² gives
+  0xfffffffe) and, with `.sgn`, the signed one's (-1 * -1 gives 0, -2 * 3
+  gives 0xffffffff).
 - src0 r/pa/o/sa via ext h15.
 - The assembler writes isub32 (signed or unsigned) as `a*#1 + -b`.
 
@@ -1533,7 +1551,7 @@ predicate (oracle).
 
 | form | fixed | fields | evidence |
 |---|---|---|---|
-| `ba #target` | h6-8 = 0, h19 = 0 | target l0-17: label address + the program's load offset (encode()'s `offset`), unsigned 18 bits | oracle; **hardware** (hwt_ba): the target is the absolute instruction index from the USE code base the task runs from (DOUTU's base 0 = 0x37000000): `ba #0x1077` reached the instruction at 0x37008388 + 6*8 |
+| `ba #target` | h6-8 = 0, h19 = 0 | target l0-17: label address + the program's load offset (encode()'s `offset`), unsigned 18 bits | oracle; **hardware** (hwt_ba): the target is the absolute instruction index from the USE code base the task runs from (DOUTU's base 0 = 0x37000000): `ba #0x1077` reached the instruction at 0x37008388 + 6*8. From base 1 (0x37080000), `ba #0x1090` lands at 0x37088480, and `ba #0x11090` at 0x37108480, so the origin is the task's code base and not the heap; from base 0, `ba #0x11090` reaches 0x37088480, past the first window (hwt_window) |
 | `br #target` | h6-8 = 1, h19 = 0 | target l0-17: label + label-argument offset - this instruction's index, signed 18 bits (-0x20000..0x1ffff) | oracle, corpus; **hardware** (hwt_p2 `br_1..3`, `loop_br`, `br_pred_*`): `br #n` goes to this instruction + n; `#-2` loops back; a predicated br falls through when its predicate is false |
 | `lapc` | h6-8 = 2 | return to the saved link address | oracle, corpus (fn_call); **hardware** (hwt_p7 `call_lapc`): `br #3 [link]` ... `lapc` returns to the instruction after the br |
 | `nop` | h6-8 = 5 | h23 syncs, h18 end, l0 = f2_26, l1 = f3_5; no predicate, h12 and h24-26 are 0 | oracle, corpus (secondary-program prologue `nop [nosched]`, discard placeholder) |
@@ -1607,7 +1625,7 @@ h11 = nosched, h23 = syncs (atst8, depthf). All oracle.
 | op | form | layout | evidence |
 |---|---|---|---|
 | 2 | `phas src1, src2` (h18 = 0) | h19 end, h11 nosched | oracle; name guess |
-| 2 | `phas.i #pc, #temps4 [rate wait sel43 end]` (h18 = 1) | pc l0-17 (18 bits, absolute, no load offset added); temps4 h0-7 = the temporaries / 4 (multiple of 4, up to 0x3fc); rate h11-12 (0, 1, 2); wait h8-10 (0, 1, 2, 7); sel43 h13; h19 end | oracle; exercised by the open stack (dEQP-GLES2: `wait=7`, `rate=1`, `end`); pc and temps4 as the next phase's address and temporaries: **hardware** (the two-phase discard program, "Phases, visibility feedback and discard"); rate and wait as execution rate and wait condition are a guess |
+| 2 | `phas.i #pc, #temps4 [rate wait sel43 end]` (h18 = 1) | pc l0-17 (18 bits, absolute from the task's USE code base, as `ba`; no load offset added); temps4 h0-7 = the temporaries / 4 (multiple of 4, up to 0x3fc); rate h11-12 (0, 1, 2); wait h8-10 (0, 1, 2, 7); sel43 h13; h19 end | oracle; exercised by the open stack (dEQP-GLES2: `wait=7`, `rate=1`, `end`); pc and temps4 as the next phase's address and temporaries: **hardware** (the two-phase discard program, "Phases, visibility feedback and discard"); rate and wait as execution rate and wait condition are a guess |
 | 0 | `op0xff` / `op0xfe` / `op0x100 src1, src2, #n` | h12-13 = 1 / 2 / 3; n h8-9 (0..3); h15 = f3_11, h14 = f3_12; h11 nosched | oracle; unknown |
 
 ---------------------------------------------------------------------------
@@ -1869,7 +1887,33 @@ source: pa, sa, r, or a hardware constant such as c52 = 1.0; **corpus**;
 **LOD read** `texture2DLod(s, uv, l)`: h8-9 = 2 and src2 = the LOD
 (**corpus**). Gradients (`h8-9 = 3`, what the vendor compiler emits for a
 sample inside non-uniform flow) take src2 = the first of the derivative
-registers (**corpus**, one case).
+registers (**corpus**, one case). A 2D one reads four registers from src2
+on: ds/dx, ds/dy, dt/dx, dt/dy, and takes its LOD from the longer of the
+two vectors (s, t)/dx and (s, t)/dy (**hardware**, `tools/isa/hwt_grad.py`
+on an 8x8 texture with its chain, each texel naming its level: one register
+of the four at 0.5 alone gives level 2, a fifth or sixth register nothing;
+r12 with r14, or r13 with r15, at 0.287 each give level 2, every other pair
+level 1). Which of x and y comes first doesn't show in an isotropic LOD.
+
+**On a cube map** (**hardware**, `tools/isa/hwt_cubegrad.py`: an 8x8 cube
+with its chains, every texel naming its face and level). `smp.3d.grad`
+returns the last level whatever r11-r27 hold, zeros included, so it
+isn't a gradient read we can use. `smp.2d.grad` with the cube's state
+words still picks the face from (x, y, z) and reads four registers from
+src2, r12-r15, and nothing after them. They act as the x and y derivatives
+of the direction, in the 2D form's order (dx/dx, dx/dy, dy/dx, dy/dy),
+taken as they are, with no projection onto the face. On +X only r14-r15
+change the level, on -Y only r12-r13, and on +Z all four; 0.5 gives level
+2 of 8 texels, as on a 2D texture, where the face's own derivative would
+be 0.25. The z derivatives can't be given. So neither form takes a cube's
+gradients the way GL defines them, and the driver computes a cube's LOD in
+the program.
+
+A dependent sample's implicit LOD is wrong in a quad its primitive covers
+only in part (**hardware**, `mesa/tests/sgx_deplod.c`: 128 of 4096 pixels
+against the PDS's sample, all on the quads where two triangles meet, with
+the helpers' coordinates right). The driver gives such a sample of a
+mipmapped texture its gradients from `fdsx` / `fdsy` (`lower_dep_lod`).
 
 **Vertex texture fetch** (**corpus**): the same smp with h8-9 = 2;
 `texture2D` in a vertex shader uses LOD c48 (0.0) since there are no
@@ -2080,7 +2124,7 @@ Instruction words as written (low high), decoded with `dis.py -x`:
 | words | decodes as | role |
 |---|---|---|
 | `00000000 fa440700` | `phas.i #0, #0 [wait=7]` | single phase: no next phase |
-| `pc>>3 fa440800 \| t` | `phas.i #pc, #t` | phase 0 → phase 1 at `pc` (byte address relative to the code heap, /8); t = (temps + 3) / 4 in h0-7; h13 = header flags B 4; h11 (`rate=1`) when the blend code runs in a phase of its own |
+| `pc>>3 fa440800 \| t` | `phas.i #pc, #t` | phase 0 → phase 1 at `pc` (byte address relative to the task's USE code base, /8: the DOUTU base's window, not the heap); t = (temps + 3) / 4 in h0-7; h13 = header flags B 4; h11 (`rate=1`) when the blend code runs in a phase of its own |
 | `00000000 fa4c0700` | `phas.i #0, #0 [end wait=7]` | last phase ends here |
 | `00000000 f8040140` | `nop [end]` | appended when header flags B 2 says the last instruction can't take `end` |
 | `n<<14 \| (n+1)<<7 \| b0000004 f8300004` | `pcoeff pa<n>, ...` | n = PA registers taken by the program's iterated inputs: the first register after them |
@@ -2305,8 +2349,42 @@ backed above; this section only collects it.
   pa<z> the iterated z (above; with it in place, points discard on
   hardware). Our compiler leaves
   gl_FragDepth, clamped to [0, 1], in a pa register at the feedback nop for
-  a `depthf` there, pass type 5. **Guess**: that depthf's src0 is the depth
-  written; sa3/sa4 not traced. Needs hardware.
+  a `depthf` there, pass type 5. **depthf's src0 is the depth written**
+  (**hardware**, test H10, 2026-11-12, below); what sa3/sa4 mean beyond
+  carrying the depth test words is not traced.
+  - The words for it: lo `0xf0000184 | depth_pa << 14` (src0 = pa<depth_pa>
+    in l14-20, src1/src2 = sa3/sa4 as in atst8), hi `0xfb340404` for
+    `(p1) depthf` (h9-10 = 2). In a program without a discard the compiler
+    computes no p1, so `(p1)` would test whatever p1 holds: such a program
+    uses h9-10 = 0, hi `0xfb340004`, and every pixel is kept (**hardware**,
+    H10).
+  - The program around it (the open driver's, `upload_fs` in the winsys):
+    phase 0 = `phas.i #phase1, #t [wait=1]`, then `pcoeff` when the program
+    also discards, otherwise `mov pa0, pa0 [skipinv rcnt]` in its place (as
+    the vendor driver's points path); the shader up to the feedback nop;
+    `depthf` [end] there; phase 1 = the colour out and `phas.i #0, #0 [end]`.
+    The draw's ISPA pass type is 5 for triangles too; sa3/sa4 hold the same
+    depth words as a discard's atst8 (STATE.md "Alpha test (ES1)").
+  - **H10** (a CE5300 board, `mesa/tests/sgx_fragdepth.c`): a 128×64 FBO
+    with 24-bit depth; a full quad at depth 0.5 writes gl_FragDepth =
+    x / 128 (from gl_FragCoord, or from a varying), depth test ALWAYS,
+    green; a second quad at 0.5 with LESS, red. Read back colour and depth
+    (ZLS). Without depthf every pixel stores 0.5 and the red quad covers
+    nothing. With it all three cases are exact, 8064 of 8064 pixels each
+    (the middle two columns left out), worst depth error 0: the ramp left of
+    the middle, 0.5 under the red right half; with a discard of the top 16
+    rows (`(p1) depthf`), those rows keep the clear and then take the red
+    quad. piglit's `glsl-1.10-fragdepth`, `glsl-bug-22603`, `drawpix-z`,
+    `early-z` and the `depthstencil-default_fb-copypixels` and
+    `-drawpixels-float-and-ushort` tests at 1, 2 and 4 samples all pass
+    (they failed without it); no GPU resets.
+  - The clamp runs before the colour is written: the colour may be packed
+    over an input the depth reads (pa0), so depth_pa is past every register
+    the colour can take, `max(inputs, 1) + 1`.
+  - The test: piglit `glsl-1.10-fragdepth` and `glsl-bug-22603` (a shader
+    depth against a depth-tested second draw, read back as colour); the
+    `*-copypixels` / `*-drawpixels` depth tests also need depth loaded and
+    stored between renders (ZLS), so they test both.
 - **Derivatives** (corpus c3 dsx, dsy, fwidth): `fdsx d, x, x` / `fdsy d,
   x, x`, one per component, never repeated. The vendor compiler multiplies
   dFdy's operand by a driver constant first (the target's y direction; Mesa's st
@@ -2321,7 +2399,77 @@ backed above; this section only collects it.
   right while dFdy of an `fmul` and either derivative of an `abs` were
   wrong. With the feeding math skipinv-clear, `glsl-fwidth` passes, and
   every remaining failure was a derivative whose `d` was `x` (`fdsy r4, r4,
-  r4`), while each that wrote another register was right.
+  r4`), while each that wrote another register was right. The allocator now
+  makes a derivative's destination live from its own instruction's start
+  (as a repeat's is), so `d` is never one of its sources. `glsl-derivs` and
+  `glsl-fwidth` pass on hardware (2026-11-10), and so do `glsl-derivs-abs`,
+  `-abs-sign`, `-sign`, `-swizzle` and `-varyings` (2026-11-11, a CE5300 board).
+  `fs-dfdx-accuracy` and `fs-dfdy-accuracy` give Warn: they expect
+  `dFdx(x * y)` of gl_FragCoord to be exactly `y` under the NICEST hint,
+  which only per-pixel differencing gives. That fits fdsx/fdsy differencing
+  per 2x2 quad (coarse; **guess**, not yet read back per pixel), which GL
+  allows. No fine form is known.
+- **Logic ops** (GL 1.1 `glLogicOp`; piglit `gl-1.0-logicop`, 16 subtests,
+  `gl-1.1-xor`, `gl-1.1-xor-copypixels`): there is no fixed-function logic
+  op, as there is no blender. Like blending they are code after the colour,
+  in a translucent pass where o0 starts as the tile's colour (STATE.md
+  "Blending and the color mask are shader code"), on the packed BGRA8 word.
+  The bitwise class has and, or and xor with src2 optionally inverted
+  (`.inv` on the mnemonic; src1 takes no modifier), each **hardware**
+  (hwt_p7 `bit_*`, `and.inv #1`), and an immediate src2 is inverted too.
+  With S = pa<c> (the colour) and D = o0:
+
+  | GL | code |
+  |---|---|
+  | CLEAR | `and o0, o0, #0` |
+  | AND | `and o0, pa<c>, o0` |
+  | AND_REVERSE (S & ~D) | `and.inv o0, pa<c>, o0` |
+  | COPY | nothing (the plain colour write) |
+  | AND_INVERTED (~S & D) | `and.inv o0, o0, pa<c>` |
+  | NOOP | `mov o0, o0` (or write nothing: colour mask 0) |
+  | XOR | `xor o0, pa<c>, o0` |
+  | OR | `or o0, pa<c>, o0` |
+  | NOR | `or r, pa<c>, o0`; `xor.inv o0, r, #0` |
+  | EQUIV (~(S ^ D)) | `xor.inv o0, pa<c>, o0` |
+  | INVERT | `xor.inv o0, o0, #0` |
+  | OR_REVERSE (S \| ~D) | `or.inv o0, pa<c>, o0` |
+  | COPY_INVERTED | `xor.inv o0, pa<c>, #0` |
+  | OR_INVERTED (~S \| D) | `or.inv o0, o0, pa<c>` |
+  | NAND | `and r, pa<c>, o0`; `xor.inv o0, r, #0` |
+  | SET | `or.inv o0, o0, #0` |
+
+  Every row assembles and round-trips (`tools/isa/asm.py`; with c = 0,
+  XOR is `58041001 90000000`). The last instruction carries `end`. The ops:
+  **hardware**; that a bitwise
+  op may write o0 (its dst slot takes o: oracle) and read the tile there in
+  a translucent pass as sop2 does: **guess**, to be confirmed by a DDK ES1
+  capture with `glLogicOp` (`tools/probe/probe1.c` PROBE_LOGICOP) or by the
+  piglit tests on the open driver. With a colour mask the logic op goes
+  first, then the masked move. Only for unsigned normalized colour buffers
+  (GL ignores the logic op for float ones).
+- **User clip planes** are clipped by the TA (STATE.md "Clip planes, shading,
+  polygon and line state": capture `cp1`, `cp2`, `cp6`). For plane n the DDK's
+  ES1 vertex program ends with `fdpc o(7+n), cp<n>, pa0, c52 [rpt=2 inc0
+  inc1]` (words `1081d001 90e04034` for n = 0): pa0 holds the distance
+  (computed by efos from the eye-space position and the planes, which arrive
+  as constants), pa1 = 0, and c52-c53 are 1.0, so the dot product is the
+  distance. fdpc writes only its last iteration's destination, as fdp does
+  (hardware, hwt_p7), so plane n's result is o(8+n), and output select's
+  dword count, 8 + n, agrees. Output select also gets b0-5 = the planes.
+  - The compiler: st keeps lowering the planes and gl_ClipVertex to clip
+    distances in the vertex shader (`nir_lower_clip_vs`, driver
+    `clip_planes` 0: planes 0..n-1, a disabled one below the last 0.0), and
+    each distance becomes `fdpc o<clip_o + p - 1>, cp<p>, (d, 0), c52
+    [rpt=2]` after every other output (`sgx_shader.n_clip`, `clip_o`). The
+    driver sets output select b0-5 to planes 0..n_clip-1 and counts n_clip
+    more dwords. Lines clip too: no discard.
+  - **Guesses** until a hardware draw: that a plane enabled with a 0.0
+    distance keeps everything (a point on the plane is inside); that the
+    result registers follow the enabled bits in order.
+  - `sgx_lower_clip_fs` (the per-pixel fallback) stays for a core without
+    the TA path.
+- **Polygon stipple**: `nir_lower_pstipple_fs` (a 32x32 texture read at
+  gl_FragCoord and a discard): nothing new for the compiler.
 - **Phases**: every finalized fragment program (main and secondary) starts
   with a `phas.i` (`phas.i #0, #0 [wait=7]` for a one-phase program;
   hardware) and ends with `end` on its last instruction or an appended
@@ -2501,7 +2649,7 @@ vendor driver; the open stack doesn't use the container.
 - The finalizer: one texture format gets `and dst, dst, #0x7fffffff` on the result → capture finalized programs across the texture formats and find which one.
 - The finalizer: unpack paths for s8, u16, s16, f16, f32 texel channels, `mov` for f32, c10 targets, formats 6/7 (`limm 0xffff8000`, test) → capture finalized programs for each texel format and result precision.
 - The finalizer: how the driver writes the texture-state table into SA registers at draw time → capture the secondary program / PDS DOUTD of a draw with a dependent read.
-- The texture-sample sequence: LOD reads, gradient operand layout (how many registers, which order) → hwt: an smp.2d.grad with known derivatives against a mipmapped texture, read the level chosen.
+- The texture-sample sequence: LOD reads (gradient operand layout: done, `hwt_grad.py`, above).
 - The texture-sample sequence: vertex texture fetch with LOD c48 and skipinv → hwt or open-stack vertex texture test on the CE5300 board.
 - Header: version other than 0x23 rejected → A/B: version 0x22.
 - Header: program type 2 = geometry → none on GLES2; leave unsupported.
