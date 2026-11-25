@@ -39,20 +39,15 @@ and the package inside still says `0.2.0~rc1`.
 ## Steps
 
 0. Put the notes in `docs/releases/v<version>.md` on `dev`; the tag's draft takes them.
-   Then bring the series' release branch up to date: merge `dev` into `release/vX.Y` with
-   a merge commit, so the branch's tree is `dev`'s. Releases are cut there, not on `main`:
-   `main` still holds the 0.1 line, and `dev` doesn't merge into it cleanly. If the branch
-   was deleted, start it again from the series' last tag; a new series starts from `dev`.
+   Then merge `dev` into `main` with a merge commit (a pull request from `dev` into `main`,
+   merged with "Create a merge commit"), so `main`'s tree is `dev`'s. Releases are cut on
+   `main`.
+
+   Rehearse the release on `main`: run `release` by hand with a version such as
+   `0.2.4~rc0`:
 
    ```bash
-   git fetch origin && git checkout -B release/v0.2 origin/release/v0.2 && git merge --no-ff origin/dev && git push origin release/v0.2
-   ```
-
-   Rehearse the release on the branch: run `release` by hand with a version such as
-   `0.2.0~rc0`:
-
-   ```bash
-   gh workflow run release.yml --ref release/v0.2 -f version=0.2.0~rc0
+   gh workflow run release.yml --ref main -f version=0.2.4~rc0
    ```
 
    It builds the packages under that version, signs a throwaway apt repository and runs
@@ -67,8 +62,12 @@ and the package inside still says `0.2.0~rc1`.
 1. Once the rehearsal passes, tag the commit it ran on and push the tag:
 
    ```bash
-   git tag -a v0.2.0 -m "powervr_sgx 0.2.0" origin/release/v0.2 && git push origin v0.2.0
+   git fetch origin && git tag -a v0.2.4 -m "powervr_sgx 0.2.4" origin/main && git push origin v0.2.4
    ```
+
+   0.2.1 to 0.2.3 were cut on a `release/v0.2` branch, before `main` took `dev`'s tree. A
+   fix for an older series can still go that way: start `release/vX.Y` from the series'
+   last tag, merge or cherry-pick the fix, rehearse and tag there.
 
 2. Wait for the `release` run to finish. The kernel build takes several hours.
 3. On the Releases page, check the draft: its eight files (the kernel image and headers
