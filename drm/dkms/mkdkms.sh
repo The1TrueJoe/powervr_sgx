@@ -29,7 +29,7 @@ rm -rf "$DST"
 mkdir -p "$DST/include/drm"
 cp -RL "$HERE/../powervr_sgx/." "$DST/"
 rm -rf "$DST/tests"
-cp "$HERE/../ci/compat.sh" "$HERE/../ci/compat-gem-gpuva.patch" "$DST/"
+cp "$HERE/../ci/compat.sh" "$HERE"/../ci/compat-*.patch "$DST/"
 # The header as gma500 0001 creates it: that hunk's added lines.
 awk '/^\+\+\+ b\/include\/drm\/gma500_sgx.h$/ { on = 1; next }
      on && /^diff --git / { exit }

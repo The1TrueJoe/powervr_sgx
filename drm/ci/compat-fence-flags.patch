@@ -1,0 +1,16 @@
+drm-misc-next (9d0c96dc3839, "dma-buf: dma-fence: Add flags parameter to
+dma_fence_init()") gives dma_fence_init() a flags argument; the driver passes
+0, the old behavior. For kernels without it only (drm/ci/compat.sh applies it
+when dma-fence.h has the five-argument prototype). Never upstream.
+---
+--- a/drivers/gpu/drm/powervr_sgx/pvrsgx_job.c	2026-11-25 03:06:11
++++ b/drivers/gpu/drm/powervr_sgx/pvrsgx_job.c	2026-11-25 03:06:11
+@@ -331,7 +331,7 @@
+ 	job->hw_fence_mem = NULL;
+ 	spin_lock_irqsave(&sdev->fence_lock, flags);
+ 	dma_fence_init(fence, &pvrsgx_fence_ops, &sdev->fence_lock, sdev->fence_context,
+-		       ++sdev->fence_seqno, 0);
++		       ++sdev->fence_seqno);
+ 	spin_unlock_irqrestore(&sdev->fence_lock, flags);
+ 	job->hw_fence = dma_fence_get(fence);
+ 

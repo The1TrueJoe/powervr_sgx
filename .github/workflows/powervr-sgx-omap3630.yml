@@ -104,6 +104,8 @@ jobs:
       - name: The driver out of tree, with W=1
         run: |
           set -eux
+          # The checkout as this kernel needs it; the later steps build this copy too.
+          sh drm/ci/compat.sh linux-$LINUX_VERSION drm/powervr_sgx
           make -C linux-$LINUX_VERSION M=$PWD/drm/powervr_sgx CONFIG_DRM_POWERVR_SGX=m \
             CONFIG_DRM_POWERVR_SGX_OF=y W=1 modules 2>&1 | tee oot.log
           ! grep -E 'warning:|error:' oot.log
