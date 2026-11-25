@@ -2371,8 +2371,8 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       if (tex->shared)
          sgxws_use_bo(ctx->hw, &tex->bo, false);
    }
-   if (query_va)
-      sgx_query_drawn(ctx);
+   if (ctx->occlusion && !ctx->queries_off)
+      sgx_query_drawn(ctx, query_va != 0);
    if (num_draws > 1 && prim != SGXWS_POINTS &&
        !(sgx_drv_debug & SGX_DEBUG_NO_MERGE) &&
        merged_draw(ctx, info, draws, num_draws, indices, f, n_fetch,

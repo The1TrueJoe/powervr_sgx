@@ -4,7 +4,7 @@
  */
 
 /*
- * Occlusion queries (SGX_DEBUG=occlusion, docs/GL3.md H5) through GLES2's
+ * Occlusion queries (docs/GL3.md H5) through GLES2's
  * EXT_occlusion_query_boolean: GL_ANY_SAMPLES_PASSED around draws into a
  * 64x64 pbuffer with depth and stencil, each against what GL says:
  *
@@ -26,7 +26,7 @@
  *   poll          GL_QUERY_RESULT_AVAILABLE goes true without
  *                 a wait, then the result                        true
  *
- *   SGX_DEBUG=occlusion sgx_occlusion
+ *   sgx_occlusion
  *
  * zig cc -target x86_64-linux-gnu.2.36 -I<mesa include> -o sgx_occlusion
  * sgx_occlusion.c -ldl
@@ -279,7 +279,7 @@ main(int argc, char **argv)
 
    if (!strstr((const char *)glGetString_(GL_EXTENSIONS),
                "GL_EXT_occlusion_query_boolean")) {
-      printf("no GL_EXT_occlusion_query_boolean (SGX_DEBUG=occlusion)\n");
+      printf("no GL_EXT_occlusion_query_boolean (SGX_DEBUG=noocclusion?)\n");
       return 2;
    }
    GET(glGenQueriesEXT);
