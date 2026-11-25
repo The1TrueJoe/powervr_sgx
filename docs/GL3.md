@@ -605,10 +605,9 @@ Runs 4 and 5 (the second CE5300 board, 2026-11-12; `docs/log/entries/2026-11-12-
       64 KiB, as in most drivers.
   - The one fail is `minmax`: GL 3.x's 1024 fragment uniform components,
     where the default uniforms give 508 (128 vec4, less st's alpha-test
-    slot). Not a block limit. More default uniforms need the constants the
-    driver numbers from 960 (border colours, `SGX_K_TEXSIZE`,
-    `SGX_K_INSTANCE`) moved past the user range: the compiler's numbering,
-    a change on both sides.
+    slot). Not a block limit. The driver's constants are numbered from 2024
+    now (below), so more default uniforms need only the cap and the memory
+    block's windows.
   - The default path with this in (run 23): dEQP 78 F / 16637 P and zs, ms,
     ff, gl21 against run 19 unchanged, apart from fixed-clip-enables (the
     intermittent above).
@@ -791,18 +790,23 @@ Agreed with the compiler (2026-11-11):
   lowers `load_vertex_id` to an extra vertex input it gathers itself, the
   original index plus the base vertex.
 - **textureSize, texelFetch:** driver constants in a block above the
-  compiler's 1024 user constants, the base level's width, height and depth
+  user constants, the base level's width, height and depth
   per unit; level sizes are computed in the shader. A texelFetch is a
   dependent sample at (i + 0.5) / size with its own texture state from the
   driver (NEAREST, no mips, clamp, the level's address), never the bound
   sampler's filter or wrap; the compiler marks those samples.
-- **Driver constants**, above the user constants and the compiler's other
-  numbers (`SGX_MAX_CONST_K` = 1280): 1024 + 3u the base level's width,
-  height and depth of unit u (0-15); 1072 gl_InstanceID; 1080 + n UBO n's
-  GPU address (`ubo_base_k` = 1080, up to 16); 1096 + u unit u's level
-  count (textureQueryLevels); the rest of 1024-1279 reserved. 960 + 4s are the border colors. `SGX_K_TEXSIZE` (1000) and
-  `SGX_K_INSTANCE` (1016) move into the block when the driver takes the
-  compiler's `native_integers`. Under `native_integers` the sizes and
+- **Driver constants**, numbered above every uniform (a uniform is its
+  dword in constant buffer 0; a vertex program has 384 + 9 vec4, 1572
+  dwords) and under `SGX_MAX_CONST_K` = 2304: 2024 + 2u unit u's level-0
+  width and height as floats (`SGX_K_TEXSIZE`, units 0-7); 2040
+  gl_InstanceID as a float (`SGX_K_INSTANCE`); 2048 + 3u the base level's
+  width, height and depth of unit u (0-15); 2096 gl_InstanceID; 2104 + n
+  UBO n's GPU address (`ubo_base_k`, up to 12); 2120 + u unit u's level
+  count (textureQueryLevels); the rest reserved. `sgx_context.h` checks
+  that the block clears the uniforms. Until 0.2.4 the block began at 1000
+  and the vertex limit was 256 + 9 vec4 (1060 dwords), so a vertex
+  program's last 15 vec4 shared numbers with the block; librw's skinning
+  (about 304 vec4) didn't link (issue #5, reVC). Under `native_integers` the sizes and
   gl_InstanceID are raw integers, otherwise floats. The compiler's
   `sgx_lower_tex` runs first (textureGrad, offsets, rect, 1D, texelFetch); a
   texelFetch sample (`sgx_sample_info.fetch`) gets NEAREST, MIPMAP_NEAREST

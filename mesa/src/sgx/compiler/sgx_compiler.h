@@ -184,13 +184,14 @@ struct sgx_varyings {
 
 /* where the driver puts what the program reads (the USP's lists, decoded) */
 #define SGX_SLOT_NONE     0xffff
-/* constant numbers: uniforms from 0, the driver's own above them; 1024 on
- * is the driver's block (docs/GL3.md) */
-#define SGX_MAX_CONST_K   1280
+/* constant numbers: uniforms from 0, the driver's own above them, from 2024
+ * (docs/GL3.md) */
+#define SGX_MAX_CONST_K   2304
 #define SGX_MAX_CONST_MAP (SGX_MAX_CONST_K + 32) /* every constant and literal */
 /* a memory block window per 128 words (ld.a.d's offset is 7 bits): enough
- * for every slot of the map */
-#define SGX_MAX_MEM_BASES 12
+ * for every constant a program can name (a vertex program's 1572 uniform
+ * dwords, the driver's and the literals); more fails the compile */
+#define SGX_MAX_MEM_BASES 16
 
 struct sgx_const_map {
    uint16_t k; /* constant number: uniform component (sgx_nir.c's numbering) */
