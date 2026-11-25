@@ -1,0 +1,219 @@
+From a444ed5bb3fd20649d632dac063ebb1f3a55e23a Mon Sep 17 00:00:00 2001
+From: Viktor Semykin <thesame.ml@gmail.com>
+Date: Mon, 23 Nov 2026 13:09:52 -0300
+Subject: [PATCH] xf86drm: expose PCI-backed auxiliary children with explicit
+ identity
+
+Follow the explicit auxiliary bus model proposed by Alistair Popple for Nova: retain parent PCI metadata and identify each auxiliary child by its name. Keep ordinary PCI comparisons unchanged and compare stored auxiliary identities without consulting live sysfs. Reject non-PCI parents and oversized names rather than truncating identity.
+
+Signed-off-by: Viktor Semykin <thesame.ml@gmail.com>
+---
+diff --git a/xf86drm.c b/xf86drm.c
+index 07dec49..01c7dde 100644
+--- a/xf86drm.c
++++ b/xf86drm.c
+@@ -3575,4 +3575,5 @@ static int get_subsystem_type(const char *device_path)
+         { "/usb", DRM_BUS_USB },
+         { "/platform", DRM_BUS_PLATFORM },
++        { "/auxiliary", DRM_BUS_AUXILIARY },
+         { "/spi", DRM_BUS_PLATFORM },
+         { "/host1x", DRM_BUS_HOST1X },
+@@ -3704,5 +3705,5 @@ static int get_sysctl_pci_bus_info(int maj, int min, drmPciBusInfoPtr info)
+ #endif
+ 
+-static int drmParsePciBusInfo(int maj, int min, drmPciBusInfoPtr info)
++static int drmParsePciBusInfo(int maj, int min, const char *parent, drmPciBusInfoPtr info)
+ {
+ #ifdef __linux__
+@@ -3711,5 +3712,11 @@ static int drmParsePciBusInfo(int maj, int min, drmPciBusInfoPtr info)
+     int num;
+ 
+-    get_pci_path(maj, min, pci_path);
++    if (parent) {
++        if (strlen(parent) >= sizeof(pci_path))
++            return -ENAMETOOLONG;
++        strcpy(pci_path, parent);
++    } else {
++        get_pci_path(maj, min, pci_path);
++    }
+ 
+     value = sysfs_uevent_get(pci_path, "PCI_SLOT_NAME");
+@@ -3773,4 +3780,7 @@ drm_public int drmDevicesEqual(drmDevicePtr a, drmDevicePtr b)
+         return memcmp(a->businfo.pci, b->businfo.pci, sizeof(drmPciBusInfo)) == 0;
+ 
++    case DRM_BUS_AUXILIARY:
++        return memcmp(a->businfo.aux, b->businfo.aux, sizeof(drmAuxBusInfo)) == 0;
++
+     case DRM_BUS_USB:
+         return memcmp(a->businfo.usb, b->businfo.usb, sizeof(drmUsbBusInfo)) == 0;
+@@ -3815,5 +3825,5 @@ static int drmGetMaxNodeName(void)
+ 
+ #ifdef __linux__
+-static int parse_separate_sysfs_files(int maj, int min,
++static int parse_separate_sysfs_files(int maj, int min, const char *parent,
+                                       drmPciDeviceInfoPtr device,
+                                       bool ignore_revision)
+@@ -3831,5 +3841,11 @@ static int parse_separate_sysfs_files(int maj, int min,
+     int ret;
+ 
+-    get_pci_path(maj, min, pci_path);
++    if (parent) {
++        if (strlen(parent) >= sizeof(pci_path))
++            return -ENAMETOOLONG;
++        strcpy(pci_path, parent);
++    } else {
++        get_pci_path(maj, min, pci_path);
++    }
+ 
+     for (unsigned i = ignore_revision ? 1 : 0; i < ARRAY_SIZE(attrs); i++) {
+@@ -3857,5 +3873,5 @@ static int parse_separate_sysfs_files(int maj, int min,
+ }
+ 
+-static int parse_config_sysfs_file(int maj, int min,
++static int parse_config_sysfs_file(int maj, int min, const char *parent,
+                                    drmPciDeviceInfoPtr device)
+ {
+@@ -3864,5 +3880,11 @@ static int parse_config_sysfs_file(int maj, int min,
+     int fd, ret;
+ 
+-    get_pci_path(maj, min, pci_path);
++    if (parent) {
++        if (strlen(parent) >= sizeof(pci_path))
++            return -ENAMETOOLONG;
++        strcpy(pci_path, parent);
++    } else {
++        get_pci_path(maj, min, pci_path);
++    }
+ 
+     if (snprintf(path, PATH_MAX, "%s/config", pci_path) < 0)
+@@ -3888,5 +3910,5 @@ static int parse_config_sysfs_file(int maj, int min,
+ #endif
+ 
+-static int drmParsePciDeviceInfo(int maj, int min,
++static int drmParsePciDeviceInfo(int maj, int min, const char *parent,
+                                  drmPciDeviceInfoPtr device,
+                                  uint32_t flags)
+@@ -3894,8 +3916,8 @@ static int drmParsePciDeviceInfo(int maj, int min,
+ #ifdef __linux__
+     if (!(flags & DRM_DEVICE_GET_PCI_REVISION))
+-        return parse_separate_sysfs_files(maj, min, device, true);
++        return parse_separate_sysfs_files(maj, min, parent, device, true);
+ 
+-    if (parse_separate_sysfs_files(maj, min, device, false))
+-        return parse_config_sysfs_file(maj, min, device);
++    if (parse_separate_sysfs_files(maj, min, parent, device, false))
++        return parse_config_sysfs_file(maj, min, parent, device);
+ 
+     return 0;
+@@ -4093,5 +4115,5 @@ static int drmProcessPciDevice(drmDevicePtr *device,
+     dev->businfo.pci = (drmPciBusInfoPtr)addr;
+ 
+-    ret = drmParsePciBusInfo(maj, min, dev->businfo.pci);
++    ret = drmParsePciBusInfo(maj, min, NULL, dev->businfo.pci);
+     if (ret)
+         goto free_device;
+@@ -4102,5 +4124,5 @@ static int drmProcessPciDevice(drmDevicePtr *device,
+         dev->deviceinfo.pci = (drmPciDeviceInfoPtr)addr;
+ 
+-        ret = drmParsePciDeviceInfo(maj, min, dev->deviceinfo.pci, flags);
++        ret = drmParsePciDeviceInfo(maj, min, NULL, dev->deviceinfo.pci, flags);
+         if (ret)
+             goto free_device;
+@@ -4503,4 +4525,55 @@ free_device:
+ }
+ 
++/* An auxiliary DRM child is a distinct device, even with a shared PCI parent.
++ * Store its identity at discovery so equality never depends on live sysfs.
++ */
++static int drmProcessAuxDevice(drmDevicePtr *device, const char *node,
++                               int node_type, int maj, int min,
++                               bool fetch_deviceinfo, uint32_t flags)
++{
++#ifdef __linux__
++    char path[PATH_MAX + 1], canonical[PATH_MAX + 1], *leaf, *data;
++    drmDevicePtr dev;
++    int ret;
++
++    snprintf(path, sizeof(path), "/sys/dev/char/%d:%d/device", maj, min);
++    if (!realpath(path, canonical))
++        return -errno;
++    leaf = strrchr(canonical, '/');
++    if (!leaf || !leaf[1])
++        return -EINVAL;
++    if (strlen(leaf + 1) >= DRM_AUX_DEVICE_NAME_LEN)
++        return -ENAMETOOLONG;
++    dev = drmDeviceAlloc(node_type, node, sizeof(drmAuxBusInfo),
++                         sizeof(drmPciDeviceInfo), &data);
++    if (!dev)
++        return -ENOMEM;
++    dev->bustype = DRM_BUS_AUXILIARY;
++    dev->businfo.aux = (drmAuxBusInfoPtr)data;
++    strcpy(dev->businfo.aux->name, leaf + 1);
++    *leaf = 0;
++    if (get_subsystem_type(canonical) != DRM_BUS_PCI) {
++        ret = -ENODEV;
++        goto fail;
++    }
++    ret = drmParsePciBusInfo(maj, min, canonical, &dev->businfo.aux->parent);
++    if (ret)
++        goto fail;
++    if (fetch_deviceinfo) {
++        dev->deviceinfo.aux = (drmPciDeviceInfoPtr)(data + sizeof(drmAuxBusInfo));
++        ret = drmParsePciDeviceInfo(maj, min, canonical, dev->deviceinfo.aux, flags);
++        if (ret)
++            goto fail;
++    }
++    *device = dev;
++    return 0;
++fail:
++    free(dev);
++    return ret;
++#else
++    return -EINVAL;
++#endif
++}
++
+ static int
+ process_device(drmDevicePtr *device, const char *d_name,
+@@ -4546,4 +4619,7 @@ process_device(drmDevicePtr *device, const char *d_name,
+         return drmProcessPciDevice(device, node, node_type, maj, min,
+                                    fetch_deviceinfo, flags);
++    case DRM_BUS_AUXILIARY:
++        return drmProcessAuxDevice(device, node, node_type, maj, min,
++                                    fetch_deviceinfo, flags);
+     case DRM_BUS_USB:
+         return drmProcessUsbDevice(device, node, node_type, maj, min,
+diff --git a/xf86drm.h b/xf86drm.h
+index b9f4fd4..fee29e3 100644
+--- a/xf86drm.h
++++ b/xf86drm.h
+@@ -821,4 +821,5 @@ extern char *drmGetRenderDeviceNameFromFd(int fd);
+ 
+ #define DRM_BUS_PCI       0
++#define DRM_BUS_AUXILIARY 5
+ #define DRM_BUS_USB       1
+ #define DRM_BUS_PLATFORM  2
+@@ -861,4 +862,11 @@ typedef struct _drmPlatformDeviceInfo {
+ } drmPlatformDeviceInfo, *drmPlatformDeviceInfoPtr;
+ 
++#define DRM_AUX_DEVICE_NAME_LEN 512
++
++typedef struct _drmAuxBusInfo {
++    drmPciBusInfo parent;
++    char name[DRM_AUX_DEVICE_NAME_LEN];
++} drmAuxBusInfo, *drmAuxBusInfoPtr;
++
+ #define DRM_HOST1X_DEVICE_NAME_LEN 512
+ 
+@@ -883,4 +891,5 @@ typedef struct _drmDevice {
+     union {
+         drmPciBusInfoPtr pci;
++        drmAuxBusInfoPtr aux;
+         drmUsbBusInfoPtr usb;
+         drmPlatformBusInfoPtr platform;
+@@ -890,4 +899,5 @@ typedef struct _drmDevice {
+     union {
+         drmPciDeviceInfoPtr pci;
++        drmPciDeviceInfoPtr aux; /* metadata of the backing PCI device */
+         drmUsbDeviceInfoPtr usb;
+         drmPlatformDeviceInfoPtr platform;
