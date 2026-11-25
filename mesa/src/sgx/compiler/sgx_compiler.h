@@ -184,7 +184,7 @@ struct sgx_varyings {
 
 /* where the driver puts what the program reads (the USP's lists, decoded) */
 #define SGX_SLOT_NONE     0xffff
-/* constant numbers: uniforms from 0, the driver's own above them, from 2024
+/* constant numbers: uniforms from 0, the driver's own above them, from 2008
  * (docs/GL3.md) */
 #define SGX_MAX_CONST_K   2304
 #define SGX_MAX_CONST_MAP (SGX_MAX_CONST_K + 32) /* every constant and literal */

@@ -605,7 +605,7 @@ Runs 4 and 5 (the second CE5300 board, 2026-11-12; `docs/log/entries/2026-11-12-
       64 KiB, as in most drivers.
   - The one fail is `minmax`: GL 3.x's 1024 fragment uniform components,
     where the default uniforms give 508 (128 vec4, less st's alpha-test
-    slot). Not a block limit. The driver's constants are numbered from 2024
+    slot). Not a block limit. The driver's constants are numbered from 2008
     now (below), so more default uniforms need only the cap and the memory
     block's windows.
   - The default path with this in (run 23): dEQP 78 F / 16637 P and zs, ms,
@@ -797,8 +797,8 @@ Agreed with the compiler (2026-11-11):
   sampler's filter or wrap; the compiler marks those samples.
 - **Driver constants**, numbered above every uniform (a uniform is its
   dword in constant buffer 0; a vertex program has 384 + 9 vec4, 1572
-  dwords) and under `SGX_MAX_CONST_K` = 2304: 2024 + 2u unit u's level-0
-  width and height as floats (`SGX_K_TEXSIZE`, units 0-7); 2040
+  dwords) and under `SGX_MAX_CONST_K` = 2304: 2008 + 2u unit u's level-0
+  width and height as floats (`SGX_K_TEXSIZE`, units 0-15); 2040
   gl_InstanceID as a float (`SGX_K_INSTANCE`); 2048 + 3u the base level's
   width, height and depth of unit u (0-15); 2096 gl_InstanceID; 2104 + n
   UBO n's GPU address (`ubo_base_k`, up to 12); 2120 + u unit u's level

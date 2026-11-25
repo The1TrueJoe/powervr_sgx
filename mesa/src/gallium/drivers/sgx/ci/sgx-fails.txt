@@ -95,3 +95,8 @@ dEQP-GLES2.functional.flush_finish.flush_wait,Warn
 dEQP-GLES2.functional.rasterization.interpolation.basic.lines,Warn
 dEQP-GLES2.functional.rasterization.interpolation.projected.lines,Warn
 dEQP-GLES2.functional.rasterization.interpolation.projected.lines_wide,Warn
+
+# 15 samplers and many fragment uniforms in structs: within dEQP's own count of the fragment
+# uniform vectors, but the link fails with "Too many fragment shader default uniform block
+# components" (the 128 vec4 limit); skipped while there were 8 texture units
+dEQP-GLES2.functional.uniform_api.random.23,Fail
