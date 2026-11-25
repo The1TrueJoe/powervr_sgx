@@ -7,7 +7,7 @@
 #
 #   build.sh KERNDIR OUTDIR VERSION [FIRMWARE]
 #
-# KERNDIR is m2-drm's powervr-sgx-cedarview artifact (bzImage, modroot/, the
+# KERNDIR is dev's powervr-sgx-cedarview artifact (bzImage, modroot/, the
 # static uAPI tests). FIRMWARE, when given, is an OPEN microkernel image
 # (sgx545_ukernel.bin), and a secure-mode one (features 2): the Cedarview
 # kernel has no DDK compatibility. Never Intel's. Needs mmdebstrap,

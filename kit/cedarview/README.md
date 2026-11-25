@@ -6,7 +6,7 @@ side is [docs/TESTING-CEDARVIEW.md](../../docs/TESTING-CEDARVIEW.md).
 
 | file | what |
 |---|---|
-| `build.sh KERNDIR OUTDIR VERSION [FIRMWARE]` | the image, as root on a Linux runner: Debian bookworm minbase (mmdebstrap) as a squashfs root, m2-drm's `powervr-sgx-cedarview` kernel and modules, GRUB for BIOS, x86_64 EFI and i386 EFI |
+| `build.sh KERNDIR OUTDIR VERSION [FIRMWARE]` | the image, as root on a Linux runner: Debian bookworm minbase (mmdebstrap) as a squashfs root, dev's `powervr-sgx-cedarview` kernel and modules, GRUB for BIOS, x86_64 EFI and i386 EFI |
 | `kit-init` | PID 1: tmpfs for everything writable, other disks read-only, then `kit-run`, then a shell or power off |
 | `kit-protect` | `blockdev --setro` on every block device but the stick; run at boot and before each step |
 | `kit-stick` | the stick's disk, found by the image's fixed MBR disk id |
