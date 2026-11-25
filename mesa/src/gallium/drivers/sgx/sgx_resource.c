@@ -786,8 +786,11 @@ sgx_resource_target(struct sgx_screen *screen, struct sgx_resource *res,
       t->stride = twiddled ? w : align(w, 8);
       t->t1_layout = twiddled ? 0 : 3;
       /* F32 words (an R32 texture): rows of 32, strided, as it's sampled
-       * (sgx_tex_words) */
-      if (sgx_tex_word32(res->base.format)) {
+       * (sgx_tex_words); a word chain's level as an RGBA8 one's, its words
+       * loaded back through 0x0c (sgx_tex_word_chain) */
+      if (sgx_tex_word_chain(&res->base))
+         t->t1_format = 0x0c;
+      else if (sgx_tex_word32(res->base.format)) {
          t->stride = align(w, 32);
          t->t1_layout = SGX_TEXSTATE_LAYOUT_STRIDED;
       }

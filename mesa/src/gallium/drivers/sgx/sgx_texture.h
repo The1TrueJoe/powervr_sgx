@@ -22,6 +22,7 @@ bool sgx_tex_bgra(enum pipe_format format);
 bool sgx_tex_depth(enum pipe_format format);
 unsigned sgx_tex_raw32(enum pipe_format format);
 bool sgx_tex_word32(enum pipe_format format);
+bool sgx_tex_word_chain(const struct pipe_resource *prsc);
 bool sgx_tex_f32_conv(enum pipe_format format);
 bool sgx_tex_float_planes(enum pipe_format format);
 bool sgx_tex_snorm(enum pipe_format format);

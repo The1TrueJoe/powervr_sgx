@@ -2418,7 +2418,8 @@ tex_key_of(const nir_shader *nir, uint32_t dep_lod,
          k->snorm |= 1u << unit;
       /* a strided F32 texture's REPEAT / MIRRORED_REPEAT axes
        * (lower_word32_wrap) */
-      if (sgx_tex_word32(v->texture->format) && samplers[unit] && unit < 16) {
+      if (sgx_tex_word32(v->texture->format) &&
+          !sgx_tex_word_chain(v->texture) && samplers[unit] && unit < 16) {
          const struct pipe_sampler_state *ss = samplers[unit];
          unsigned w[2] = {ss->wrap_s, ss->wrap_t};
 

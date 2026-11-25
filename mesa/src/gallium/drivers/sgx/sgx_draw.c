@@ -1159,7 +1159,8 @@ fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
          const struct pipe_sampler_view *view =
             stage_views(ctx, stage)[k->k - SGX_K_LEVELS];
 
-         word = !view || sgx_tex_word32(view->format)
+         word = !view || (sgx_tex_word32(view->format) &&
+                          !sgx_tex_word_chain(view->texture))
                    ? 1
                    : view->u.tex.last_level - view->u.tex.first_level + 1;
          raw = true;
