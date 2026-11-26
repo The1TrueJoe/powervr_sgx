@@ -21,7 +21,7 @@
 #include "sgx_screen.h"
 #include "sgx_texture.h"
 
-uint32_t sgx_drv_debug;
+uint64_t sgx_drv_debug;
 
 static const struct debug_named_value sgx_drv_debug_options[] = {
    {"frame", SGX_DEBUG_FRAME, "print every frame the winsys submits"},
@@ -72,6 +72,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "vertex texture fetch: 16 sampler units in the vertex stage (with glsl130 only, as the compiler samples in a vertex program with native integers): until it passes on a board"},
    {"tex3d", SGX_DEBUG_TEX3D,
     "3D textures up to 256 on a side, in the volume layout (docs/TEX.md section 14): until piglit and dEQP pass them"},
+   {"tbo", SGX_DEBUG_TBO,
+    "buffer textures (ARB_texture_buffer_object; with glsl130 only, as texelFetch takes an integer): each texel read with ld from the buffer's device copy (sgx_program.c lower_tbo), until they pass on a board"},
    {"noocclusion", SGX_DEBUG_NO_OCCLUSION,
     "no occlusion queries: Mesa's stand-ins, which count 0 (0.2.3 and earlier; ARB_occlusion_query stays, with no counter bits)"},
    {"flushrt", SGX_DEBUG_FLUSH_RT,
@@ -141,6 +143,15 @@ sgx_vtf(void)
 {
    return (sgx_drv_debug & (SGX_DEBUG_VTF | SGX_DEBUG_GLSL130)) ==
           (SGX_DEBUG_VTF | SGX_DEBUG_GLSL130);
+}
+
+/* buffer textures: SGX_DEBUG=tbo, and only with the native integers (a
+ * texelFetch's integer coordinate, the unpacking's integer ops) */
+bool
+sgx_tbo(void)
+{
+   return (sgx_drv_debug & (SGX_DEBUG_TBO | SGX_DEBUG_GLSL130)) ==
+          (SGX_DEBUG_TBO | SGX_DEBUG_GLSL130);
 }
 
 static void
@@ -260,6 +271,16 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    if (sgx_ubos())
       caps->max_constant_buffer_size = SGX_UBO_BYTES;
    caps->constant_buffer_offset_alignment = 16;
+   /* buffer textures (SGX_DEBUG=tbo): texelFetch is ld from the buffer's
+    * device copy, every format unpacked in the shader (lower_tbo), so any
+    * swizzle (not rgba_only, which compatibility contexts refuse).  An
+    * offset of 16 keeps the texels' words aligned. 2^27 texels: GL asks for
+    * 65536, and a texel's byte offset stays in 32 bits */
+   if (sgx_tbo()) {
+      caps->texture_buffer_objects = true;
+      caps->max_texel_buffer_elements = SGX_TBO_MAX_TEXELS;
+      caps->texture_buffer_offset_alignment = 16;
+   }
    /* occlusion queries, ARB_occlusion_query2, EXT_occlusion_query_boolean
     * (sgx_state.c).  Without the cap Mesa still exposes ARB_occlusion_query
     * and answers every query 0 itself, and an engine culls what it sees */
@@ -336,6 +357,14 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
                         enum pipe_texture_target target, unsigned sample_count,
                         unsigned storage_sample_count, unsigned usage)
 {
+   /* a buffer texture's format: unpacked in the shader (lower_tbo) */
+   if (target == PIPE_BUFFER && (usage & PIPE_BIND_SAMPLER_VIEW)) {
+      if (!sgx_tbo() || !sgx_tbo_format(format))
+         return false;
+      usage &= ~PIPE_BIND_SAMPLER_VIEW;
+      if (!usage)
+         return true;
+   }
    if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
       return false;
    /* 4x: 2x2 samples a pixel, resolved by the PBE as each tile is stored

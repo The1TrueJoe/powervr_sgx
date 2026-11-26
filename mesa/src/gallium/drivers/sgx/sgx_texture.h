@@ -30,6 +30,12 @@ bool sgx_tex_volume(const struct pipe_resource *prsc);
 bool sgx_tex_twiddled(const struct pipe_resource *prsc, unsigned w, unsigned h);
 void sgx_tex_set_tail(struct sgx_resource *res, unsigned l);
 
+/* a buffer texture's format (GL_ARB_texture_buffer_object): a plain one of
+ * 8-, 16- or 32-bit channels that the shader unpacks from the texel's words
+ * (sgx_program.c lower_tbo); and a buffer texture's size limit in texels */
+bool sgx_tbo_format(enum pipe_format format);
+#define SGX_TBO_MAX_TEXELS (1u << 27)
+
 /* the device layout of a texture: size in bytes, and each level and face's
  * offset */
 size_t sgx_tex_size(const struct pipe_resource *prsc);

@@ -25,6 +25,40 @@
 
 #define TILE 16u
 
+bool
+sgx_tbo_format(enum pipe_format format)
+{
+   const struct util_format_description *d = util_format_description(format);
+   unsigned bits = 0;
+
+   if (!d || d->layout != UTIL_FORMAT_LAYOUT_PLAIN || d->is_mixed ||
+       util_format_is_depth_or_stencil(format) || d->block.width != 1 ||
+       d->block.height != 1)
+      return false;
+   /* a texel of 1, 2, 4, 8, 12 or 16 bytes, a channel inside one word */
+   if (d->block.bits != 8 && d->block.bits != 16 && d->block.bits % 32)
+      return false;
+   if (d->block.bits > 128)
+      return false;
+   for (unsigned c = 0; c < d->nr_channels; c++) {
+      const struct util_format_channel_description *ch = &d->channel[c];
+
+      if (ch->type == UTIL_FORMAT_TYPE_VOID)
+         continue;
+      if ((ch->size != 8 && ch->size != 16 && ch->size != 32) ||
+          ch->shift % ch->size)
+         return false;
+      /* fixed point and scaled integers aren't buffer formats */
+      if (ch->type == UTIL_FORMAT_TYPE_FIXED ||
+          (ch->type == UTIL_FORMAT_TYPE_FLOAT && ch->size == 8) ||
+          (ch->type != UTIL_FORMAT_TYPE_FLOAT && !ch->normalized &&
+           !ch->pure_integer))
+         return false;
+      bits += ch->size;
+   }
+   return bits && !util_format_is_srgb(format);
+}
+
 unsigned
 sgx_tex_format(enum pipe_format format)
 {

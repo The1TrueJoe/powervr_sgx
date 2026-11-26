@@ -69,10 +69,14 @@ struct sgx_const {
 /* unit u's level count (textureQueryLevels, and the compiler's own level
  * choice for word-by-word fetches) at SGX_K_LEVELS + u, a raw integer */
 #define SGX_K_LEVELS       2120
+/* unit u's buffer texture: its first texel's GPU address at SGX_K_TBO + u, a
+ * raw integer (sgx_program.c lower_tbo; its size in texels is SGX_K_SIZE +
+ * 3u's width) */
+#define SGX_K_TBO          2368
 
 static_assert(SGX_MAX_VS_CONST_DWORDS <= SGX_K_TEXSIZE,
               "the driver's constants are past every uniform");
-static_assert(SGX_K_LEVELS + SGX_K_SIZE_UNITS <= SGX_MAX_CONST_K,
+static_assert(SGX_K_TBO + SGX_K_SIZE_UNITS <= SGX_MAX_CONST_K,
               "and under the compiler's limit");
 
 /* a fragment program's dependent samples, and their texture state blocks
@@ -188,6 +192,9 @@ struct sgx_pipe_shader {
     * mipmapped view and sampler: this variant's samples there take their
     * LOD from the coordinate's derivatives (lower_dep_lod) */
    uint32_t dep_lod_units, dep_mip;
+   /* the format of the buffer texture bound to each unit, which texelFetch
+    * unpacks (lower_tbo); PIPE_FORMAT_NONE: none, which reads 0 */
+   uint16_t buf_fmt[PIPE_MAX_SAMPLERS];
    struct sgx_pipe_shader *variants_srgb[8];
    unsigned next_variant_srgb;
 };
@@ -323,6 +330,12 @@ struct sgx_context {
    struct pipe_constant_buffer ubos[MESA_SHADER_STAGES][SGX_MAX_UBOS];
    struct sgxws_ubo draw_ubos[SGXWS_MAX_UBOS];
    unsigned n_draw_ubos;
+   /* the buffers a draw reads as buffer textures (fill_consts): each one's
+    * device copy marked with the kick that reads it once the draw is in; a
+    * device copy that can't be made skips the draw (tbo_failed) */
+   struct sgx_resource *draw_tbos[2 * PIPE_MAX_SAMPLERS];
+   unsigned n_draw_tbos;
+   bool tbo_failed;
    struct pipe_sampler_state *samplers[PIPE_MAX_SAMPLERS]; /* fragment */
    struct pipe_sampler_view *views[PIPE_MAX_SHADER_SAMPLER_VIEWS]; /* fragment */
    /* the vertex stage's (SGX_DEBUG=vtf: sgx_vtf) */
