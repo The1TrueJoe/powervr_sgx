@@ -466,6 +466,7 @@ static int probe_kpage_init(struct pvrsgx_device *sdev)
 	for (u32 i = 0; i < SGX_MMU_PAGE_SIZE / 4; i++)
 		((u32 *)km->cpu)[i] = probe_kpage & 1 ? probe_kpage_fill : PROBE_KPAGE_WORD(i);
 	sdev->fw.probe_kpage_fill = probe_kpage & 1;
+	sdev->fw.probe_kpage_val = probe_kpage_fill;
 	drm_warn(&sdev->base, "probe: page at 0x%08x, %s 0x%08x\n", km->dev_addr,
 		 probe_kpage & 1 ? "every word" : "word 0", ((u32 *)km->cpu)[0]);
 	return 0;

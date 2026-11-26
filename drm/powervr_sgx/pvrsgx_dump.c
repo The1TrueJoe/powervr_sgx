@@ -61,12 +61,11 @@ static void dump_ukregs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 				       sgx_rd(sdev, pvrsgx_probe_read[i]));
 	if (sdev->fw.probe_kpage.pages) {
 		const u32 *w = sdev->fw.probe_kpage.cpu;
-		u32 fill = w[SGX_MMU_PAGE_SIZE / 4 - 1];
 		int n = 0;
 
-		/* A filled page is judged by its last word, which the probes so far never moved. */
 		for (u32 i = 0; i < SGX_MMU_PAGE_SIZE / 4; i++)
-			if (w[i] != (sdev->fw.probe_kpage_fill ? fill : PROBE_KPAGE_WORD(i)) && n++ < 64)
+			if (w[i] != (sdev->fw.probe_kpage_fill ? sdev->fw.probe_kpage_val :
+				     PROBE_KPAGE_WORD(i)) && n++ < 64)
 				seq_buf_printf(sb, "PROBE_KPAGE          0x%08x 0x%08x\n",
 					       sdev->fw.probe_kpage.dev_addr + i * 4, w[i]);
 		seq_buf_printf(sb, "PROBE_KPAGE          %d words changed\n", n);
