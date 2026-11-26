@@ -170,13 +170,13 @@ Formats wider than 32 bits, and more than one draw buffer, need either:
 | integer textures (`EXT_texture_integer`) | no integer sampler format known | 8-bit: sample the unorm format (0x0d, 0x1a, 0x1b) NEAREST and scale by 255 in the shader; 32-bit one-channel: 0x12 if it returns the stored bits unchanged (**H2**); wider, or as a general path: `texelFetch` through `ld` from the texel's address. Integer textures are never filtered, so NEAREST is all GL asks | TEX.md §1 (formats), §15 (0x12); ISA.md `ld` (capture); the ICD doesn't list the extension | medium |
 | integer render targets | — | ≤ 32 bits per pixel by shader packing; no blending, no dither | STATE.md §4 | high (≤ 32 bit) |
 | `ARB_texture_rg` (R8, RG8, R16F, RG16F, R32F, RG32F) | R8 and RG8 as L8 (0x1a) and LA88 (0x1b) with a swizzle | sampler-view swizzle (already done in the shader, `sgx_fs_for`); render R8/RG8 by packing; the float ones as above | TEX.md §1 (hardware, open driver: 0x1a, 0x1b) | high (R8, RG8) |
-| RGTC (`ARB_texture_compression_rgtc`) | none known | st decompresses to R8/RG8 on upload when the screen refuses RGTC (`st_format.c`); needs only R8 and RG8 | Mesa | high |
+| RGTC (`ARB_texture_compression_rgtc`) | none known | done (`SGX_DEBUG=glsl130`): st decompresses to R8 / RG8 and their SNORM forms on upload, as the screen refuses RGTC (`st_format.c`) | `mesa/tests/sgx_rgtc.c` on a CE5300 board | done (glsl130) |
 | sRGB textures and framebuffers (`EXT_framebuffer_sRGB`) | sRGB decode in the shader; no TPU sRGB format known; the PBE writes o0 raw. Rendering (`SGX_DEBUG=glsl130`): the program encodes its colour (`lower_srgb_output`); blended, it reads the tile's word (o0, `rt_packed`), decodes it, blends in linear and packs the word itself, in place of the sop2 epilogue, in a translucent pass; clears encoded; `dest_surface_srgb_control` | sampling: as today (M10); rendering: done, `mesa/tests/sgx_srgb.c` exact on Clover Trail (clear, opaque, every factor and equation, constant colour, colour mask, discard, MRT) | UPSTREAM-READINESS M10 (hardware, open driver); neither list has it | done (glsl130) |
 | `EXT_packed_float` (R11G11B10F), `EXT_texture_shared_exponent` (RGB9E5) | no sampler format known | done (glsl130): sampled as F32 planes converted on upload; R11G11B10F also rendered, a pass a plane as RGBA32 (not blended), quantized on readback | `mesa/tests/sgx_es3fmt.c` | done (glsl130) |
 | `ARB_depth_buffer_float` (D32F, D32F_S8) | the ISP and ZLS keep float32 depth; it samples as F32 (0x12) | done (glsl130): Z32_FLOAT and Z32_FLOAT_S8X24_UINT as depth/stencil formats; depth and stencil tests as D24S8 | `mesa/tests/sgx_es3fmt.c` | done (glsl130) |
 | texture arrays (`EXT_texture_array`, 256 layers listed) | no layer field known in T0-T3 | one texture per layer at a layer stride; the shader adds `layer × stride` to the base address and samples with the dependent form, whose texture state comes from registers (ISA.md, "dependent: smp template"; hardware, open stack hwt_smp). Needs a compiler path (gl3-compiler). 1D arrays as 2D arrays of height 1 | TEX.md §5 (T2 = base); ISA.md (dependent smp with state in SA: hardware, A/B) | medium |
 | transform feedback (`EXT_transform_feedback`; ICD 4 × 4 separate, 64 interleaved) | no stream-out unit known | the vertex program stores its outputs with `st` at `vertex index × stride`; the driver unrolls strips, fans and indices on the CPU (it gathers them already) so the index is the output slot; counts and `PRIMITIVES_WRITTEN` are known on the CPU. Needs `st` to a driver address from a vertex program (**H4**). Fallback: gallium's `draw` module runs the vertex shader on the CPU and writes the buffers | ISA.md `ld`/`st` (corpus `st.l.d`); the ICD's small limits fit a store-based path | medium |
-| `NV_conditional_render` | — | `render_condition` waits on the query on the CPU and skips draws (the spec's NO_WAIT modes may draw) | needs occlusion queries | depends on queries |
+| `NV_conditional_render`, `ARB_conditional_render_inverted` | no predicate known in the VDM or ISP | done: `render_condition` reads the query's result on the CPU before each draw, clear and blit that honours it. The wait modes flush the query's frame and wait; the no-wait modes draw while the result isn't in, as the spec allows | piglit `nv_conditional_render` (13), `mesa/tests/sgx_condrender.c` (64 cases), a CE5300 board | done |
 | occlusion queries (GL 1.5, `SAMPLES_PASSED`) | **listed** (ICD, DDK GL: `ARB_occlusion_query`); no capture, no register known | **H5**. `ANY_SAMPLES_PASSED`: a store of 1 from every pixel shaded, in a translucent pass, which shades in order ("Status"; `SGX_DEBUG=noocclusion` turns them off). A count needs atomics or a counter in the hardware: `SAMPLES_PASSED` gets the framebuffer's samples when any passed | hardware, open driver (the boolean) | high (the boolean); low (the count) |
 | `ARB_shader_texture_lod` | `smp .lod` and `.grad` forms exist | done: `fragment_shader_texture_lod`; a 2D textureGrad is smp's gradient form, the others an explicit LOD (`sgx_txd_lowered`) | `mesa/tests/sgx_es3fmt.c` 1a/1b | done |
 | `ARB_map_buffer_range`, `ARB_framebuffer_object` | — | gallium generic; FBO needs mixed attachment sizes, which the render target handles by its own size | — | high |
@@ -217,14 +217,14 @@ rotation of each triangle's vertices on the CPU before step 2.
 
 | feature | hardware | the driver's path | evidence | confidence |
 |---|---|---|---|---|
-| GLSL 1.40 | — | compiler | — | compiler |
+| GLSL 1.40 | — | done (`SGX_DEBUG=glsl130,ubo,tbo`): the driver reports 1.40 with uniform blocks and buffer textures on; the compiler needed nothing more. See "Status" | piglit `glsl-1.40` ("Status") | done (ubo, tbo) |
 | instancing, `gl_InstanceID` (`ARB_draw_instanced`) | the PDS vertex program's `in1` is the instance index (**unconfirmed**); no instance count is known in the VDM draw words | one VDM draw per instance, each with its own small PDS vertex program that writes the instance number with DOUTA into the primary attribute the compiler reads `gl_InstanceID` from. Native instancing, if H7 finds the count, replaces it | PDS.md (DOUTA: hardware; `in1`: unconfirmed); STATE.md §2 VDM draw | high (per-instance draws) |
 | instance divisors (`ARB_instanced_arrays`, 3.3, but cheap here) | PDS has the divisor's reciprocal sequence (capture) | per-instance draws: the per-instance stream's base moves on the CPU | PDS.md | high |
 | uniform buffers (`ARB_uniform_buffer_object`, 16 KiB, 12 per stage) | `ld.a.d` from a driver address: the state-emit programs the driver runs already use it | the driver puts the address of each block's copy in the frame in the constant the compiler loads from; the compiler loads with `ld.a.d` (in, `SGX_DEBUG=ubo,glsl130`: see "Status"). Small UBOs could be copied into SA, but 16 KiB doesn't fit | STATE.md §2 (the state-emit program's `ld.a.d`: hardware, open driver); `sgxws_const_mem` already loads constants that don't fit in SA | high |
 | `EXT_texture_snorm` | no signed sampler format known | done (glsl130): R8 / RG8 / RGBA8 snorm stored offset binary (each byte XOR 0x80) in the RGBA8 format, the TPU filtering it right (the map is linear), decoded in the shader after the view swizzle, max(v·255/127 − 128/127, −1) (`lower_snorm_texel`) | `mesa/tests/sgx_es3fmt.c` 8a-8d | done (glsl130) |
 | primitive restart (`NV_primitive_restart`) | none known | split on the CPU (`util_draw_vbo_without_prim_restart`); the driver already reads indices on the CPU | `sgx_draw.c` | high |
 | rectangle textures (`NV_texture_rectangle`) | NPOT linear layout (T1 layout 3) | unnormalized coordinates scaled in NIR (`nir_lower_tex` `lower_rect`) | TEX.md §1 (hardware) | high |
-| texture buffer objects (3.1 core; Mesa doesn't gate on them) | — | a linear 1D texture of the buffer, `texelFetch` through `ld` | ISA.md `ld` | medium |
+| texture buffer objects (3.1 core; Mesa doesn't gate on them) | `ld.a.d` from a computed address reads a buffer's device copy | done (`SGX_DEBUG=tbo,glsl130`): `texelFetch` is `ld.a.d` from the buffer's vertex-heap copy, whose address the driver puts in constant `SGX_K_TBO` + u; the program unpacks the texel's channels for the view's format and swizzles them (`lower_tbo`), and a texel past the end reads 0. See "Status" | ISA.md "Address" (hardware, `mesa/tests/sgx_tbo.c`) | done (tbo) |
 | 16 vertex texture units | the vertex program samples with `smp` (h8-9 = 2) | the compiler emits vertex samples (dependent `smp`); the driver's vertex sampler views and states, their DOUTT words in the vertex program's SA, and the size constants (lower_txs_int) for vertex units (in, `SGX_DEBUG=vtf,glsl130`: see "Status") | ISA.md "Vertex texture fetch" (corpus; hardware, open stack: `mesa/tests/sgx_vtf.c`); listed (ICD: 16) | high |
 
 ## GL 3.2
@@ -621,7 +621,7 @@ Runs 4 and 5 (the second CE5300 board, 2026-11-12; `docs/log/entries/2026-11-12-
       64 KiB, as in most drivers.
   - The one fail is `minmax`: GL 3.x's 1024 fragment uniform components,
     where the default uniforms give 508 (128 vec4, less st's alpha-test
-    slot). Not a block limit. The driver's constants are numbered from 2024
+    slot). Not a block limit. The driver's constants are numbered from 2008
     now (below), so more default uniforms need only the cap and the memory
     block's windows.
   - The default path with this in (run 23): dEQP 78 F / 16637 P and zs, ms,
@@ -785,7 +785,80 @@ section 14; a CE5300 board, 2026-11-20):
   `GL_QUERY_COUNTER_BITS` is 0, and the test then doesn't check the counts.
   Every check that wants 0 gets 0 (2026-11-24).
   `occlusion_query_conform@GetObjivAval_multi2` fails with the cap and
-  without. `nv_conditional_render` stays off.
+  without.
+- Conditional render (`NV_conditional_render`,
+  `ARB_conditional_render_inverted`) on either query: the driver reads the
+  result on the CPU (`sgx_render_condition_passes`), as llvmpipe does, so it
+  doesn't depend on how the count is made. piglit's 13 `nv_conditional_render`
+  tests go from skip to pass; `mesa/tests/sgx_condrender.c` passes 64 of 64
+  (both targets, all 8 modes, visible and hidden, a quad and a glClear)
+  (log 2026-11-26 "Conditional render").
+
+**Buffer textures** (`SGX_DEBUG=tbo`, with `glsl130`; a CE5300 board,
+SGX545 rev 1014, 2026-11-26, `docs/log/entries/2026-11-26-0500-buffer-textures.md`):
+
+- `texelFetch` on a `samplerBuffer` is lowered in the driver (`lower_tbo`):
+  `ld.a.d` from the buffer's vertex-heap copy (`sgx_buffer_vbo`, the one
+  vertex buffers use), at the address the draw puts in constant
+  `SGX_K_TBO` + u plus the texel's byte offset. The program unpacks the
+  view's format (8-, 16- and 32-bit channels; unorm, snorm, half, float and
+  integer) and applies its swizzle. A texel past the end reads 0 and loads
+  texel 0, so nothing outside the buffer is read, and the load can be
+  hoisted out of an `if`. `textureSize` is the size in texels from the
+  native-integer block.
+- `ARB_texture_buffer_object`, `_range` and `_rgb32`: 2^27 texels, offsets
+  of 16 bytes, every GL 3.1 buffer format, and the legacy alpha, luminance
+  and intensity ones (compatibility contexts refuse `rgba_only`).
+- `mesa/tests/sgx_tbo.c`: 34 formats bit for bit, texels past the end,
+  `textureSize`, `glTexBufferRange` at an offset, a rewrite between two
+  draws of one frame, and a fetch in a vertex program: all pass.
+- piglit (`arb_texture_buffer_object`, `_range`, `ext_texture_buffer_object`,
+  at GL 3.1 / GLSL 1.40 by override): 2 pass on dev; 97 pass, 11 skip and
+  no fail with `tbo`. `data-sync` and `subdata-sync` go from fail to pass,
+  the rest from skip. The `ext_gpu_shader4` variants of `formats` skip until
+  the driver reports GLSL 1.40, and pass with it (165 pass in all).
+  `ranges` first failed: an `if` kept as a branch around the load gave its
+  result to pixels that skip it (ISA.md "Branches"), so the load is marked
+  speculatable and the `if` becomes a select.
+- dEQP-GLES2 with the default switches: the same as dev (16,636 pass, 70
+  expected fails).
+
+**GL 3.0 and 3.1 gates** (`compute_version`, read back with a program that
+prints each gate, on a CE5300 board, SGX545 rev 1014, 2026-11-26):
+
+- With `SGX_DEBUG=glsl130,ubo,vtf,tex3d` Mesa offers GL 2.1. GL 3.0 lacks
+  `ARB_color_buffer_float`, `EXT_texture_array`, `EXT_transform_feedback`
+  and `NV_conditional_render`. GL 3.1 lacks GLSL 1.40, which needs buffer
+  textures.
+- With `tbo` and `cbf` as well, every GL 3.1 gate is met. Three GL 3.0
+  gates are left, all elsewhere: texture arrays (#61), transform feedback
+  (issue #16) and conditional render.
+- `cbf` is `ARB_color_buffer_float`: the driver sets
+  `vertex_color_unclamped`, and st clamps vertex and fragment colors with
+  `fsat` in the shader when GL's clamp state asks. The driver had no clamp
+  before (it ignored the rasterizer's). Mesa turns the extension off in
+  core contexts, so GL 3.1 comes as a compatibility context.
+- Limits GL 3.x asks for that Mesa doesn't check:
+  - 1024 fragment uniform components: 508 (128 vec4);
+  - 64 varying components: 32;
+  - 256 array layers: 32 (with texture arrays);
+  - 8 draw buffers: 4 (Mesa accepts 4).
+
+  Met: 16 fragment and vertex texture units, 32 combined, 12 uniform blocks
+  a stage, 2^27 texels a buffer texture, 2048 for a rectangle texture, 8
+  clip distances.
+
+**GLSL 1.40** (`glsl130,ubo,tbo`): the driver reports 1.40, and the
+compiler needed nothing more. piglit's `glsl-1.40` at GL 3.1 by override:
+90 pass, 13 fail, 17 skip, 1 crash (dev before #58 with the same switches and
+the override: 83 pass, 14 fail). The fails are limits (`built-in constants`:
+draw buffers, fragment uniforms, varyings) and the cube `textureSize` tests,
+whose 32-texel NPOT cube maps the driver doesn't draw (PIGLIT.md, "Open bug:
+NPOT cube maps lock the 3D"); the crash is `tf-no-position` (transform
+feedback). The whole list (GL 3.0 and 3.1, buffer textures, rectangle
+textures, uniform blocks, instancing, `arb_color_buffer_float`): 649 pass, 46
+fail, 81 skip and 2 crash, against 467, 49, 114 and 2 on dev, with no test
+worse. dEQP-GLES2 with the default switches is the same as dev.
 
 Provoking vertex first waits for flat shading, which the driver doesn't do
 yet (DOUTI b25-26, STATE.md §3).
@@ -813,8 +886,8 @@ Agreed with the compiler (2026-11-11):
   sampler's filter or wrap; the compiler marks those samples.
 - **Driver constants**, numbered above every uniform (a uniform is its
   dword in constant buffer 0; a vertex program has 384 + 9 vec4, 1572
-  dwords) and under `SGX_MAX_CONST_K` = 2304: 2024 + 2u unit u's level-0
-  width and height as floats (`SGX_K_TEXSIZE`, units 0-7); 2040
+  dwords) and under `SGX_MAX_CONST_K` = 2304: 2008 + 2u unit u's level-0
+  width and height as floats (`SGX_K_TEXSIZE`, units 0-15); 2040
   gl_InstanceID as a float (`SGX_K_INSTANCE`); 2048 + 3u the base level's
   width, height and depth of unit u (0-15); 2096 gl_InstanceID; 2104 + n
   UBO n's GPU address (`ubo_base_k`, up to 12); 2120 + u unit u's level

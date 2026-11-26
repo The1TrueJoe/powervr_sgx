@@ -308,6 +308,8 @@ sgx_clear(struct pipe_context *pctx, unsigned buffers,
    unsigned zs = buffers & PIPE_CLEAR_DEPTHSTENCIL;
    bool done = false;
 
+   if (!sgx_render_condition_passes(ctx))
+      return;
    for (unsigned t = 0; t < targets; t++) {
       bool colour = buffers & (PIPE_CLEAR_COLOR0 << t);
 
@@ -1096,6 +1098,43 @@ sampled_view(struct sgx_context *ctx, unsigned bit)
    return bit >= 32 ? ctx->vs_views[bit - 32] : ctx->views[bit];
 }
 
+/* a buffer texture's size in texels (textureSize, and lower_tbo's bound) */
+static unsigned
+tbo_texels(const struct pipe_sampler_view *view)
+{
+   unsigned bpp = util_format_get_blocksize(view->format);
+   unsigned end = view->texture->width0;
+   unsigned off = MIN2(view->u.buf.offset, end);
+
+   if (!bpp || !sgx_tbo_format(view->format))
+      return 0;
+   return MIN2(MIN2(view->u.buf.size, end - off) / bpp, SGX_TBO_MAX_TEXELS);
+}
+
+/* a buffer texture's first texel in the buffer's device copy, for lower_tbo
+ * (made if need be: without one, tbo_failed skips the draw); the buffer is
+ * marked with the kick that reads it once the draw is in (sgx_draw_vbo_impl) */
+static uint32_t
+tbo_address(struct sgx_context *ctx, const struct pipe_sampler_view *view)
+{
+   struct sgx_screen *screen = sgx_screen(ctx->base.screen);
+   struct sgx_resource *res;
+   bool ok;
+
+   if (!view || view->target != PIPE_BUFFER || !tbo_texels(view))
+      return 0;
+   res = sgx_resource(view->texture);
+   simple_mtx_lock(&screen->lock);
+   ok = sgx_buffer_vbo(ctx, res, view->u.buf.offset, view->u.buf.size);
+   simple_mtx_unlock(&screen->lock);
+   if (!ok || ctx->n_draw_tbos == ARRAY_SIZE(ctx->draw_tbos)) {
+      ctx->tbo_failed = true;
+      return 0;
+   }
+   ctx->draw_tbos[ctx->n_draw_tbos++] = res;
+   return res->vbo.va + view->u.buf.offset;
+}
+
 /* a compiled shader's constants: sa[base + slot] = constant buffer 0 float k */
 static void
 fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
@@ -1172,7 +1211,9 @@ fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
          const struct pipe_sampler_view *view = stage_views(ctx, stage)[u];
          const struct pipe_resource *t = view ? view->texture : NULL;
 
-         word = !t ? 1
+         word = t && view->target == PIPE_BUFFER
+                   ? (c ? 1 : tbo_texels(view))
+                : !t ? 1
                 : c == 0 ? u_minify(t->width0, view->u.tex.first_level)
                 : c == 1 ? (t->target == PIPE_TEXTURE_1D_ARRAY
                                ? view->u.tex.last_layer -
@@ -1181,6 +1222,9 @@ fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
                 : t->target == PIPE_TEXTURE_3D
                    ? u_minify(t->depth0, view->u.tex.first_level)
                    : view->u.tex.last_layer - view->u.tex.first_layer + 1;
+         raw = true;
+      } else if (k->k >= SGX_K_TBO && k->k < SGX_K_TBO + SGX_K_SIZE_UNITS) {
+         word = tbo_address(ctx, stage_views(ctx, stage)[k->k - SGX_K_TBO]);
          raw = true;
       } else if (stage == MESA_SHADER_VERTEX && k->k == SGX_K_INSTANCE_INT) {
          word = ctx->instance;
@@ -1972,6 +2016,9 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       for (unsigned unit = 0; unit < PIPE_MAX_SAMPLERS; unit++) {
          struct pipe_sampler_view *view = used >> unit & 1 ? views[unit] : NULL;
 
+         /* (a buffer texture is read by loads: lower_tbo) */
+         if (view && view->target == PIPE_BUFFER)
+            continue;
          /* stopgap: no layout is known for NPOT cube faces, and sampling one
           * of 16 texels or more, or its mipmaps, locks the 3D (piglit cubemap
           * npot: a recovery a draw) */
@@ -2107,6 +2154,8 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       d.vs = &vs->prog;
       ctx->n_draw_ubos = 0;
       d.ubos = ctx->draw_ubos;
+      ctx->n_draw_tbos = 0;
+      ctx->tbo_failed = false;
       if (vs->mem_dwords)
          mem_consts(ctx, MESA_SHADER_VERTEX, vs, vsc, 0, &d.vs_mem);
       else
@@ -2117,6 +2166,8 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
                       &sampled, 32))
          return;
       d.n_ubos = ctx->n_draw_ubos;
+      if (ctx->tbo_failed)
+         SKIP("no device copy of a buffer texture");
       d.vs_consts = vsc;
       n_fetch = ctx->vs->n_attribs;
    } else if (ctx->vs->kind != SGX_SHADER_VS_POSITION) {
@@ -2146,12 +2197,16 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       if (!d.ubos) {
          ctx->n_draw_ubos = 0;
          d.ubos = ctx->draw_ubos;
+         ctx->n_draw_tbos = 0;
+         ctx->tbo_failed = false;
       }
       if (fs->mem_dwords)
          mem_consts(ctx, MESA_SHADER_FRAGMENT, fs, fsk, 9, &d.fs_mem);
       else
          fill_consts(ctx, MESA_SHADER_FRAGMENT, fs, fsk, 9, NULL);
       d.n_ubos = ctx->n_draw_ubos;
+      if (ctx->tbo_failed)
+         SKIP("no device copy of a buffer texture");
       /* a constant-colour blend reads the blend colour, packed BGRA8, in sa2 */
       if (blend && blend->blend && blend->constant) {
          const float *c = ctx->blend_color.color;
@@ -2522,6 +2577,9 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * the next when its rings are full or the depth bias changes.  Marked
     * again with the kick the last draw is in, so a write to one waits for
     * (or goes around) the kick that really reads it. */
+   /* (and the buffers it reads as buffer textures, as zc_draw_resident's) */
+   for (unsigned i = 0; i < ctx->n_draw_tbos; i++)
+      ctx->draw_tbos[i]->vbo_seq = sgxws_next_seq(ctx->hw);
    if (ctx->recording) {
       uint32_t seq = sgxws_next_seq(ctx->hw);
 
@@ -2553,7 +2611,7 @@ sgx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
               ? util_format_short_name(ctx->framebuffer.cbufs[0].format)
               : "-",
            ctx->framebuffer.width, ctx->framebuffer.height);
-   if (!info->instance_count)
+   if (!info->instance_count || !sgx_render_condition_passes(ctx))
       return;
    /* Primitive restart, split on the CPU: no restart index is known in the
     * VDM draw words (docs/GL3.md), and the indices are read here anyway.
@@ -2573,12 +2631,14 @@ sgx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    /* (up to the highest unit bound, not every slot: a draw looked at all
     * 128 of each, 15% of this function's own time in Quake 3) */
    for (unsigned i = 0; i < ctx->n_views; i++) {
-      if (ctx->views[i] && ctx->views[i]->texture)
+      if (ctx->views[i] && ctx->views[i]->texture &&
+          ctx->views[i]->target != PIPE_BUFFER)
          sgx_resource_zls_for_sampling(ctx,
                                        sgx_resource(ctx->views[i]->texture));
    }
    for (unsigned i = 0; i < ctx->n_vs_views; i++) {
-      if (ctx->vs_views[i] && ctx->vs_views[i]->texture)
+      if (ctx->vs_views[i] && ctx->vs_views[i]->texture &&
+          ctx->vs_views[i]->target != PIPE_BUFFER)
          sgx_resource_zls_for_sampling(ctx,
                                        sgx_resource(ctx->vs_views[i]->texture));
    }

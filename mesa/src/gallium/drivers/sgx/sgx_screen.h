@@ -44,9 +44,12 @@
 #define SGX_DEBUG_TEX3D              (1 << 27)
 #define SGX_DEBUG_NO_OCCLUSION       (1 << 28)
 #define SGX_DEBUG_CPU_RESOLVE        (1 << 29)
+#define SGX_DEBUG_TBO                (1ull << 32)
+#define SGX_DEBUG_CBF                (1ull << 33)
 
-extern uint32_t sgx_drv_debug;
+extern uint64_t sgx_drv_debug;
 bool sgx_vtf(void);
+bool sgx_tbo(void);
 /* SGX_DUMP_CODE=dir: every compiled program's instructions written there */
 const char *sgx_dump_code_dir(void);
 

@@ -2364,6 +2364,31 @@ TEST_F(sgx_compile_test, vertex_ubo_loads)
    EXPECT_TRUE(k0 && k1);
 }
 
+/* a load from a 32-bit address (the driver's buffer textures: an address
+ * from a constant plus the texel's offset): ld from the address less one
+ * word, #0 onwards, then wdf */
+TEST_F(sgx_compile_test, vertex_global_loads)
+{
+   native = true;
+   int_vertex([](nir_builder *b, nir_def *x, nir_def *y) {
+      nir_def *base = nir_load_uniform(b, 1, 32, nir_imm_int(b, 0),
+                                       .base = 2368, .range = 1,
+                                       .dest_type = nir_type_int32);
+      nir_def *addr = nir_iadd(b, base, nir_imul_imm(b, nir_channel(b, x, 0), 16));
+      nir_def *w = nir_load_global_constant(b, 4, 32, addr, .align_mul = 4);
+      return nir_iadd(b, w, y);
+   });
+   ASSERT_TRUE(compile()) << out.log;
+   expect_decodes();
+   EXPECT_TRUE(has("ld.a.d")) << disasm();
+   EXPECT_TRUE(has(", #3 ")) << disasm(); /* the fourth word */
+   EXPECT_TRUE(has("wdf")) << disasm();
+   bool k = false;
+   for (unsigned n = 0; n < out.n_consts; n++)
+      k |= out.consts[n].k == 2368;
+   EXPECT_TRUE(k);
+}
+
 /* vertex texture fetch: a dependent smp at LOD 0 (c48), as the vendor
  * compiler's vertex reads */
 TEST_F(sgx_compile_test, vertex_texture_fetch)

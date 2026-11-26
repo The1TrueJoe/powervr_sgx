@@ -21,7 +21,7 @@
 #include "sgx_screen.h"
 #include "sgx_texture.h"
 
-uint32_t sgx_drv_debug;
+uint64_t sgx_drv_debug;
 
 static const struct debug_named_value sgx_drv_debug_options[] = {
    {"frame", SGX_DEBUG_FRAME, "print every frame the winsys submits"},
@@ -72,6 +72,10 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "vertex texture fetch: 16 sampler units in the vertex stage (with glsl130 only, as the compiler samples in a vertex program with native integers): until it passes on a board"},
    {"tex3d", SGX_DEBUG_TEX3D,
     "3D textures up to 256 on a side, in the volume layout (docs/TEX.md section 14): until piglit and dEQP pass them"},
+   {"tbo", SGX_DEBUG_TBO,
+    "buffer textures (ARB_texture_buffer_object; with glsl130 only, as texelFetch takes an integer): each texel read with ld from the buffer's device copy (sgx_program.c lower_tbo), until they pass on a board"},
+   {"cbf", SGX_DEBUG_CBF,
+    "ARB_color_buffer_float, a GL 3.0 gate: Mesa clamps vertex and fragment colors in the shader when GL asks (compatibility contexts only), until piglit passes it on a board"},
    {"noocclusion", SGX_DEBUG_NO_OCCLUSION,
     "no occlusion queries: Mesa's stand-ins, which count 0 (0.2.3 and earlier; ARB_occlusion_query stays, with no counter bits)"},
    {"flushrt", SGX_DEBUG_FLUSH_RT,
@@ -141,6 +145,15 @@ sgx_vtf(void)
 {
    return (sgx_drv_debug & (SGX_DEBUG_VTF | SGX_DEBUG_GLSL130)) ==
           (SGX_DEBUG_VTF | SGX_DEBUG_GLSL130);
+}
+
+/* buffer textures: SGX_DEBUG=tbo, and only with the native integers (a
+ * texelFetch's integer coordinate, the unpacking's integer ops) */
+bool
+sgx_tbo(void)
+{
+   return (sgx_drv_debug & (SGX_DEBUG_TBO | SGX_DEBUG_GLSL130)) ==
+          (SGX_DEBUG_TBO | SGX_DEBUG_GLSL130);
 }
 
 static void
@@ -260,10 +273,28 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    if (sgx_ubos())
       caps->max_constant_buffer_size = SGX_UBO_BYTES;
    caps->constant_buffer_offset_alignment = 16;
+   /* buffer textures (SGX_DEBUG=tbo): texelFetch is ld from the buffer's
+    * device copy, every format unpacked in the shader (lower_tbo), so any
+    * swizzle (not rgba_only, which compatibility contexts refuse).  An
+    * offset of 16 keeps the texels' words aligned. 2^27 texels: GL asks for
+    * 65536, and a texel's byte offset stays in 32 bits */
+   if (sgx_tbo()) {
+      caps->texture_buffer_objects = true;
+      caps->max_texel_buffer_elements = SGX_TBO_MAX_TEXELS;
+      caps->texture_buffer_offset_alignment = 16;
+   }
+   /* ARB_color_buffer_float (SGX_DEBUG=cbf): the driver has no color clamp
+    * of its own, so st clamps with fsat in the shader as GL's state asks.
+    * Mesa leaves the extension out of core contexts */
+   caps->vertex_color_unclamped = !!(sgx_drv_debug & SGX_DEBUG_CBF);
    /* occlusion queries, ARB_occlusion_query2, EXT_occlusion_query_boolean
     * (sgx_state.c).  Without the cap Mesa still exposes ARB_occlusion_query
     * and answers every query 0 itself, and an engine culls what it sees */
    caps->occlusion_query = !(sgx_drv_debug & SGX_DEBUG_NO_OCCLUSION);
+   /* NV_conditional_render and ARB_conditional_render_inverted on them,
+    * checked on the CPU (sgx_state.c sgx_render_condition) */
+   caps->conditional_render = caps->conditional_render_inverted =
+      caps->occlusion_query;
    /* a pass a colour buffer (sgx_draw_vbo); SGX_DEBUG=nomrt for one */
    caps->max_render_targets = sgx_drv_debug & SGX_DEBUG_NO_MRT ? 1 : 4;
    /* each target's pass has its own colour epilogue (sgx_blend_rt): its own
@@ -283,9 +314,13 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
     * render targets (SGX_DEBUG=glsl130) */
    caps->dest_surface_srgb_control = !!(sgx_drv_debug & SGX_DEBUG_GLSL130);
    /* 1.30 with SGX_DEBUG=glsl130 (native integers, EXT_texture_integer),
-    * for the GL 3.0 work's tests on a board */
+    * for the GL 3.0 work's tests on a board; 1.40 with its uniform blocks
+    * and buffer textures as well (SGX_DEBUG=glsl130,ubo,tbo).  Mesa takes
+    * either only with the GL version it belongs to (GL 3.0, 3.1) */
    caps->glsl_feature_level = caps->glsl_feature_level_compatibility =
-      sgx_drv_debug & SGX_DEBUG_GLSL130 ? 130 : 120;
+      sgx_ubos() && sgx_tbo()                ? 140
+      : sgx_drv_debug & SGX_DEBUG_GLSL130 ? 130
+                                          : 120;
    caps->essl_feature_level = 100;
    caps->max_viewports = 1;
    caps->vendor_id = screen->info->pci_vendor;
@@ -336,6 +371,14 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
                         enum pipe_texture_target target, unsigned sample_count,
                         unsigned storage_sample_count, unsigned usage)
 {
+   /* a buffer texture's format: unpacked in the shader (lower_tbo) */
+   if (target == PIPE_BUFFER && (usage & PIPE_BIND_SAMPLER_VIEW)) {
+      if (!sgx_tbo() || !sgx_tbo_format(format))
+         return false;
+      usage &= ~PIPE_BIND_SAMPLER_VIEW;
+      if (!usage)
+         return true;
+   }
    if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
       return false;
    /* 4x: 2x2 samples a pixel, resolved by the PBE as each tile is stored

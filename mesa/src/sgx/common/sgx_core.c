@@ -19,7 +19,10 @@ static const struct sgx_core sgx_cores[] = {
 
       .max_texture_size = 2048,
       .max_cube_levels = 12,
-      .samplers = 8,
+      /* fragment units: each sample brings its own state words, so the
+       * count is the SA left for them (ISA.md "Texture units"); 16 as
+       * Direct3D 9, whose ports bind them without asking */
+      .samplers = 16,
       .vs_inputs = 16,
       .vs_outputs = 11,
       .fs_inputs = 10,

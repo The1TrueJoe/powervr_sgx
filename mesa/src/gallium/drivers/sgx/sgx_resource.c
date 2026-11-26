@@ -1459,6 +1459,9 @@ sgx_clear_render_target(struct pipe_context *pctx, struct pipe_surface *dst,
                         unsigned y, unsigned w, unsigned h,
                         bool render_condition_enabled)
 {
+   if (render_condition_enabled &&
+       !sgx_render_condition_passes(sgx_context(pctx)))
+      return;
    util_clear_render_target(pctx, dst, color, x, y, w, h);
 }
 
@@ -1468,6 +1471,9 @@ sgx_clear_depth_stencil(struct pipe_context *pctx, struct pipe_surface *dst,
                         unsigned x, unsigned y, unsigned w, unsigned h,
                         bool render_condition_enabled)
 {
+   if (render_condition_enabled &&
+       !sgx_render_condition_passes(sgx_context(pctx)))
+      return;
    util_clear_depth_stencil(pctx, dst, flags, depth, stencil, x, y, w, h);
 }
 

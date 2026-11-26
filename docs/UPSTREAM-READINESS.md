@@ -82,7 +82,7 @@ The driver hard-codes SGX545 values. `sgx_screen.c` has:
 
 - `max_texture_2d_size = 2048`;
 - `max_render_targets = 1`;
-- 8 samplers;
+- 16 fragment samplers;
 - VS inputs/outputs 16/11, FS inputs 10;
 - `vendor_id`/`device_id` 8086:089b.
 

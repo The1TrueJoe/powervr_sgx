@@ -50,11 +50,13 @@ struct sgx_const {
  * SGX_K_TEXSIZE + 2u (st's textureSize, as its rectangle lookups scale by
  * it); past every uniform's number (a uniform is its dword in constant
  * buffer 0) */
-#define SGX_K_TEXSIZE       2024
-#define SGX_K_TEXSIZE_UNITS 8
+#define SGX_K_TEXSIZE       2008
+#define SGX_K_TEXSIZE_UNITS 16
 /* the vertex constant the draw fills with gl_InstanceID, as a float
  * (sgx_program.c lower_instance_id) */
 #define SGX_K_INSTANCE 2040
+static_assert(SGX_K_TEXSIZE + 2 * SGX_K_TEXSIZE_UNITS <= SGX_K_INSTANCE,
+              "the texture sizes overlap gl_InstanceID");
 /* The driver's block of constant numbers for programs compiled with the
  * compiler's native integers (docs/GL3.md, "Crossing the driver/compiler
  * line"): unit u's base-level width, height and depth at SGX_K_SIZE + 3u,
@@ -69,10 +71,14 @@ struct sgx_const {
 /* unit u's level count (textureQueryLevels, and the compiler's own level
  * choice for word-by-word fetches) at SGX_K_LEVELS + u, a raw integer */
 #define SGX_K_LEVELS       2120
+/* unit u's buffer texture: its first texel's GPU address at SGX_K_TBO + u, a
+ * raw integer (sgx_program.c lower_tbo; its size in texels is SGX_K_SIZE +
+ * 3u's width) */
+#define SGX_K_TBO          2368
 
 static_assert(SGX_MAX_VS_CONST_DWORDS <= SGX_K_TEXSIZE,
               "the driver's constants are past every uniform");
-static_assert(SGX_K_LEVELS + SGX_K_SIZE_UNITS <= SGX_MAX_CONST_K,
+static_assert(SGX_K_TBO + SGX_K_SIZE_UNITS <= SGX_MAX_CONST_K,
               "and under the compiler's limit");
 
 /* a fragment program's dependent samples, and their texture state blocks
@@ -188,6 +194,9 @@ struct sgx_pipe_shader {
     * mipmapped view and sampler: this variant's samples there take their
     * LOD from the coordinate's derivatives (lower_dep_lod) */
    uint32_t dep_lod_units, dep_mip;
+   /* the format of the buffer texture bound to each unit, which texelFetch
+    * unpacks (lower_tbo); PIPE_FORMAT_NONE: none, which reads 0 */
+   uint16_t buf_fmt[PIPE_MAX_SAMPLERS];
    struct sgx_pipe_shader *variants_srgb[8];
    unsigned next_variant_srgb;
 };
@@ -270,6 +279,11 @@ struct sgx_context {
    bool queries_off, query_pending;
    struct sgxws_bo query_bo;
    uint32_t query_next, *query_seq, query_last;
+   /* the render condition (sgx_state.c): its query (NULL when none), the
+    * result that skips (inverted) and its mode */
+   struct sgx_query *cond_query;
+   bool cond_cond;
+   enum pipe_render_cond_flag cond_mode;
    uint64_t rt_used[SGX_MAX_RTS], rt_clock;       /* when each was last taken */
    unsigned num_rts;
    struct sgx_resource *recording; /* the target of the frame being recorded */
@@ -323,6 +337,12 @@ struct sgx_context {
    struct pipe_constant_buffer ubos[MESA_SHADER_STAGES][SGX_MAX_UBOS];
    struct sgxws_ubo draw_ubos[SGXWS_MAX_UBOS];
    unsigned n_draw_ubos;
+   /* the buffers a draw reads as buffer textures (fill_consts): each one's
+    * device copy marked with the kick that reads it once the draw is in; a
+    * device copy that can't be made skips the draw (tbo_failed) */
+   struct sgx_resource *draw_tbos[2 * PIPE_MAX_SAMPLERS];
+   unsigned n_draw_tbos;
+   bool tbo_failed;
    struct pipe_sampler_state *samplers[PIPE_MAX_SAMPLERS]; /* fragment */
    struct pipe_sampler_view *views[PIPE_MAX_SHADER_SAMPLER_VIEWS]; /* fragment */
    /* the vertex stage's (SGX_DEBUG=vtf: sgx_vtf) */
@@ -395,6 +415,8 @@ void sgx_state_init(struct sgx_context *ctx);
  * stores to the slot: the frame noted and the slot listed) */
 uint32_t sgx_query_va(const struct sgx_context *ctx);
 void sgx_query_drawn(struct sgx_context *ctx, bool stored);
+/* false when the render condition says a draw, clear or blit is skipped */
+bool sgx_render_condition_passes(struct sgx_context *ctx);
 void sgx_draw_init(struct sgx_context *ctx);
 void sgx_draw_fini(struct sgx_context *ctx);
 void sgx_program_init(struct sgx_context *ctx);

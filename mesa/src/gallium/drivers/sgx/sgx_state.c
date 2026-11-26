@@ -610,6 +610,8 @@ sgx_destroy_query(struct pipe_context *pctx, struct pipe_query *q)
 
    if (ctx->occlusion == (struct sgx_query *)q)
       ctx->occlusion = NULL;
+   if (ctx->cond_query == (struct sgx_query *)q)
+      ctx->cond_query = NULL;
    FREE(q);
 }
 
@@ -690,12 +692,12 @@ sgx_query_drawn(struct sgx_context *ctx, bool stored)
    sgxws_use_bo(ctx->hw, &ctx->query_bo, true);
 }
 
+/* a query's result: false when it isn't in (wait: never; flush: its frame,
+ * if still recorded, is flushed so it will be) */
 static bool
-sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *pq,
-                     bool wait, union pipe_query_result *result)
+query_result(struct sgx_context *ctx, struct sgx_query *q, bool wait,
+             bool flush, union pipe_query_result *result)
 {
-   struct sgx_context *ctx = sgx_context(pctx);
-   struct sgx_query *q = (struct sgx_query *)pq;
    bool visible;
 
    memset(result, 0, sizeof(*result));
@@ -708,7 +710,7 @@ sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *pq,
    } else {
       if (sgxws_seq_after(q->seq, sgxws_done_seq(ctx->hw))) {
          /* its frame: still recorded, or in flight */
-         if (q->seq == sgxws_next_seq(ctx->hw))
+         if (q->seq == sgxws_next_seq(ctx->hw) && (flush || wait))
             sgx_flush_frame(ctx);
          if (!wait)
             return false;
@@ -721,6 +723,51 @@ sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *pq,
    else
       result->b = visible;
    return true;
+}
+
+static bool
+sgx_get_query_result(struct pipe_context *pctx, struct pipe_query *pq,
+                     bool wait, union pipe_query_result *result)
+{
+   return query_result(sgx_context(pctx), (struct sgx_query *)pq, wait, true,
+                       result);
+}
+
+/*
+ * Conditional rendering (NV_conditional_render, GL 3.0): no predicate is
+ * known in the VDM or ISP, so the query's result is read on the CPU before
+ * each draw, glClear and blit that honours it, as llvmpipe does.  A wait mode
+ * flushes the query's frame and waits for it; a no-wait mode draws while the
+ * result isn't in (GL allows it) and flushes nothing.  Only the result is
+ * read: how the query counts is its own business.
+ */
+static void
+sgx_render_condition(struct pipe_context *pctx, struct pipe_query *pq,
+                     bool condition, enum pipe_render_cond_flag mode)
+{
+   struct sgx_context *ctx = sgx_context(pctx);
+
+   ctx->cond_query = (struct sgx_query *)pq;
+   ctx->cond_cond = condition;
+   ctx->cond_mode = mode;
+}
+
+bool
+sgx_render_condition_passes(struct sgx_context *ctx)
+{
+   struct sgx_query *q = ctx->cond_query;
+   union pipe_query_result r;
+   bool wait, passed;
+
+   if (!q)
+      return true;
+   wait = ctx->cond_mode == PIPE_RENDER_COND_WAIT ||
+          ctx->cond_mode == PIPE_RENDER_COND_BY_REGION_WAIT;
+   if (!query_result(ctx, q, wait, false, &r))
+      return true;
+   passed = q->type == PIPE_QUERY_OCCLUSION_COUNTER ? r.u64 != 0 : r.b;
+   /* condition: draw when it didn't pass (ARB_conditional_render_inverted) */
+   return passed != ctx->cond_cond;
 }
 
 /* st turns queries off around its own draws (blits, util_blitter) */
@@ -758,9 +805,9 @@ sgx_blit_cpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
 
    if (info->mask != PIPE_MASK_RGBA && (info->mask & ~PIPE_MASK_RGBA))
       return false;
-   if (info->scissor_enable || info->render_condition_enable ||
-       info->alpha_blend || info->num_window_rectangles || sb->depth != 1 ||
-       db->depth != 1 || !sw || !sh || !dw || !dh ||
+   if (info->scissor_enable || info->alpha_blend ||
+       info->num_window_rectangles || sb->depth != 1 || db->depth != 1 ||
+       !sw || !sh || !dw || !dh ||
        util_format_is_depth_or_stencil(info->src.format) ||
        util_format_is_pure_integer(info->src.format) ||
        !util_format_unpack_description(info->src.format)->unpack_rgba ||
@@ -885,7 +932,7 @@ sgx_blit_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
    unsigned n_samplers = 0, n_views = 0;
 
    if (!ctx->blitter || info->mask != PIPE_MASK_RGBA || info->scissor_enable ||
-       info->render_condition_enable || info->alpha_blend ||
+       info->alpha_blend ||
        info->num_window_rectangles || info->src.box.depth != 1 ||
        info->dst.box.depth != 1 || info->dst.level || info->src.level ||
        !sgx_resource_sampleable(src) || src == dst ||
@@ -919,7 +966,10 @@ sgx_blit_gpu(struct pipe_context *pctx, const struct pipe_blit_info *info)
    util_blitter_save_fragment_sampler_views(ctx->blitter, n_views, ctx->views);
    util_blitter_save_fragment_constant_buffer_slot(
       ctx->blitter, &ctx->constants[MESA_SHADER_FRAGMENT]);
-   util_blitter_save_render_condition(ctx->blitter, NULL, false, 0);
+   /* (sgx_blit checked it: the blitter's own draws drop it) */
+   util_blitter_save_render_condition(ctx->blitter,
+                                      (struct pipe_query *)ctx->cond_query,
+                                      ctx->cond_cond, ctx->cond_mode);
    SGX_DBG(DRAW, "GPU blit %s %ux%u (%d,%d %dx%d) -> %s %ux%u (%d,%d %dx%d)\n",
            util_format_short_name(info->src.format), info->src.resource->width0,
            info->src.resource->height0, info->src.box.x, info->src.box.y,
@@ -1202,8 +1252,18 @@ static void
 sgx_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
    struct sgx_context *ctx = sgx_context(pctx);
+   struct pipe_blit_info b;
    uint64_t t0;
 
+   /* the render condition, once: the blits below and their own draws
+    * ignore it */
+   if (info->render_condition_enable) {
+      if (!sgx_render_condition_passes(ctx))
+         return;
+      b = *info;
+      b.render_condition_enable = false;
+      info = &b;
+   }
    if (info->src.resource->nr_samples > 1 &&
        sgx_blit_resolve(pctx, info))
       return;
@@ -1297,6 +1357,7 @@ sgx_state_init(struct sgx_context *ctx)
    p->end_query = sgx_end_query;
    p->get_query_result = sgx_get_query_result;
    p->set_active_query_state = sgx_set_active_query_state;
+   p->render_condition = sgx_render_condition;
    p->resource_copy_region = sgx_resource_copy_region;
    p->blit = sgx_blit;
 }

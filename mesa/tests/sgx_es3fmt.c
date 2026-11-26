@@ -19,7 +19,8 @@
  *  9. RGBA32F with mipmaps, NEAREST_MIPMAP_NEAREST, textureLod level 1
  * 10. REPEAT and MIRRORED_REPEAT on RGBA16F, RGBA32F and R32F (stored as F32
  *     words, read strided), sampled over [-0.5, 1.5]: NEAREST and LINEAR,
- *     every pixel against a CPU reference; RGBA8 as the control
+ *     every pixel against a CPU reference; RGBA8 as the control; and the
+ *     same through textureProj (a projector that changes across the quad)
  *
  *   MESA_GLES_VERSION_OVERRIDE=3.0 SGX_DEBUG=glsl130 DISPLAY=:0 sgx_es3fmt
  *   (or EGL_PLATFORM=surfaceless in place of DISPLAY)
@@ -183,6 +184,26 @@ ref10(double u, double v, GLenum m, bool linear, int c)
          d = texel10(wrap10(x0, m), wrap10(y0 + 1, m), c),
          e = texel10(wrap10(x0 + 1, m), wrap10(y0 + 1, m), c);
    return (float)((a * (1 - fx) + b * fx) * (1 - fy) + (d * (1 - fx) + e * fx) * fy);
+}
+
+/* how far a LINEAR texel may stray from ref10 when the TPU filters it: its
+ * weights step by 1/64, truncated (measured: a projected coordinate a hair
+ * under u * 16 = -0.25, at REPEAT's seam between 255 and 0, reads 68 for 64),
+ * so up to 1/64 of the spread of the four taps */
+static int
+slack10(double u, double v, GLenum m, int c)
+{
+   double x = u * T10 - 0.5, y = v * T10 - 0.5;
+   int x0 = (int)floor(x), y0 = (int)floor(y);
+   float t[4] = {texel10(wrap10(x0, m), wrap10(y0, m), c),
+                 texel10(wrap10(x0 + 1, m), wrap10(y0, m), c),
+                 texel10(wrap10(x0, m), wrap10(y0 + 1, m), c),
+                 texel10(wrap10(x0 + 1, m), wrap10(y0 + 1, m), c)};
+   float lo = t[0], hi = t[0];
+
+   for (int k = 1; k < 4; k++)
+      lo = fminf(lo, t[k]), hi = fmaxf(hi, t[k]);
+   return (int)ceil((hi - lo) * 255.0 / 64.0);
 }
 
 int
@@ -483,9 +504,17 @@ main(void)
                if (!c)
                   f1[y * T10 + x] = texel10(x, y, 0);
             }
-      GLuint p = prog("#version 300 es\nprecision highp float;\n"
-                      "uniform highp sampler2D s;\nin vec2 uv;\nout vec4 o;\n"
-                      "void main() { o = texture(s, uv * 2.0 - 0.5); }\n");
+      GLuint pp[2] = {
+         prog("#version 300 es\nprecision highp float;\n"
+              "uniform highp sampler2D s;\nin vec2 uv;\nout vec4 o;\n"
+              "void main() { o = texture(s, uv * 2.0 - 0.5); }\n"),
+         prog("#version 300 es\nprecision highp float;\n"
+              "uniform highp sampler2D s;\nuniform vec4 k;\nin vec2 uv;\n"
+              "out vec4 o;\n"
+              "void main() { float q = k.x + uv.y;\n"
+              "  o = textureProj(s, vec3((uv * 2.0 - 0.5) * q, q)); }\n"),
+      };
+      static const float kq[4] = {1.5f, 0, 0, 0};
       static const struct {
          const char *name;
          GLenum ifmt, fmt, type;
@@ -499,38 +528,43 @@ main(void)
       };
       static const GLenum mode[] = {GL_REPEAT, GL_MIRRORED_REPEAT};
 
-      for (unsigned i = 0; i < sizeof(f) / sizeof(f[0]); i++)
-         for (int lin = 0; lin < 2; lin++)
-            for (int m = 0; m < 2; m++) {
-               GLuint tx = tex2d(f[i].ifmt, T10, T10, f[i].fmt, f[i].type,
-                                 f[i].data, lin ? GL_LINEAR : GL_NEAREST);
-               int bad = 0, fx = -1, fy = -1;
+      for (int pr = 0; pr < 2; pr++)
+         for (unsigned i = 0; i < sizeof(f) / sizeof(f[0]); i++)
+            for (int lin = 0; lin < 2; lin++)
+               for (int m = 0; m < 2; m++) {
+                  GLuint tx = tex2d(f[i].ifmt, T10, T10, f[i].fmt, f[i].type,
+                                    f[i].data, lin ? GL_LINEAR : GL_NEAREST);
+                  int bad = 0, fx = -1, fy = -1;
 
-               glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, mode[m]);
-               glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, mode[m]);
-               draw(p, tx, NULL);
-               glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
-               for (int y = 0; y < H; y++)
-                  for (int x = 0; x < W; x++) {
-                     double u = ((x + 0.5) / W) * 2.0 - 0.5,
-                            v = ((y + 0.5) / H) * 2.0 - 0.5;
-                     int ok = 1;
+                  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, mode[m]);
+                  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, mode[m]);
+                  draw(pp[pr], tx, pr ? kq : NULL);
+                  glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                  for (int y = 0; y < H; y++)
+                     for (int x = 0; x < W; x++) {
+                        double u = ((x + 0.5) / W) * 2.0 - 0.5,
+                               v = ((y + 0.5) / H) * 2.0 - 0.5;
+                        int ok = 1;
 
-                     for (int c = 0; c < f[i].comps; c++) {
-                        int want = (int)lrint(ref10(u, v, mode[m], lin, c) * 255.0);
-                        if (abs(px[4 * (y * W + x) + c] - want) > t + 1)
-                           ok = 0;
+                        for (int c = 0; c < f[i].comps; c++) {
+                           int want = (int)lrint(ref10(u, v, mode[m], lin, c) * 255.0);
+                           /* the control is the TPU's to filter; the F32
+                            * words are filtered in the program, exactly */
+                           int slack =
+                              pr && lin && !i ? slack10(u, v, mode[m], c) : 0;
+                           if (abs(px[4 * (y * W + x) + c] - want) > t + 1 + slack)
+                              ok = 0;
+                        }
+                        if (!ok && !bad++)
+                           fx = x, fy = y;
                      }
-                     if (!ok && !bad++)
-                        fx = x, fy = y;
-                  }
-               printf("10 %-15s %-7s %-15s %4d of %d pixels wrong (first %d,%d): %s\n",
-                      f[i].name, lin ? "LINEAR" : "NEAREST",
-                      m ? "MIRRORED_REPEAT" : "REPEAT", bad, W * H, fx, fy,
-                      bad ? "FAIL" : "OK");
-               fails += bad != 0;
-               glDeleteTextures(1, &tx);
-            }
+                  printf("10%s %-15s %-7s %-15s %4d of %d pixels wrong (first %d,%d): %s\n",
+                         pr ? "p" : " ", f[i].name, lin ? "LINEAR" : "NEAREST",
+                         m ? "MIRRORED_REPEAT" : "REPEAT", bad, W * H, fx, fy,
+                         bad ? "FAIL" : "OK");
+                  fails += bad != 0;
+                  glDeleteTextures(1, &tx);
+               }
    }
 
    GLenum e = glGetError();
