@@ -181,6 +181,8 @@ struct sgx_pipe_shader {
     * rt_blend and rt_blend_color say; the compiler's rt_packed), the sop2
     * epilogue left out.  reads_tile: it does read the tile (pass type) */
    uint8_t rt_srgb;
+   /* for lines: without its discards (drop_discards) */
+   bool no_discard;
    bool reads_tile;
    struct pipe_rt_blend_state rt_blend; /* colormask 0: the epilogue's */
    float rt_blend_color[4];             /* 0 unless a factor reads it */
@@ -306,6 +308,7 @@ struct sgx_context {
       uint32_t gen;
       const void *fs;
       unsigned rt_index, rt_plane;
+      bool lines;
       void *out;
    } fs_memo;
    struct {

@@ -1998,7 +1998,11 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
    if (indirect || !ctx->vs || !ctx->fs)
       SKIP("indirect, or no vertex or fragment shader");
    /* the fragment shader as these textures need it (sRGB decoded) */
-   struct sgx_pipe_shader *fs = sgx_fs_for(ctx, ctx->fs);
+   struct sgx_pipe_shader *fs = sgx_fs_for(ctx, ctx->fs, false);
+   /* lines can't take a discarding program (drop_discards) */
+   if (fs && u_reduced_prim(info->mode) == MESA_PRIM_LINES &&
+       fs->discard_pa >= 0)
+      fs = sgx_fs_for(ctx, ctx->fs, true);
    if (!fs)
       SKIP("no fragment shader variant");
    /* cube maps sampled without mipmapping, from their level-0 copy: brought

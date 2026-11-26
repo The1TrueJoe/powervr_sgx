@@ -1537,6 +1537,35 @@ remap_outputs(nir_shader *nir, unsigned t)
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 }
 
+static bool
+drop_discard(nir_builder *b, nir_intrinsic_instr *in, void *data)
+{
+   switch (in->intrinsic) {
+   case nir_intrinsic_terminate:
+   case nir_intrinsic_terminate_if:
+   case nir_intrinsic_demote:
+   case nir_intrinsic_demote_if:
+      nir_instr_remove(&in->instr);
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* A line drawn by a discarding program (a discard, st's alpha test) locks
+ * the 3D core up, also when the discard is never taken (ISA.md "Phases,
+ * visibility feedback and discard"). For lines the program goes without its
+ * discards: every pixel of the line kept. gl_FragDepth (depthf) on lines
+ * is fine. */
+static void
+drop_discards(nir_shader *nir)
+{
+   NIR_PASS(_, nir, nir_shader_intrinsics_pass, drop_discard,
+            nir_metadata_control_flow, NULL);
+   NIR_PASS(_, nir, nir_opt_dce);
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+}
+
 /* nir_lower_clip_vs stores CLIP_DIST0 (planes 0-3) only when one of them is
  * enabled, CLIP_DIST1 (4-7) only when one of those is.  The compiler counts
  * the planes from the variables (0..n-1, the TA's output select), so with
@@ -1996,6 +2025,8 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
    /* MRT: this variant's colour buffer's output as output 0 */
    if (!vertex && so->rt_target)
       remap_outputs(nir, so->rt_target - 1);
+   if (!vertex && so->no_discard)
+      drop_discards(nir);
    /* an integer colour buffer: output 0 packed for it, as one word */
    if (!vertex && so->rt_int) {
       unsigned kind = so->rt_int;
@@ -2805,7 +2836,7 @@ sgx_fs_textures_used(const struct sgx_pipe_shader *fs)
 }
 
 static struct sgx_pipe_shader *
-fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
+fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs, bool lines)
 {
    struct sgx_pipe_shader **slot;
    struct tex_key k;
@@ -2862,13 +2893,14 @@ fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
    }
    if (!tex_key_of(fs->nir, fs->dep_lod_units, ctx->views, ctx->samplers,
                    &k) &&
-       !rt_int && !rt_target && !rt_srgb)
+       !rt_int && !rt_target && !rt_srgb && !lines)
       return fs;
    for (unsigned i = 0; i < ARRAY_SIZE(fs->variants_srgb); i++) {
       if (fs->variants_srgb[i] && tex_key_is(fs->variants_srgb[i], &k) &&
           fs->variants_srgb[i]->rt_int == rt_int &&
           fs->variants_srgb[i]->rt_target == rt_target &&
           fs->variants_srgb[i]->rt_srgb == rt_srgb &&
+          fs->variants_srgb[i]->no_discard == lines &&
           !memcmp(&fs->variants_srgb[i]->rt_blend, &rt_blend,
                   sizeof(rt_blend)) &&
           !memcmp(fs->variants_srgb[i]->rt_blend_color, rt_blend_color,
@@ -2887,6 +2919,7 @@ fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
    (*slot)->rt_int = rt_int;
    (*slot)->rt_target = rt_target;
    (*slot)->rt_srgb = rt_srgb;
+   (*slot)->no_discard = lines;
    memcpy(&(*slot)->rt_blend, &rt_blend, sizeof(rt_blend));
    memcpy((*slot)->rt_blend_color, rt_blend_color, sizeof(rt_blend_color));
    if (k.dep_mip)
@@ -2930,19 +2963,20 @@ sgx_vs_for(struct sgx_context *ctx, struct sgx_pipe_shader *vs,
 }
 
 struct sgx_pipe_shader *
-sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs)
+sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs, bool lines)
 {
    struct sgx_pipe_shader *v;
 
    if (ctx->fs_memo.out && ctx->fs_memo.gen == ctx->fs_gen &&
        ctx->fs_memo.fs == fs && ctx->fs_memo.rt_index == ctx->rt_index &&
-       ctx->fs_memo.rt_plane == ctx->rt_plane)
+       ctx->fs_memo.rt_plane == ctx->rt_plane && ctx->fs_memo.lines == lines)
       return ctx->fs_memo.out;
-   v = fs_for(ctx, fs);
+   v = fs_for(ctx, fs, lines);
    ctx->fs_memo.gen = ctx->fs_gen;
    ctx->fs_memo.fs = fs;
    ctx->fs_memo.rt_index = ctx->rt_index;
    ctx->fs_memo.rt_plane = ctx->rt_plane;
+   ctx->fs_memo.lines = lines;
    ctx->fs_memo.out = v;
    return v;
 }

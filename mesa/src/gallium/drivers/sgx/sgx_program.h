@@ -32,8 +32,9 @@ struct sgx_pipe_shader *sgx_vs_for(struct sgx_context *ctx,
 uint32_t sgx_fs_textures_used(const struct sgx_pipe_shader *fs);
 
 /* the bound fragment shader as the draw samples its textures: itself, or a
- * variant decoding the sRGB views it samples; NULL if it can't */
+ * variant decoding the sRGB views it samples (for lines, one without its
+ * discards); NULL if it can't */
 struct sgx_pipe_shader *sgx_fs_for(struct sgx_context *ctx,
-                                   struct sgx_pipe_shader *fs);
+                                   struct sgx_pipe_shader *fs, bool lines);
 
 #endif
