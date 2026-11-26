@@ -86,11 +86,11 @@ Mesa's ES gate (`compute_version_es2()`, Mesa 26.2.5) is 24 conditions, marked
   `ARB_map_buffer_range`, `ARB_texture_rg`, `EXT_texture_sRGB`,
   `ARB_framebuffer_object`, `ARB_draw_instanced`, `ARB_instanced_arrays`,
   primitive restart, `MaxColorAttachments` ≥ 4 (a pass per target).
-- **Behind `SGX_DEBUG`:** `ARB_uniform_buffer_object` (`ubo`); 16 vertex
-  texture units (`vtf`), which ES 3.0 needs though the gate doesn't check
-  them.
-- **Free with GLSL 1.30 (`glsl130`):** `OES_depth_texture_cube_map` (st
-  turns it on in its GLSL ≥ 1.30 block).
+- **On by default since the ES 3.0 switch (2026-11-25; off with
+  `SGX_DEBUG=noubo`, `novtf`):** `ARB_uniform_buffer_object`; 16 vertex
+  texture units, which ES 3.0 needs though the gate doesn't check them.
+- **Free with GLSL 1.30 (off with `noglsl130`):** `OES_depth_texture_cube_map`
+  (st turns it on in its GLSL ≥ 1.30 block).
 - **Driver work, no hardware unknown:** `EXT_texture_snorm`, `EXT_sRGB`,
   `EXT_texture_shared_exponent` (sampling only), `OES_texture_float`,
   `OES_texture_half_float`, `OES_texture_half_float_linear` (four taps),
@@ -101,11 +101,11 @@ Mesa's ES gate (`compute_version_es2()`, Mesa 26.2.5) is 24 conditions, marked
 
 What the gate doesn't check but ES 3.0 needs:
 - **GLSL ES 3.00 with native integers.** st sets `NativeIntegers` only at
-  GLSL ≥ 1.30, so the `glsl130` path has to be on by default, and
-  `essl_feature_level` goes from 100 to 300.
+  GLSL ≥ 1.30, so the integer path is on by default since 2026-11-25
+  (`SGX_DEBUG=noglsl130` turns it off), and `essl_feature_level` is 300.
 - **ES 3.0 core features beyond the gate:**
-  - 3D textures with `MAX_3D_TEXTURE_SIZE` ≥ 256: 256 with
-    `SGX_DEBUG=tex3d` (TEX.md section 14, "Status"), one texel without;
+  - 3D textures with `MAX_3D_TEXTURE_SIZE` ≥ 256: 256 by default
+    (TEX.md section 14, "Status"), one texel with `SGX_DEBUG=notex3d`;
   - occlusion queries (`ANY_SAMPLES_PASSED`): a store from every pixel
     shaded ("Status"); ES 3.0 contexts also need the cap for their state
     (dEQP's state reset asks for the query);
@@ -770,6 +770,34 @@ section 14; a CE5300 board, 2026-11-20):
   Every check that wants 0 gets 0 (2026-11-24).
   `occlusion_query_conform@GetObjivAval_multi2` fails with the cap and
   without. `nv_conditional_render` stays off.
+
+**The ES 3.0 switch** (a CE5300 board, 2026-11-26; a draft, not on by
+default yet): `SGX_DEBUG`'s `glsl130`, `ubo`, `vtf` and `tex3d` become
+`noglsl130`, `noubo`, `novtf` and `notex3d` on the same bits, and the screen's
+`essl_feature_level` is 300 with the native integers. Mesa reports ES 3.0 only
+with 2D arrays and transform feedback as well (servidorjarvis1-svg's, #61 and
+the coming `xfb`). Measured on dev alone against dev, default flags:
+
+- **dEQP-GLES2 regresses:** 16,644 → 16,186 pass, 721 pass → fail, 263 skip →
+  pass, 47 skip → fail. The pass → fail are nearly all fragment-shader integer
+  and boolean cases (`shaders.operator.*`, `conversions`, `conditionals.if`, at
+  every precision), plus about 20 vertex-shader loops with a `continue` or a
+  conditional body. It's the compiler's native integers in a fragment program
+  that computes mediump in F16: with `SGX_DEBUG=nof16`, 289 of the first 300
+  pass, and the 10 left are the vertex loops. GLSL ES 1.00 programs get the
+  native integers too, since the cap is screen-wide ("Crossing the
+  driver/compiler line"). This blocks the switch.
+- piglit, against dev: fixed-function list 7 pass → fail (`texwrap formats`
+  RGB10 and RGB10_A2, now F32 planes) and 50 skip → pass. GL 2.1 list 10 pass
+  → fail (the same `texwrap formats`, `gl-1.0-user-clip-all-planes`,
+  `max-samplers` and its `border` case), 6 fail → pass (`tex3d`, `tex3d-npot`,
+  `texwrap 3d` and its `proj` case, `minmax`, `fixed-clip-enables`). Depth and
+  stencil list 31 skip → pass, nothing lost. Multisample list unchanged.
+- dEQP-GLES3, full mustpass, on dev with #61, transform feedback (merged by
+  hand against the occlusion queries), the LOD control and word-chain changes
+  and this switch, `SGX_DEBUG=xfb`: not run yet. Parts of it: the 648
+  integer-format texture cases, 192 pass with the switch alone and 216 with
+  the word-chain and LOD changes; `texture.mipmap` 183 of 236.
 
 Provoking vertex first waits for flat shading, which the driver doesn't do
 yet (DOUTI b25-26, STATE.md §3).

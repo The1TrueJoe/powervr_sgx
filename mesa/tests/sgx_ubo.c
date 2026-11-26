@@ -4,8 +4,8 @@
  */
 
 /*
- * Uniform blocks (SGX_DEBUG=ubo,glsl130, docs/GL3.md): four quads into a
- * 64x64 RGBA8 FBO, one a quadrant, in one frame, every one placed by a
+ * Uniform blocks (not with SGX_DEBUG=noubo or noglsl130, docs/GL3.md): four
+ * quads into a 64x64 RGBA8 FBO, one a quadrant, in one frame, every one placed by a
  * vertex-program block (V, rewritten with glBufferSubData before each draw)
  * and coloured from a fragment-program block:
  *   0 (bottom left)  A.color, red;
@@ -16,7 +16,7 @@
  *                    same frame (quad 0 must keep red: a copy a draw).
  * Then every pixel of each quadrant is checked against its colour.
  *
- *   SGX_DEBUG=ubo,glsl130 sgx_ubo
+ *   sgx_ubo
  *
  * zig cc -target x86_64-linux-gnu.2.36 -I<mesa include> -o sgx_ubo sgx_ubo.c
  * -ldl
@@ -227,7 +227,7 @@ main(void)
    printf("renderer: %s, %d fragment blocks of %d bytes\n",
           glGetString_(GL_RENDERER), blocks, size);
    if (!ext || !strstr(ext, "GL_ARB_uniform_buffer_object")) {
-      printf("FAIL: no ARB_uniform_buffer_object (SGX_DEBUG=ubo,glsl130?)\n");
+      printf("FAIL: no ARB_uniform_buffer_object (SGX_DEBUG=noubo or noglsl130?)\n");
       return 1;
    }
 

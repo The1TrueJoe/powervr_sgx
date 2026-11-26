@@ -4,7 +4,7 @@
  */
 
 /*
- * sRGB render targets (SGX_DEBUG=glsl130, an ES 3.0 context: EXT_sRGB's
+ * sRGB render targets (the native integers, an ES 3.0 context: EXT_sRGB's
  * SRGB8_ALPHA8 is colour-renderable there), checked by reading back the
  * stored bytes of a 64x64 FBO (ReadPixels doesn't convert on ES):
  *  1. a clear: the clear colour encoded
@@ -22,7 +22,7 @@
  * 11. a linear RGBA8 target: as before, not encoded
  * 12. MRT, an sRGB and a linear buffer from one program
  *
- *   MESA_GLES_VERSION_OVERRIDE=3.0 SGX_DEBUG=glsl130 DISPLAY=:0 sgx_srgb
+ *   MESA_GLES_VERSION_OVERRIDE=3.0 DISPLAY=:0 sgx_srgb
  *
  * zig cc -target x86-linux-gnu.2.36 -isystem <root>/usr/include -o sgx_srgb
  * sgx_srgb.c <root>/usr/lib/i386-linux-gnu/libEGL.so.1
@@ -162,7 +162,7 @@ main(void)
    if (c == EGL_NO_CONTEXT ||
        !eglMakeCurrent(d, EGL_NO_SURFACE, EGL_NO_SURFACE, c)) {
       printf("no ES 3.0 context 0x%x (MESA_GLES_VERSION_OVERRIDE=3.0, "
-             "SGX_DEBUG=glsl130)\n",
+             "SGX_DEBUG=noglsl130?)\n",
              eglGetError());
       return 1;
    }

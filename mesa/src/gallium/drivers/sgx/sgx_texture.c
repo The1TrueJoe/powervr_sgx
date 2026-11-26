@@ -295,7 +295,7 @@ sgx_tex_cube0_size(const struct pipe_resource *prsc)
 }
 
 /*
- * A volume: a 3D texture of more than one slice (SGX_DEBUG=tex3d; without it
+ * A volume: a 3D texture of more than one slice (with SGX_DEBUG=notex3d
  * a 3D texture is one texel, laid out as a 2D one).  T1 layout 1, T3's low
  * bits the depth - 1, T0 b0-2 wrap R (TEX.md section 14, hwt_vol4/5).  A
  * level is cubes of side t = min(w, h, d, 16), each side rounded up to a

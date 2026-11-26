@@ -277,7 +277,7 @@ lower_txs_int(nir_builder *b, nir_tex_instr *tex)
    return true;
 }
 
-/* Without SGX_DEBUG=tex3d a 3D texture is one texel (max_texture_3d_levels
+/* With SGX_DEBUG=notex3d a 3D texture is one texel (max_texture_3d_levels
  * = 1), kept as a 1x1 2D texture
  * (sgx_resource), which every (s, t, r) reads whatever the wrap and filter:
  * its samples become 2D ones at (s, t). Sizes and level counts keep the
@@ -1638,7 +1638,7 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
     * (sgx_tex_format): all of them unless the variant says otherwise */
    /* a unit sampled for a compare holds a depth texture */
    uint32_t shadow = shadow_units(nir);
-   /* (a vertex program's samples too, SGX_DEBUG=vtf: its units' variant from
+   /* (a vertex program's samples too, sgx_vtf: its units' variant from
     * sgx_vs_for) */
    opts.tex_bgra = ~not_bgra & ~(depth | shadow);
    opts.tex_f32 = depth | shadow;
@@ -1689,7 +1689,7 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
       if (so->wrap_rep | so->wrap_mir)
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_word32_wrap,
                   nir_metadata_control_flow, so);
-      if (!(sgx_drv_debug & SGX_DEBUG_TEX3D))
+      if (!sgx_tex3d())
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_tex_3d,
                   nir_metadata_control_flow, NULL);
       NIR_PASS(_, nir, nir_lower_tex, &tex);

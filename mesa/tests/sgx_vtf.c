@@ -4,8 +4,8 @@
  */
 
 /*
- * Vertex texture fetch (SGX_DEBUG=vtf,glsl130, docs/GL3.md), checked by
- * reading pixels back from a 64x64 FBO:
+ * Vertex texture fetch (not with SGX_DEBUG=novtf or noglsl130, docs/GL3.md),
+ * checked by reading pixels back from a 64x64 FBO:
  *  0. GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS
  *  1. colour per quad from a 4x1 RGBA8 texture read in the vertex shader
  * (NEAREST)
@@ -21,7 +21,7 @@
  *     vertex shader (checked) and the fragment shader (for comparison)
  *  8. (ES 3.0 context) implicit LOD in a fragment shader (for comparison)
  *
- *   MESA_GLES_VERSION_OVERRIDE=3.0 SGX_DEBUG=vtf,glsl130 DISPLAY=:0 sgx_vtf
+ *   MESA_GLES_VERSION_OVERRIDE=3.0 DISPLAY=:0 sgx_vtf
  *
  * zig cc -target x86-linux-gnu.2.36 -isystem <root>/usr/include -o sgx_vtf
  * sgx_vtf.c <root>/usr/lib/i386-linux-gnu/libEGL.so.1

@@ -325,7 +325,7 @@ struct sgx_context {
    unsigned n_draw_ubos;
    struct pipe_sampler_state *samplers[PIPE_MAX_SAMPLERS]; /* fragment */
    struct pipe_sampler_view *views[PIPE_MAX_SHADER_SAMPLER_VIEWS]; /* fragment */
-   /* the vertex stage's (SGX_DEBUG=vtf: sgx_vtf) */
+   /* the vertex stage's (sgx_vtf) */
    struct pipe_sampler_state *vs_samplers[PIPE_MAX_SAMPLERS];
    struct pipe_sampler_view *vs_views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
 

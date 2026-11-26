@@ -5,7 +5,7 @@
 
 /*
  * The formats and caps ES 3.0 asks of the driver short of texture arrays and
- * transform feedback (SGX_DEBUG=glsl130, an ES 3.0 context), each sampled
+ * transform feedback (the native integers, an ES 3.0 context), each sampled
  * into a 64x64 RGBA8 FBO and read back:
  *  1. textureLod and textureGrad in a fragment shader (ARB_shader_texture_lod)
  *  2. DEPTH_COMPONENT32F and DEPTH32F_STENCIL8 attachments: depth and
@@ -21,7 +21,7 @@
  *     words, read strided), sampled over [-0.5, 1.5]: NEAREST and LINEAR,
  *     every pixel against a CPU reference; RGBA8 as the control
  *
- *   MESA_GLES_VERSION_OVERRIDE=3.0 SGX_DEBUG=glsl130 DISPLAY=:0 sgx_es3fmt
+ *   MESA_GLES_VERSION_OVERRIDE=3.0 DISPLAY=:0 sgx_es3fmt
  *   (or EGL_PLATFORM=surfaceless in place of DISPLAY)
  *
  * zig cc -target x86-linux-gnu.2.36 -isystem <root>/usr/include -o sgx_es3fmt
