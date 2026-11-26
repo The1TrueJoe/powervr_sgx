@@ -402,9 +402,8 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
           /* ARB_depth_buffer_float: the ISP and the ZLS keep every depth as
            * float32 already, and the sampler reads it as F32 (sgx_tex_depth);
            * the CPU copy keeps its own format */
-          !(sgx_glsl130() &&
-            (format == PIPE_FORMAT_Z32_FLOAT ||
-             format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT)))
+          !(sgx_glsl130() && (format == PIPE_FORMAT_Z32_FLOAT ||
+                              format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT)))
          return false;
    }
    if (usage & PIPE_BIND_VERTEX_BUFFER) {
@@ -430,8 +429,7 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
     * binary bytes, sgx_tex_snorm): with the native integers (sgx_glsl130) */
    if ((usage & PIPE_BIND_SAMPLER_VIEW) &&
        (sgx_tex_float_planes(format) || sgx_tex_snorm(format)) &&
-       format != PIPE_FORMAT_R32_FLOAT &&
-       !sgx_glsl130())
+       format != PIPE_FORMAT_R32_FLOAT && !sgx_glsl130())
       return false;
    /* RG32 and RGBA32 are stored for the compiler's word-by-word fetches
     * (sgx_tex_raw32), which it doesn't do yet: not sampled until it does */
