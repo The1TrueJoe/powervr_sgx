@@ -489,9 +489,11 @@ Runs 4 and 5 (the second CE5300 board, 2026-11-12; `docs/log/entries/2026-11-12-
   the only tests that go from skip to fail; nothing goes from pass to fail:
   - `tex-miplevel-selection` (`-nobias -nolod`): the sampled level is one
     below the base level at the top of the chain (level 4 for base level 5,
-    max level 5).
+    max level 5). Fixed (2026-11-25): the driver's MAX_LEVEL tail, see
+    "LOD bias and clamps" below.
   - `tex-miplevel-selection-lod` and `-lod-bias`: the LOD bias isn't
-    applied (level 0 where bias 1 selects level 1).
+    applied (level 0 where bias 1 selects level 1). Fixed (2026-11-25),
+    below.
   - `ext_framebuffer_multisample-clip-and-scissor-blit 4 normal`: a 4x blit
     whose rectangles are clipped (source or destination off the
     framebuffer) leaves the destination at its clear colour
@@ -702,7 +704,8 @@ section 14; a CE5300 board, 2026-11-20):
   `texture3d-computed-coord`. Still failing: `tex3d-depth1` and
   `texwrap 3d bordercolor` (no border colour on dev at all),
   `fbo-3d` and `fbo-generatemipmap-3d` (rendering into a layer),
-  `tex-miplevel-selection` 3D (as its 2D variants: LOD bias and clamps).
+  `tex-miplevel-selection` 3D (as its 2D variants: LOD bias and clamps,
+  since done: "LOD bias and clamps" below).
 - dEQP-GLES3, the 1,528 mustpass cases with "3d" in the name (1,292 of
   them not 2D arrays), with the cap and without, on dev with 2D arrays and
   transform feedback merged in for the run (an ES 3.0 context needs them):
@@ -716,7 +719,7 @@ section 14; a CE5300 board, 2026-11-20):
   - the float, integer and 16-bit-a-channel formats (`format.sized.3d`,
     `texture.units`, most `texture_functions`): not volume formats yet;
   - `mipmap.3d.bias`, `min_lod`, `max_lod`, `max_level`: LOD bias and
-    clamps, as for 2D textures;
+    clamps, as for 2D textures (since done: "LOD bias and clamps" below);
   - `fbo.color.tex3d`: rendering into a layer;
   - `texture.vertex.3d` skipped (vertex texture fetch wasn't in that run's
     tree; the vertex case of `sgx_tex3d` covers it).
@@ -771,6 +774,44 @@ section 14; a CE5300 board, 2026-11-20):
   `occlusion_query_conform@GetObjivAval_multi2` fails with the cap and
   without. `nv_conditional_render` stays off.
 
+**LOD bias and clamps** (a CE5300 board, 2026-11-25; on by default):
+
+- A sampler's LOD bias, MIN_LOD and MAX_LOD have no texture-word field: T0
+  b21-26 only biases down (STATE.md), and nothing clamps. A sample on a unit
+  whose sampler sets one of them takes an explicit LOD (smp's LOD mode 2,
+  `lower_lod_ctl`): the shader's (textureLod), or log2 of the coordinate's
+  coarse derivatives scaled by the base level's size, plus the shader's
+  bias; then the sampler's bias, clamped to [MIN_LOD, MAX_LOD], MAX_LOD no
+  further than the view's last level (driver constants `SGX_K_LOD` + 3u).
+  The same goes for a cube or volume view whose MAX_LEVEL is short of the
+  chain the TPU takes from the size, and for a cube view from a later
+  BASE_LEVEL (a cube's words start at level 0; its constants are offset by
+  the base level). A 2D view keeps its MAX_LEVEL tail.
+- The tail: a 2D view of levels l..m with mipmaps has the device's levels
+  past m box-filtered from m (`sgx_resource_tail`). A later view that
+  samples one of those levels gets it back now; before, a draw at
+  BASE = MAX = 4 left level 5 of a 32x32 texture level 4's texels for a
+  later BASE_LEVEL 5 (piglit `tex-miplevel-selection`, `-nobias -nolod`),
+  and the tail never went back once it reached the chain's end.
+- A volume's dependent implicit-LOD sample takes its LOD from the
+  derivatives, as 2D and cube ones did (`lower_dep_lod`).
+- piglit, the 711 tests with miplevel, lod, mipmap, base or max level in
+  their names, against dev: 19 fail → pass (`tex-miplevel-selection`,
+  `-lod` and `-lod-bias`, `levelclamp`, `lodclamp`, `lodclamp-between`,
+  `lodclamp-between-max`, `mipmap-setup`, `fbo-mipmap-copypix`,
+  `sampler-objects`, six `arb_shader_texture_lod` and three GLSL 1.20
+  `tex-miplevel-selection` 2D cases), none pass → fail, and the same 8
+  crashes as dev (the 2D shadow `tex-miplevel-selection` ones among them).
+- dEQP-GLES3 `texture.mipmap` (236 cases, on dev with 2D arrays and
+  transform feedback merged in for an ES 3.0 context): 149 → 183 pass,
+  nothing from pass to fail. Fail → pass: 2D, 3D and cube `min_lod` and
+  `max_lod`, 2D and 3D `max_level`, 3D `bias`, cube `base_level` and
+  `max_level` with NEAREST minification. Still failing: NPOT mipmaps (the
+  base level only), and every cube case with LINEAR minification, `basic`
+  among them (not LOD control: not looked at).
+- `mesa/tests/sgx_baselevel`: BASE_LEVEL and MAX_LEVEL at every level of
+  uploaded chains (TEX.md "A chain from any level"), and the tail case.
+
 Provoking vertex first waits for flat shading, which the driver doesn't do
 yet (DOUTI b25-26, STATE.md §3).
 
@@ -797,12 +838,13 @@ Agreed with the compiler (2026-11-11):
   sampler's filter or wrap; the compiler marks those samples.
 - **Driver constants**, numbered above every uniform (a uniform is its
   dword in constant buffer 0; a vertex program has 384 + 9 vec4, 1572
-  dwords) and under `SGX_MAX_CONST_K` = 2304: 2024 + 2u unit u's level-0
+  dwords) and under `SGX_MAX_CONST_K` = 2368: 2024 + 2u unit u's level-0
   width and height as floats (`SGX_K_TEXSIZE`, units 0-7); 2040
   gl_InstanceID as a float (`SGX_K_INSTANCE`); 2048 + 3u the base level's
   width, height and depth of unit u (0-15); 2096 gl_InstanceID; 2104 + n
   UBO n's GPU address (`ubo_base_k`, up to 12); 2120 + u unit u's level
-  count (textureQueryLevels); the rest reserved. `sgx_context.h` checks
+  count (textureQueryLevels); 2304 + 3u unit u's sampler LOD bias, MIN_LOD
+  and MAX_LOD as floats (`SGX_K_LOD`, `lower_lod_ctl`); the rest reserved. `sgx_context.h` checks
   that the block clears the uniforms. Until 0.2.4 the block began at 1000
   and the vertex limit was 256 + 9 vec4 (1060 dwords), so a vertex
   program's last 15 vec4 shared numbers with the block; librw's skinning

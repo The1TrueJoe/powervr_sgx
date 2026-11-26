@@ -1137,7 +1137,7 @@ with a constant):
 | 10 | min filter linear | capture; hardware (open driver) |
 | 12 | mag filter linear | hardware |
 | 17-20 | 0xf without mipmaps, 0xd with (b18 = mipmapping off) | capture; hardware (open driver) |
-| 21-26 | **LOD bias**, one 6-bit field v in 1/8 levels: bias = (v - 63)/8, so the DDK's 0x3f is no bias. Level sampled = floor(λ + bias + 0.5). On a CE5300 board, for 16- to 128-texel chains, the shift is the same at every size: v 63..59 → 0, 58..51 → -1, 47/43 → -2, 39/35 → -3, 19 → -5, 3 → -7. Not a clamp: GL's MAX_LEVEL/MAX_LOD need another mechanism. Whether a positive bias reaches into b27 is untested | hardware |
+| 21-26 | **LOD bias**, one 6-bit field v in 1/8 levels: bias = (v - 63)/8, so the DDK's 0x3f is no bias. Level sampled = floor(λ + bias + 0.5). On a CE5300 board, for 16- to 128-texel chains, the shift is the same at every size: v 63..59 → 0, 58..51 → -1, 47/43 → -2, 39/35 → -3, 19 → -5, 3 → -7. Not a clamp: GL's MAX_LEVEL/MAX_LOD need another mechanism (the driver's: an explicit LOD from the program, `lower_lod_ctl`, docs/GL3.md "LOD bias and clamps"). Whether a positive bias reaches into b27 is untested | hardware |
 | 30 | set for L8, A8 and LA88 (channel replication?) | capture; hardware (open driver); guess (the meaning) |
 
 **T1:**

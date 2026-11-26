@@ -186,7 +186,7 @@ struct sgx_varyings {
 #define SGX_SLOT_NONE     0xffff
 /* constant numbers: uniforms from 0, the driver's own above them, from 2024
  * (docs/GL3.md) */
-#define SGX_MAX_CONST_K   2304
+#define SGX_MAX_CONST_K 2368
 #define SGX_MAX_CONST_MAP (SGX_MAX_CONST_K + 32) /* every constant and literal */
 /* a memory block window per 128 words (ld.a.d's offset is 7 bits): enough
  * for every constant a program can name (a vertex program's 1572 uniform

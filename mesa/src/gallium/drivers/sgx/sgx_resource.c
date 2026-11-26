@@ -1289,14 +1289,25 @@ sgx_resource_cube0(struct sgx_context *ctx, struct sgx_resource *res)
    return true;
 }
 
-/* The device tail of a mipmapped 2D texture from the last level a sampler
- * view allows (sgx_tex_set_tail): rare, when GL_TEXTURE_MAX_LEVEL changes */
+/* The device tail of a 2D texture for a sampler view of levels first to
+ * last (sgx_tex_set_tail): mipmapped, from last; without mipmaps, first
+ * must be its own texels, not an earlier tail's.  Rare, when
+ * GL_TEXTURE_MAX_LEVEL changes (a tail from level 4 left level 5 of a
+ * 32x32 texture level 4's colour for a later BASE_LEVEL 5: piglit
+ * tex-miplevel-selection) */
 void
 sgx_resource_tail(struct sgx_context *ctx, struct sgx_resource *res,
-                  unsigned last)
+                  unsigned first, unsigned last, bool mips)
 {
-   if (!res->texture || res->base.target != PIPE_TEXTURE_2D ||
-       last == res->tail_from || last >= sgx_tex_dev_last(&res->base))
+   if (!res->texture || res->base.target != PIPE_TEXTURE_2D)
+      return;
+   last = MIN2(last, res->base.last_level);
+   if (!mips) {
+      if (first <= res->tail_from)
+         return;
+      last = MAX2(first, last);
+   }
+   if (last == res->tail_from)
       return;
    /* levels rendered into: the CPU copy catches up, as for a map */
    if (res->rendered) {

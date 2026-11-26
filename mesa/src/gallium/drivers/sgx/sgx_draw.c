@@ -1164,6 +1164,30 @@ fill_consts(struct sgx_context *ctx, mesa_shader_stage stage,
                    : view->u.tex.last_level - view->u.tex.first_level + 1;
          raw = true;
       }
+      /* a sampler's LOD bias, MIN_LOD and MAX_LOD (sgx_program.c
+       * lower_lod_ctl): the clamps no further than the view's last level */
+      if (k->k >= SGX_K_LOD && k->k < SGX_K_LOD + 3 * SGX_K_LOD_UNITS) {
+         unsigned u = (k->k - SGX_K_LOD) / 3, c = (k->k - SGX_K_LOD) % 3;
+         const struct pipe_sampler_view *view = stage_views(ctx, stage)[u];
+         const struct pipe_sampler_state *ss = stage == MESA_SHADER_VERTEX
+                                                  ? ctx->vs_samplers[u]
+                                                  : ctx->samplers[u];
+         float top =
+            view && view->target != PIPE_BUFFER
+               ? (float)(view->u.tex.last_level - view->u.tex.first_level)
+               : 0.0f;
+         float lo = ss ? CLAMP(ss->min_lod, 0.0f, top) : 0.0f;
+         /* a cube's words start at level 0 (sgx_tex_words): its LOD from
+          * its base level on */
+         float on = view && view->texture->target == PIPE_TEXTURE_CUBE
+                       ? (float)view->u.tex.first_level
+                       : 0.0f;
+
+         v = !ss      ? 0.0f
+             : c == 0 ? ss->lod_bias + on
+             : c == 1 ? lo + on
+                      : CLAMP(ss->max_lod, lo, top) + on;
+      }
       if (k->k >= SGX_K_SIZE && k->k < SGX_K_SIZE + 3 * SGX_K_SIZE_UNITS) {
          /* the base level's width, height, and depth or layers
           * (sgx_program.c lower_txs_int) */
@@ -1987,11 +2011,13 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
             ctx->warned_cube = true;
             return;
          }
-         /* sampled past its last level: the device tail from that level */
-         if (view && samplers[unit] &&
-             samplers[unit]->min_mip_filter != PIPE_TEX_MIPFILTER_NONE)
-            sgx_resource_tail(ctx, sgx_resource(view->texture),
-                              view->u.tex.last_level);
+         /* sampled past its last level: the device tail from that level;
+          * without mipmaps, the base level its own */
+         if (view && samplers[unit] && view->target != PIPE_BUFFER)
+            sgx_resource_tail(
+               ctx, sgx_resource(view->texture), view->u.tex.first_level,
+               view->u.tex.last_level,
+               samplers[unit]->min_mip_filter != PIPE_TEX_MIPFILTER_NONE);
          if (view && sgx_tex_uses_cube0(view, samplers[unit]) &&
              !sgx_resource_cube0(ctx, sgx_resource(view->texture)))
             SKIP("no level-0 copy of a cube map");
