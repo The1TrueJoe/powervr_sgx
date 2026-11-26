@@ -2292,8 +2292,14 @@ txf_to_txl_instr(nir_builder *b, nir_tex_instr *tex, void *data)
       b, nir_fadd_imm(b, nir_i2f32(b, nir_channels(b, coord, nir_component_mask(n))),
                       0.5),
       nir_frcp(b, nir_u2f32(b, size)));
-   if (tex->is_array)
-      uv = nir_vec2(b, uv, nir_i2f32(b, nir_channel(b, coord, n)));
+   if (tex->is_array) {
+      /* (uv's components, then the layer) */
+      nir_def *cc[4];
+      for (unsigned k = 0; k < n; k++)
+         cc[k] = nir_channel(b, uv, k);
+      cc[n] = nir_i2f32(b, nir_channel(b, coord, n));
+      uv = nir_vec(b, cc, n + 1);
+   }
    nir_src_rewrite(&tex->src[ci].src, uv);
    if (li >= 0)
       nir_src_rewrite(&tex->src[li].src, nir_i2f32(b, lod));

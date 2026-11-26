@@ -277,6 +277,151 @@ lower_txs_int(nir_builder *b, nir_tex_instr *tex)
    return true;
 }
 
+/* gl_FragCoord's x and y as the hardware rasterizes them (no window
+ * transform: lower_tex_array only needs their parity), declaring the input
+ * if the program doesn't read it */
+static nir_def *
+array_frag_xy(nir_builder *b)
+{
+   nir_shader *s = b->shader;
+   nir_variable *v =
+      nir_find_variable_with_location(s, nir_var_shader_in, VARYING_SLOT_POS);
+
+   if (!v) {
+      v = nir_variable_create(s, nir_var_shader_in, glsl_vec4_type(),
+                              "gl_FragCoord");
+      v->data.location = VARYING_SLOT_POS;
+      v->data.interpolation = INTERP_MODE_SMOOTH;
+   }
+   return nir_load_input(b, 2, 32, nir_imm_int(b, 0), .base = 0,
+                         .component = 0, .dest_type = nir_type_float32,
+                         .io_semantics.location = VARYING_SLOT_POS,
+                         .io_semantics.num_slots = 1);
+}
+
+/* layer clamp(floor(z + 0.5), 0, n - 1), and the state with T2, the
+ * address, moved on to it */
+static nir_def *
+array_layer(nir_builder *b, nir_def *z, nir_def *sl)
+{
+   nir_def *layer = nir_f2i32(b, nir_ffloor(b, nir_fadd_imm(b, z, 0.5f)));
+
+   return nir_imin(b, nir_imax(b, layer, nir_imm_int(b, 0)),
+                   nir_iadd_imm(b, nir_channel(b, sl, 1), -1));
+}
+
+static nir_def *
+array_state(nir_builder *b, nir_def *words, nir_def *sl, nir_def *layer)
+{
+   nir_def *t2 = nir_iadd(b, nir_channel(b, words, 2),
+                          nir_imul(b, layer, nir_channel(b, sl, 0)));
+
+   return nir_vec4(b, nir_channel(b, words, 0), nir_channel(b, words, 1), t2,
+                   nir_channel(b, words, 3));
+}
+
+/* A sample of a 2D array (docs/GL3.md "texture arrays"): no layer field is
+ * known in the texture words, so each layer is a 2D texture of its own at a
+ * layer stride (sgx_tex_offset), and the sample is a 2D one whose state the
+ * program builds: the unit's words (SGX_K_TEXSTATE, the texelFetch ones for a
+ * fetch) with T2, the address, moved on to layer clamp(floor(z + 0.5), 0,
+ * n - 1).  The compiler takes the state from the texture_handle source
+ * (smp's state operand in temporaries; hardware: hwt_smp, ISA.md).  Needs
+ * the native integers.
+ *
+ * The TPU reads a sample's state once a 2x2 quad, from its first pixel, so
+ * with the layer changing inside a quad the other three read the first
+ * one's layer.  When z may differ between pixels (divergence analysis) and
+ * the sample isn't in divergent flow, the quad's four layers are made
+ * known to all four pixels and the sample is made once for each, every pixel
+ * keeping the one of its own layer.  The derivatives are coarse (measured:
+ * dFdx the first row's difference, dFdy the first column's, for all four), so
+ * a derivative of a value kept by one pixel only reads that pixel's: z of the
+ * first pixel, of the one beside it and of the one below.  The fourth's is
+ * z10 + z01 - z00, exact when z is affine or separable in x and y across the
+ * quad (a varying, a uniform, gl_FragCoord math); otherwise that pixel can
+ * read a neighbour's layer.  R0, the row parity of the quad's first row,
+ * comes from a dFdx (no sign, whatever the target's y direction), and dFdy's
+ * sign from a dFdy of a row flag. */
+static bool
+lower_tex_array(nir_builder *b, nir_tex_instr *tex, void *data)
+{
+   int ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+
+   if (!tex->is_array || tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
+       nir_tex_instr_is_query(tex) || ci < 0 ||
+       tex->texture_index >= SGX_K_SIZE_UNITS ||
+       nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) >= 0 ||
+       (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
+        tex->op != nir_texop_txl))
+      return false;
+   nir_def *coord = tex->src[ci].src.ssa;
+   nir_scalar zs = nir_scalar_chase_movs(nir_get_scalar(coord, 2));
+   bool per_quad = b->shader->info.stage == MESA_SHADER_FRAGMENT &&
+                   zs.def->divergent && !tex->instr.block->divergent;
+
+   b->cursor = nir_before_instr(&tex->instr);
+   unsigned base = SGX_K_TEXSTATE + SGX_K_TEXSTATE_N * tex->texture_index;
+   bool fetch = tex->backend_flags & SGX_TEX_FETCH;
+   nir_def *words =
+      nir_load_uniform(b, 4, 32, nir_imm_int(b, 0), .base = base + (fetch ? 4 : 0),
+                       .range = 4, .dest_type = nir_type_int32);
+   nir_def *sl =
+      nir_load_uniform(b, 2, 32, nir_imm_int(b, 0), .base = base + 8, .range = 2,
+                       .dest_type = nir_type_int32);
+   nir_def *z = nir_channel(b, coord, 2);
+   nir_def *layer = array_layer(b, z, sl);
+
+   nir_src_rewrite(&tex->src[ci].src, nir_trim_vector(b, coord, 2));
+   tex->coord_components = 2;
+   tex->is_array = false;
+   if (!per_quad) {
+      nir_tex_instr_add_src(tex, nir_tex_src_texture_handle,
+                            array_state(b, words, sl, layer));
+      return true;
+   }
+
+   nir_def *xy = nir_ffloor(b, array_frag_xy(b));
+   nir_def *xo = nir_ffract(b, nir_fmul_imm(b, nir_channel(b, xy, 0), 0.5f));
+   nir_def *yo = nir_ffract(b, nir_fmul_imm(b, nir_channel(b, xy, 1), 0.5f));
+   nir_def *zero = nir_imm_float(b, 0.0f);
+   /* 0.5 for an odd x or y: xo, yo in {0, 0.5} */
+   nir_def *r0 = nir_ddx_coarse(b, nir_fmul(b, yo, xo)); /* row0's yo * 0.5 */
+   nir_def *row0 = nir_feq(b, nir_fmul_imm(b, yo, 0.5f), r0);
+   nir_def *left = nir_feq(b, xo, zero);
+   nir_def *rs = nir_ddy_coarse(b, nir_bcsel(b, row0, zero, nir_imm_float(b, 1.0f)));
+   nir_def *z00 = nir_fneg(b, nir_ddx_coarse(b, nir_bcsel(b, nir_iand(b, row0, left), z, zero)));
+   nir_def *z10 = nir_ddx_coarse(
+      b, nir_bcsel(b, nir_iand(b, row0, nir_inot(b, left)), z, zero));
+   nir_def *z01 = nir_fdiv(
+      b, nir_ddy_coarse(b, nir_bcsel(b, nir_iand(b, nir_inot(b, row0), left), z, zero)),
+      rs);
+   nir_def *zq[4] = {z00, z10, z01, nir_fsub(b, nir_fadd(b, z10, z01), z00)};
+
+   /* the four samples: the instruction itself the first, three clones put
+    * after it, each in the shader before its sources change; their states
+    * are built before the first */
+   nir_def *lq[4], *st[4];
+   nir_tex_instr *tq[4] = {tex};
+   for (unsigned q = 0; q < 4; q++) {
+      lq[q] = array_layer(b, zq[q], sl);
+      st[q] = array_state(b, words, sl, lq[q]);
+   }
+   b->cursor = nir_after_instr(&tex->instr);
+   for (unsigned q = 1; q < 4; q++) {
+      tq[q] = nir_instr_as_tex(nir_instr_clone(b->shader, &tex->instr));
+      nir_builder_instr_insert(b, &tq[q]->instr);
+   }
+   for (unsigned q = 0; q < 4; q++)
+      nir_tex_instr_add_src(tq[q], nir_tex_src_texture_handle, st[q]);
+   /* each pixel its own layer's: the fourth when none of the others is */
+   nir_def *res = &tq[3]->def;
+   for (int q = 2; q >= 0; q--)
+      res = nir_bcsel(b, nir_ieq(b, layer, lq[q]), &tq[q]->def, res);
+   nir_def_rewrite_uses_after(&tex->def, res);
+   return true;
+}
+
 /* Without SGX_DEBUG=tex3d a 3D texture is one texel (max_texture_3d_levels
  * = 1), kept as a 1x1 2D texture
  * (sgx_resource), which every (s, t, r) reads whatever the wrap and filter:
@@ -716,6 +861,9 @@ struct prog_info {
       bool fetch;     /* a texelFetch: state of its own (sgx_draw.c) */
       unsigned plane; /* an RG32 / RGBA32 unit's plane (channel) */
       unsigned state; /* its texture state block */
+      /* the program's state, in r<state_r> on (a 2D array layer's) */
+      bool state_in_r;
+      unsigned state_r;
       uint64_t smp;
    } deps[SGX_MAX_DEP_SAMPLES];
    unsigned n_deps;
@@ -749,8 +897,11 @@ insert_samples(const uint64_t *code, unsigned count,
          uint32_t lo = (uint32_t)info->deps[j].smp,
                   hi = info->deps[j].smp >> 32;
 
+         /* (the program's own state: r, bank 0) */
          lo = (lo & ~(0x7fu << 21 | 0x7fu << 7 | 0xc0000000u)) |
-              info->deps[j].raw << 21 | sa[j] << 7 | 0xc0000000u;
+              info->deps[j].raw << 21 |
+              (info->deps[j].state_in_r ? info->deps[j].state_r << 7
+                                        : sa[j] << 7 | 0xc0000000u);
          hi &= ~(0x80u | 1u << 17);
          w[k++] = (uint64_t)hi << 32 | lo;
          w[k++] = (uint64_t)(0xf9200000u | (hi & 1)) << 32; /* wdf drc */
@@ -827,6 +978,8 @@ read_program(const struct sgx_shader *out, struct sgx_pipe_shader *so,
       info->deps[info->n_deps].fetch = x->fetch;
       info->deps[info->n_deps].plane = x->plane;
       info->deps[info->n_deps].state = x->state;
+      info->deps[info->n_deps].state_in_r = x->state_in_r;
+      info->deps[info->n_deps].state_r = x->state_r;
       if (x->state >= out->n_dep_states)
          return info->why = "dependent sample without texture state", false;
       info->n_deps++;
@@ -1750,8 +1903,17 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
    }
    /* textureGrad, the Offset variants and texelFetch as smp can do them;
     * the sizes they ask for are lower_txs's */
-   if (opts.native_integers)
+   if (opts.native_integers) {
       NIR_PASS(_, nir, sgx_lower_tex, &opts);
+      /* (after it: a texelFetch of an array is a txl at the texel's centre
+       * by then, its layer the coordinate's z) */
+      if (!vertex) {
+         /* (which layer coordinates may differ between pixels) */
+         nir_divergence_analysis(nir);
+         NIR_PASS(_, nir, nir_shader_tex_pass, lower_tex_array,
+                  nir_metadata_control_flow, NULL);
+      }
+   }
    /* (a vertex program's sizes from its own units, fill_consts) */
    NIR_PASS(_, nir, nir_shader_instructions_pass, lower_txs,
             nir_metadata_control_flow, &opts.native_integers);

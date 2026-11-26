@@ -234,7 +234,9 @@ sgx_tex_twiddled(const struct pipe_resource *prsc, unsigned w, unsigned h)
    if (!util_is_power_of_two_nonzero(w) || !util_is_power_of_two_nonzero(h) ||
        sgx_tex_volume(prsc))
       return false;
-   return !(prsc->target == PIPE_TEXTURE_2D &&
+   /* (a 2D array's layers are rendered into as 2D textures) */
+   return !((prsc->target == PIPE_TEXTURE_2D ||
+             prsc->target == PIPE_TEXTURE_2D_ARRAY) &&
             (prsc->bind & PIPE_BIND_RENDER_TARGET) && prsc->height0 > 1 &&
             MIN2(prsc->width0, prsc->height0) < TILE);
 }

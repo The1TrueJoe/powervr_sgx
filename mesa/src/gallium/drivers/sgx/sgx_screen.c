@@ -274,6 +274,9 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
    /* textureLod (and textureGrad, lowered to it: sgx_lower_tex) in a fragment
     * shader: a dependent smp with its LOD (ARB_shader_texture_lod) */
    caps->fragment_shader_texture_lod = true;
+   /* EXT_texture_array (2D arrays; lower_tex_array), with glsl130 */
+   if (sgx_drv_debug & SGX_DEBUG_GLSL130)
+      caps->max_texture_array_layers = 256;
    /* OES_texture_half_float_linear: F16 textures are F32 planes the TPU
     * doesn't filter; LINEAR at one level is four taps in the shader
     * (sgx_tex_float_planes, lower_srgb_filter).  With them (glsl130) */
@@ -464,6 +467,12 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
       return !(sgx_drv_debug & SGX_DEBUG_TEX3D) ||
              (!(usage & PIPE_BIND_DEPTH_STENCIL) && !sgx_tex_word32(format) &&
               !sgx_tex_raw32(format));
+   /* a 2D texture a layer at a layer stride, the program choosing the
+    * layer's address (sgx_program.c lower_tex_array): with the native
+    * integers it needs; not the planar formats (a plane is a whole chain) */
+   case PIPE_TEXTURE_2D_ARRAY:
+   case PIPE_TEXTURE_1D_ARRAY: /* a 2D one a texel high (lower_1d) */
+      return (sgx_drv_debug & SGX_DEBUG_GLSL130) && sgx_tex_raw32(format) < 2;
    default:
       return false;
    }
