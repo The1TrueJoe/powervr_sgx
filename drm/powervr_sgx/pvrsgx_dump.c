@@ -59,6 +59,16 @@ static void dump_ukregs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 		if (pvrsgx_probe_read[i] < 0x4000 && !(pvrsgx_probe_read[i] & 3))
 			seq_buf_printf(sb, "PROBE_READ           0x%04x 0x%08x\n", pvrsgx_probe_read[i],
 				       sgx_rd(sdev, pvrsgx_probe_read[i]));
+	if (sdev->fw.probe_kpage.pages) {
+		const u32 *w = sdev->fw.probe_kpage.cpu;
+		int n = 0;
+
+		for (u32 i = 0; i < SGX_MMU_PAGE_SIZE / 4; i++)
+			if (w[i] != PROBE_KPAGE_WORD(i) && n++ < 64)
+				seq_buf_printf(sb, "PROBE_KPAGE          0x%08x 0x%08x\n",
+					       sdev->fw.probe_kpage.dev_addr + i * 4, w[i]);
+		seq_buf_printf(sb, "PROBE_KPAGE          %d words changed\n", n);
+	}
 }
 
 /* Registers safe to read while the clocks are on. */

@@ -74,4 +74,7 @@ void pvrsgx_fw_hostctl_set(struct pvrsgx_device *sdev, unsigned int word, u32 v)
 void pvrsgx_fw_dump(struct seq_buf *sb, struct pvrsgx_device *sdev, unsigned int b,
 		    const char *name);
 
+/* Word i of the probe_kpage page: an address in the hole below the kernel code heap. */
+#define PROBE_KPAGE_WORD(i)	(0x0e900000u + (i) * 0x100)
+
 #endif /* PVRSGX_FW_H */

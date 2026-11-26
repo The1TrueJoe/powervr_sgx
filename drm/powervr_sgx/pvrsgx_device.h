@@ -90,6 +90,8 @@ struct pvrsgx_fw {
 	struct pvrsgx_kmem code;
 	/** @pdtable: Single-context cores: the directory of each VM by slot, GPU read-only. */
 	struct pvrsgx_kmem pdtable;
+	/** @probe_kpage: Bring-up (SGX530): a patterned page in a firmware heap hole. */
+	struct pvrsgx_kmem probe_kpage;
 	/** @pd_slots: The @pdtable slots VMs hold. */
 	struct ida pd_slots;
 	/** @addr: Device address of each buffer. */

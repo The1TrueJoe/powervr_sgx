@@ -438,6 +438,33 @@ void pvrsgx_fw_pd_slot_put(struct pvrsgx_device *sdev, int slot)
 	ida_free(&sdev->fw.pd_slots, slot);
 }
 
+/*
+ * Bring-up probe (SGX530, default off): map one page at this firmware-heap
+ * address, word i holding PROBE_KPAGE_WORD(i), an address in the unmapped hole
+ * below the kernel code heap; the hang dump prints the words that changed. A
+ * read of the page then shows up as a fault at the word's value.
+ */
+static unsigned int probe_kpage;
+module_param(probe_kpage, uint, 0444);
+MODULE_PARM_DESC(probe_kpage, "Bring-up (SGX530): firmware-heap address to map a patterned page at (default 0, off)");
+
+static int probe_kpage_init(struct pvrsgx_device *sdev)
+{
+	struct pvrsgx_kmem *km = &sdev->fw.probe_kpage;
+	int err;
+
+	if (!probe_530(sdev, probe_kpage))
+		return 0;
+	err = pvrsgx_kmem_alloc(sdev, km, probe_kpage & ~(SGX_MMU_PAGE_SIZE - 1),
+				SGX_MMU_PAGE_SIZE, 0, 0);
+	if (err)
+		return err;
+	for (u32 i = 0; i < SGX_MMU_PAGE_SIZE / 4; i++)
+		((u32 *)km->cpu)[i] = PROBE_KPAGE_WORD(i);
+	drm_warn(&sdev->base, "probe: patterned page at 0x%08x\n", km->dev_addr);
+	return 0;
+}
+
 /* The arenas and the built image, once the file is loaded. */
 static int fw_arenas(struct pvrsgx_device *sdev)
 {
@@ -463,6 +490,7 @@ static int fw_arenas(struct pvrsgx_device *sdev)
 	if (err)
 		return err;
 	err = pdtable_init(sdev);
+	err = err ?: probe_kpage_init(sdev);
 	if (err)
 		return err;
 
@@ -509,6 +537,7 @@ void pvrsgx_fw_fini(struct pvrsgx_device *sdev)
 	sdev->fw.patches = NULL;
 	kfree(sdev->fw.image);
 	sdev->fw.image = NULL;
+	pvrsgx_kmem_free(sdev, &sdev->fw.probe_kpage);
 	pvrsgx_kmem_free(sdev, &sdev->fw.pdtable);
 	pvrsgx_kmem_free(sdev, &sdev->fw.code);
 	pvrsgx_kmem_free(sdev, &sdev->fw.data);
