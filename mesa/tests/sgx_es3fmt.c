@@ -532,41 +532,42 @@ main(void)
       static const GLenum mode[] = {GL_REPEAT, GL_MIRRORED_REPEAT};
 
       for (int pr = 0; pr < 2; pr++)
-      for (unsigned i = 0; i < sizeof(f) / sizeof(f[0]); i++)
-         for (int lin = 0; lin < 2; lin++)
-            for (int m = 0; m < 2; m++) {
-               GLuint tx = tex2d(f[i].ifmt, T10, T10, f[i].fmt, f[i].type,
-                                 f[i].data, lin ? GL_LINEAR : GL_NEAREST);
-               int bad = 0, fx = -1, fy = -1;
+         for (unsigned i = 0; i < sizeof(f) / sizeof(f[0]); i++)
+            for (int lin = 0; lin < 2; lin++)
+               for (int m = 0; m < 2; m++) {
+                  GLuint tx = tex2d(f[i].ifmt, T10, T10, f[i].fmt, f[i].type,
+                                    f[i].data, lin ? GL_LINEAR : GL_NEAREST);
+                  int bad = 0, fx = -1, fy = -1;
 
-               glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, mode[m]);
-               glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, mode[m]);
-               draw(pp[pr], tx, pr ? kq : NULL);
-               glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
-               for (int y = 0; y < H; y++)
-                  for (int x = 0; x < W; x++) {
-                     double u = ((x + 0.5) / W) * 2.0 - 0.5,
-                            v = ((y + 0.5) / H) * 2.0 - 0.5;
-                     int ok = 1;
+                  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, mode[m]);
+                  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, mode[m]);
+                  draw(pp[pr], tx, pr ? kq : NULL);
+                  glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                  for (int y = 0; y < H; y++)
+                     for (int x = 0; x < W; x++) {
+                        double u = ((x + 0.5) / W) * 2.0 - 0.5,
+                               v = ((y + 0.5) / H) * 2.0 - 0.5;
+                        int ok = 1;
 
-                     for (int c = 0; c < f[i].comps; c++) {
-                        int want = (int)lrint(ref10(u, v, mode[m], lin, c) * 255.0);
-                        /* the control is the TPU's to filter; the F32
-                         * words are filtered in the program, exactly */
-                        int slack = lin && !i ? slack10(u, v, mode[m], c) : 0;
-                        if (abs(px[4 * (y * W + x) + c] - want) > t + 1 + slack)
-                           ok = 0;
+                        for (int c = 0; c < f[i].comps; c++) {
+                           int want = (int)lrint(ref10(u, v, mode[m], lin, c) * 255.0);
+                           /* the control is the TPU's to filter; the F32
+                            * words are filtered in the program, exactly */
+                           int slack =
+                              pr && lin && !i ? slack10(u, v, mode[m], c) : 0;
+                           if (abs(px[4 * (y * W + x) + c] - want) > t + 1 + slack)
+                              ok = 0;
+                        }
+                        if (!ok && !bad++)
+                           fx = x, fy = y;
                      }
-                     if (!ok && !bad++)
-                        fx = x, fy = y;
-                  }
-               printf("10%s %-15s %-7s %-15s %4d of %d pixels wrong (first %d,%d): %s\n",
-                      pr ? "p" : " ", f[i].name, lin ? "LINEAR" : "NEAREST",
-                      m ? "MIRRORED_REPEAT" : "REPEAT", bad, W * H, fx, fy,
-                      bad ? "FAIL" : "OK");
-               fails += bad != 0;
-               glDeleteTextures(1, &tx);
-            }
+                  printf("10%s %-15s %-7s %-15s %4d of %d pixels wrong (first %d,%d): %s\n",
+                         pr ? "p" : " ", f[i].name, lin ? "LINEAR" : "NEAREST",
+                         m ? "MIRRORED_REPEAT" : "REPEAT", bad, W * H, fx, fy,
+                         bad ? "FAIL" : "OK");
+                  fails += bad != 0;
+                  glDeleteTextures(1, &tx);
+               }
    }
 
    GLenum e = glGetError();
