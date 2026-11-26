@@ -136,7 +136,7 @@ and are covered. The gaps are in the state around them:
 10. **Limits** (home: STATE.md, UAPI.md):
     - the VDM index count, and partial primitives;
     - the guard band and the render-target row pitch;
-    - the shader and screen caps: 16 attributes, 64 temps, 8 samplers, 2048
+    - the shader and screen caps: 16 attributes, 64 temps, 16 samplers, 2048
       texture size, LOD bias 16;
     - LIMITS_GET's TA kick count: 64 reported, 2 accepted.
 
@@ -383,7 +383,7 @@ Facts that live behind `sgxws.h` (winsys words) are in the winsys section;
 | `sgx_program.c:790-793` | last plain iteration b29, last sample b30 | PDS.md "DOUTI" | covered |
 | `sgx_program.c:703-708` | gl_FragDepth not written (depthf form not traced) | ISA.md "Program structure …" (gl_FragDepth guess) | n/a: no fact used (warning only) |
 | `sgx_screen.c:24-53` debug options | flushrt: `SGX_FLUSH_HW_RENDER_TARGET` hangs a srvinit-started microkernel | GEN.md "Layout: the microkernel reads the previous client's render"; NOTES.md "A frame from code alone" | covered |
-| `sgx_screen.c:87-126` shader caps | VS 16 inputs, FS 10 inputs (sets), VS 11 outputs, 64 temps, 8 samplers, 16384 instructions, constants sa9 (sa10 vertex) to sa127, mediump two to a register | ISA.md "Registers", "Constants past sa127", "Vertex shaders" (10 sets) | partial |
+| `sgx_screen.c:87-126` shader caps | VS 16 inputs, FS 10 inputs (sets), VS 11 outputs, 64 temps, 16 samplers (ISA.md "Texture units"), 16384 instructions, constants sa9 (sa10 vertex) to sa127, mediump two to a register | ISA.md "Registers", "Constants past sa127", "Vertex shaders" (10 sets) | partial |
 | `sgx_screen.c:93-98, 285-292` | a non-dependent (PDS) read needs the coordinate to be a whole varying of its own set; a projected one a whole vec4 at component 0 | ISA.md "The texture-sample sequence …" (non-dependent fragment read: coordinate = an untouched varying); PDS.md "DOUTI" sample half | partial |
 | `sgx_screen.c:129-174` screen caps | max 2-D texture 2048, cube levels 12, no 3-D textures, 1 render target, line width 1-16, point size 1-511, granularity 0.1, LOD bias 16, fragment coord origin upper left at half-integer centers, PCI 8086:089b, no fixed-function blender | STATE.md §3 "Lines and points" (line width clamp [1, 16], ISPB `ff`; points clamped to 511), §3 "Blending …"; PDS.md "DOUTI" (gl_FragCoord at pixel centers in memory order); STATE.md §4 "PBE words" (top row first); DRM-DRIVER.md (8086:089b) | partial |
 | `sgx_screen.c:177-232` `is_format_supported` | windows/scanout: BGRA8 only (PBE code 0); render targets: BGRA8/RGBA8 (codes 0/1), not 565 because T1 0x05 hands the compiler's unpack R and B swapped; depth Z16/Z24X8/Z24S8, kept per tile by the ISP within one render (no ZLS); sampler formats = those with a T1 code, plus render targets sampled strided; 1D/2D/RECT/CUBE targets | STATE.md §4 "Format codes"; TEX.md §1, §3, §4, §7 "Depth and stencil across renders (ZLS)"; PIGLIT.md "Results" (no ZLS) | partial |
@@ -485,7 +485,7 @@ Counts (rows with hardware facts): **covered 44, partial 27, missing 2**; 12 row
 ##### Shader caps (partial) — ISA.md "Register files and operand limits" / "Vertex shaders"
 - Vertex attribute limit: 16 attribute slots of 4 dwords (PA budget 0x80 minus header).
 - Temporaries available to a program: 64 (ISA.md says r0-r123 allocatable, 6-bit numbers under format select); state which limit applies.
-- Texture units: 8 samplers per fragment program.
+- Texture units: 16 per fragment program, documented in ISA.md "Texture units".
 - Maximum program length (16384 instructions; `br`/`ba` reach 18 bits).
 - VS outputs: position + 10 sets = 11 vec4 slots.
 

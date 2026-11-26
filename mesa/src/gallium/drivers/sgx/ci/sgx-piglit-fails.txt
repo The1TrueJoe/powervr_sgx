@@ -22,6 +22,12 @@ spec@arb_texture_rectangle@texrect-many,Fail
 spec@glsl-1.10@execution@varying-packing@simple float array,Fail
 spec@glsl-1.10@execution@varying-packing@simple float separate,Fail
 
+# a loop over a sampler array as long as GL_MAX_TEXTURE_IMAGE_UNITS (16 since 0.2.4): the
+# compiler's max_unroll_iterations is 8, so the loop stays and the GLSL 1.10 link refuses the
+# indexing (both passed at 8 units)
+spec@!opengl 2.0@max-samplers,Fail
+spec@!opengl 2.0@max-samplers border,Fail
+
 # the window's buffers on the surfaceless platform: these read, draw or blit the front buffer or the window's depth/stencil, which a surfaceless context doesn't have (piglit aborts or reads nothing)
 fast_color_clear@fcc-front-buffer-distraction,Fail
 hiz@hiz-depth-read-window-stencil0,Fail

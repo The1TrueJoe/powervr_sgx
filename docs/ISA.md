@@ -1862,6 +1862,17 @@ them in memory and `ld` them into 4 temps followed by `wdf`
 for the formats the open stack samples; the chunk split itself is
 **unconfirmed**).
 
+**Texture units.** Every sample brings its own 4 state words: a `DOUTT` for a
+non-dependent one, 4 SA registers (or temps) for a dependent `smp`. Nothing
+in the core holds state per unit, so the unit number is only the driver's
+index into what the application bound. How many units a program may read is
+set by the SA left for the state words (4 per distinct state), not by the
+hardware. The open stack gives fragment programs 16 units, as Direct3D 9
+has, and up to 16 vertex units (**hardware**, open stack, a CE5300 board:
+`mesa/tests/sgx_units16.c` reads 16 mipmapped units, 2D and cube, in one
+program; dEQP-GLES2 `functional.texture.units`). Until 0.2.4 it gave
+fragment programs 8.
+
 **Dependent 2D read** `c = texture2D(s, uv)`, uv computed in r2..r3, c wanted
 as f32 in r8..r11 (**hardware**, open stack):
 1. (MOE state default, internal registers not live; otherwise save them.)
