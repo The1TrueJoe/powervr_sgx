@@ -164,7 +164,7 @@ Formats wider than 32 bits, and more than one draw buffer, need either:
 |---|---|---|---|---|
 | GLSL 1.30 | integer ALU, bitwise, int↔float conversion exist | gl3-compiler's work | ISA.md "What a backend would use beyond GLSL ES 1.0" (encoder; hardware for the bitwise ops, hwt_p7) | medium (compiler) |
 | 8 draw buffers (MRT), `EXT_draw_buffers2` | unknown how; **listed** (ICD: 8) | H1; fallback a 3D pass per target. Mesa accepts 4. `EXT_draw_buffers2` (per-target blend and mask) is free once MRT works: blend and mask are shader code per output | see "The pixel path" | medium |
-| float textures, RGBA32F / RGBA16F / R32F … (`ARB_texture_float`) | one F32 one-channel sampler format, 0x12, unfiltered | done (`SGX_DEBUG=glsl130`): RG32F / RGBA32F are F32 planes as RGBA32UI; R16F / RG16F / RGBA16F, R11G11B10F, RGB9E5 and RGB10_A2 converted to F32 planes on upload (`sgx_tex_f32_conv`), back on readback; LINEAR at one level by four taps in the shader (`lower_srgb_filter`, `OES_texture_half_float_linear`). Gap: the planes are strided F32, one level: a mipmapped float texture samples its base level (a twiddled 0x12 with mips is untested, H2) | `mesa/tests/sgx_es3fmt.c` on Clover Trail; TEX.md §15 (0x12 unfiltered) | done (glsl130), mips open |
+| float textures, RGBA32F / RGBA16F / R32F … (`ARB_texture_float`) | one F32 one-channel sampler format, 0x12, unfiltered | done (`SGX_DEBUG=glsl130`): RG32F / RGBA32F are F32 planes as RGBA32UI; R16F / RG16F / RGBA16F, R11G11B10F, RGB9E5 and RGB10_A2 converted to F32 planes on upload (`sgx_tex_f32_conv`), back on readback; LINEAR at one level by four taps in the shader (`lower_srgb_filter`, `OES_texture_half_float_linear`). A 2D one of power-of-two levels is a twiddled chain of planes sampled through 0x0c, NEAREST, so its levels are sampled (`sgx_tex_word_chain`, "Status"); others are strided F32, one level: a mipmapped NPOT or cube one samples its base level | `mesa/tests/sgx_es3fmt.c` on Clover Trail; TEX.md §15 (0x12 unfiltered) | done (glsl130), mips open |
 | float render targets (`ARB_color_buffer_float`) | unknown PBE codes | 32-bit formats by shader packing (above); wider ones need H1. Clamping control is shader work | STATE.md §4 PBE words (o0 raw); listed | medium (≤ 32 bit: high) |
 | half-float vertex attributes (`ARB_half_float_vertex`) | — | the driver gathers vertices on the CPU (`sgx_draw.c`) and converts | hardware, open driver (the gather) | high |
 | integer textures (`EXT_texture_integer`) | no integer sampler format known | 8-bit: sample the unorm format (0x0d, 0x1a, 0x1b) NEAREST and scale by 255 in the shader; 32-bit one-channel: 0x12 if it returns the stored bits unchanged (**H2**); wider, or as a general path: `texelFetch` through `ld` from the texel's address. Integer textures are never filtered, so NEAREST is all GL asks | TEX.md §1 (formats), §15 (0x12); ISA.md `ld` (capture); the ICD doesn't list the extension | medium |
@@ -565,6 +565,22 @@ Runs 4 and 5 (the second CE5300 board, 2026-11-12; `docs/log/entries/2026-11-12-
     `sgx_tex_plane_stride`, a dependent read a plane (the compiler's
     `tex_r32x2` / `tex_r32x4`; the read's plane is added to its state's
     address);
+  - **mipmapped** (2026-11-25): a 2D R32, RG32 or RGBA32 texture (integer
+    or float) of power-of-two levels is stored as an RGBA8 one is, each
+    plane a twiddled chain to 1x1, and sampled through 0x0c, which returns
+    the word unchanged (H2), with NEAREST forced: the sampler picks the
+    level and wraps (`sgx_tex_word_chain`). The strided layout has no
+    chain, so every level read the base level. A plane read is dependent,
+    so it takes its LOD from the derivatives (`lower_dep_lod`), plain
+    samples included. Depth textures, NPOT ones and the rest stay strided.
+    dEQP-GLES3, the 648 integer-format texture cases (on dev with 2D
+    arrays, transform feedback and the ES 3.0 switch merged in): 16 fail
+    → pass, `basic_teximage2d` and `basic_texsubimage2d` 2D of R32, RG32,
+    RGB32 (stored RGBA32) and RGBA32, signed and unsigned; none pass →
+    fail. A single level of each already passed `texture.format.sized.2d`.
+    Still failing there: 16-bit integer formats (no driver format: st has
+    no fallback for R16UI), cubes of the 32-bit ones (not offered), NPOT
+    mipmaps;
   - rendered: RGBA8UI, RG8UI, R8UI (the word's B, G, R, A bytes, PBE format
     1), R32UI (format 0), RG32UI and RGBA32UI a pass a channel into their
     planes (a later pass tests depth EQUAL, writes no depth or stencil, stencil

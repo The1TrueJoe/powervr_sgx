@@ -463,12 +463,9 @@ main(void)
                       "out vec4 o;\n"
                       "void main() { o = (textureLod(s, uv, 1.0) - k.x) * k.y; }\n");
       draw(p, tx, k4);
-      /* informative: F32 planes are strided, one level (sgx_tex_words) */
-      unsigned char q[4];
-      glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q);
-      printf("9 RGBA32F mipmapped, textureLod level 1: got %u %u %u %u, level 1"
-             " is 159 96 128 159 (informative: one level, F32 planes strided)\n",
-             q[0], q[1], q[2], q[3]);
+      /* a POT 2D one's planes are twiddled chains (sgx_tex_word_chain) */
+      check("9 RGBA32F mipmapped, textureLod level 1", 32, 32, 159, 96, 128,
+            159, 2);
    }
 
    /* 10 */
