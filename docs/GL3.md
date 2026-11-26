@@ -795,9 +795,22 @@ the coming `xfb`). Measured on dev alone against dev, default flags:
   stencil list 31 skip → pass, nothing lost. Multisample list unchanged.
 - dEQP-GLES3, full mustpass, on dev with #61, transform feedback (merged by
   hand against the occlusion queries), the LOD control and word-chain changes
-  and this switch, `SGX_DEBUG=xfb`: not run yet. Parts of it: the 648
-  integer-format texture cases, 192 pass with the switch alone and 216 with
-  the word-chain and LOD changes; `texture.mipmap` 183 of 236.
+  and this switch, `SGX_DEBUG=xfb`, on a CE5300 board (rev 1014),
+  2026-11-26: 34,052 pass, 8,745 fail, 1,555 skip, 252 warn, 157 flake, 7
+  timeouts of 44,768, with no crashes or hangs. Dev has no ES 3.0 context, so
+  there is nothing to compare with. The largest failing groups:
+  - `shaders.*` (2,442 of 21,239): operators, matrices, conversions and
+    texture functions, at every precision and in both stages.
+  - `texture.*` (2,821 of 5,895): specification, filtering, wrap, shadow,
+    format and units. The 7 timeouts: 6 are 3D `linear_mipmap_linear`
+    filtering, 1 is `flush_finish.flush_wait`.
+  - `ubo.*` (1,685 of 2,357): `ubo.random` fails all 325 of its cases.
+  - `fbo`, `fragment_out` and `fragment_ops.blend` (955): float and
+    integer render targets, blits.
+  - `transform_feedback` (279 of 1,320).
+  Parts of it measured earlier: the 648 integer-format texture cases, 192
+  pass with the switch alone and 216 with the word-chain and LOD changes;
+  `texture.mipmap` 183 of 236.
 
 Provoking vertex first waits for flat shading, which the driver doesn't do
 yet (DOUTI b25-26, STATE.md §3).
