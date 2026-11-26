@@ -7,14 +7,18 @@
  * memory, and one SUBMIT_JOBS transfer job with a CMD_TRANSFER stream runs each
  * blit (docs/TEX.md 3 and 10). Every destination byte is checked.
  *
- *   powervr_sgx_blit [-v] [-n rounds] [-T] [-2]
+ *   powervr_sgx_blit [-v] [-n rounds] [-T] [-2] [-c] [-p bytes]
  *
  * -T puts the sampled source in the texture heap instead of the general heap.
  * -2 first runs one round in a process of its own, to its exit, then the rounds
  * in a new one: the second client's programs sit at the first's addresses, so
  * the GPU's caches must not keep the first's (released-context invalidate).
+ * -c runs only the clear. -p puts that many bytes of general heap before the
+ * clear and copy destination, to see where a misplaced write moves.
  *
- * Cases, 64x64 BGRA8888 from a CPU-written pattern:
+ * Cases, 64x64 BGRA8888:
+ *   clear    nothing  -> strided            every pixel the clear shader's colour
+ * and from a CPU-written pattern:
  *   copy   strided  -> strided            exact copy
  *   up     strided  -> twiddled           (texture upload)
  *   down   twiddled -> linear             the upload read back: equals the pattern
@@ -145,7 +149,30 @@ static void upload(struct buf *b, uint32_t va, uint32_t bytes)
 /* The context's static programs, as blitest's context() (TEX.md 10). */
 static struct sgxtex_blit_ctx X;
 static struct buf usse, bgb, pdsc, pdsp;
-static uint32_t emit, eot_next;
+static uint32_t emit, eot_next, clear_use;
+/*
+ * -E (bring-up): the end-of-tile program is `nop [end]`, so nothing reaches the PBE;
+ * -EE: the pixel event's emit task too.
+ */
+static int eot_nop;
+/* -B (bring-up): bytes of general heap before the background block, which moves 3D_REQ_BASE */
+static uint32_t bg_pad;
+/* -w (bring-up): the clear's destination is w x w (at most 64) */
+static uint32_t clear_w = 64;
+
+/* phas.i #0, #0 [wait=7]; limm o0, #CLEAR_COLOUR [end] */
+#define CLEAR_COLOUR 0xff00ff00u
+static const uint32_t clear_shader[4] = { 0x00000000, 0xfa440700, 0x0000ff00, 0xfc27f181 };
+
+/* A PDS program built in 2-dword rows, into client memory in the core's layout. */
+static uint32_t put_pds(struct buf *b, uint32_t va, const uint32_t *w, uint32_t rows, uint32_t code)
+{
+	uint32_t t[64];
+	uint32_t out = sgxtex_pds_layout(t, w, rows, code);
+
+	put(b, va, t, out * 4 + code);
+	return out;
+}
 
 /*
  * Each blit's end-of-tile program goes to the next 128 bytes of the code
@@ -160,7 +187,7 @@ static void eot_place(void)
 	X.eot_use = usse.va + eot_next;
 	eot_next += 0x80;
 	sgxtex_xctx_pixel_event(ev, X.eot_use, emit);
-	put(&pdsc, X.pds_event, ev, SGXTEX_EVENT_WORDS);
+	put_pds(&pdsc, X.pds_event, ev, SGXTEX_EVENT_ROWS, SGXTEX_EVENT_WORDS - 4 * SGXTEX_EVENT_ROWS);
 }
 
 static void programs(void)
@@ -168,27 +195,36 @@ static void programs(void)
 	uint32_t sec[SGXTEX_SECONDARY_WORDS], nop;
 
 	usse = bo(DRM_POWERVR_SGX_HEAP_USSE_PIXEL, 0x20000);
+	if (bg_pad)
+		bo(DRM_POWERVR_SGX_HEAP_GENERAL, bg_pad);
 	bgb = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 0x4800);
 	pdsc = bo(DRM_POWERVR_SGX_HEAP_PDS_PIXEL, 0x1800);
 	pdsp = bo(DRM_POWERVR_SGX_HEAP_PDS_PIXEL, 0x400);
 	X.bg = bgb.va;
 	X.pds_secondary = pdsc.va;
-	X.pds_event = pdsc.va + 0x20;
+	X.pds_event = pdsc.va + 0x40;	/* past an 8-word core's secondary */
 	X.pds_primary = pdsp.va;
 	emit = usse.va + 0x80;
 	nop = usse.va + 0xc0;
 	X.copy_use = usse.va + 0x100;
+	clear_use = usse.va + 0x140;
 	put(&usse, emit, sgxtex_emit_shader, 6);
+	if (eot_nop > 1)
+		put(&usse, emit, (const uint32_t[6]){ 0, 0xfa440700, 0, 0xf8040140 }, 6);
 	put(&usse, nop, sgxtex_nop_shader, 4);
 	put(&usse, X.copy_use, sgxtex_copy_shader, 4);
+	put(&usse, clear_use, clear_shader, 4);
 	upload(&usse, usse.va, 0x200);
 	eot_next = 0x200;
 	sgxtex_xctx_secondary(sec, nop);
-	put(&pdsc, X.pds_secondary, sec, SGXTEX_SECONDARY_WORDS);
+	put_pds(&pdsc, X.pds_secondary, sec, 1, 2);
 }
 
-/* One blit: sgxtex's words into client memory, the rest as the transfer command. */
-static int blit(const struct sgxtex_surface *src, const struct sgxtex_surface *dst, int filter)
+/*
+ * One blit, or with clr the clear (the background pixel program runs the clear
+ * shader): sgxtex's words into client memory, the rest as the transfer command.
+ */
+static int submit(const struct sgxtex_surface *src, const struct sgxtex_surface *dst, int filter, int clr)
 {
 	struct sgxtex_blit b;
 	struct drm_powervr_sgx_cmd_transfer t = { .head.size = sizeof(t) };
@@ -213,8 +249,16 @@ static int blit(const struct sgxtex_surface *src, const struct sgxtex_surface *d
 
 	eot_place();
 	sgxtex_blit_build(&b, &X, src, dst, filter);
+	if (clr)
+		sgxtex_clear_pixel_program(b.pds, clear_use);
+	put_pds(&pdsp, X.pds_primary, b.pds, 3, 4);
 	put(&bgb, X.bg, b.bg, SGXTEX_BLIT_BG_WORDS);
-	put(&pdsp, X.pds_primary, b.pds, SGXTEX_BLIT_PDS_WORDS);
+	if (verbose)
+		printf("background block at 0x%08x\n", X.bg);
+	if (eot_nop) {
+		memset(b.eot, 0, sizeof(b.eot));
+		memcpy(b.eot, sgxtex_nop_shader, sizeof(sgxtex_nop_shader));
+	}
 	put(&usse, X.eot_use, b.eot, SGXPBE_EOT_WORDS);
 	upload(&usse, X.eot_use, SGXPBE_EOT_WORDS * 4);
 	__sync_synchronize();
@@ -235,6 +279,16 @@ static int blit(const struct sgxtex_surface *src, const struct sgxtex_surface *d
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	w.timeout_nsec = now.tv_sec * 1000000000ll + now.tv_nsec + 2000000000ll;
 	return xioctl(DRM_IOCTL_SYNCOBJ_WAIT, &w);
+}
+
+static int blit(const struct sgxtex_surface *src, const struct sgxtex_surface *dst, int filter)
+{
+	return submit(src, dst, filter, 0);
+}
+
+static int clear(const struct sgxtex_surface *dst)
+{
+	return submit(dst, dst, SGXTEX_FILTER_NEAREST, 1);
 }
 
 static uint32_t pattern(uint32_t x, uint32_t y)
@@ -274,6 +328,49 @@ static uint32_t box(uint32_t x, uint32_t y)
 		v |= ((ab + cd + 1) >> 1) << s;
 	}
 	return v;
+}
+
+static uint32_t clear_colour(uint32_t x, uint32_t y)
+{
+	(void)x, (void)y;
+	return CLEAR_COLOUR;
+}
+
+/*
+ * The core's words for sgxtex: an SGX530 (core id 0x0112) has 8-word PDS data,
+ * 16-pixel-wide tiles, and the DOUTU form and code window DEV_QUERY reports.
+ */
+static void set_core(const struct drm_powervr_sgx_heap *use)
+{
+	struct drm_powervr_sgx_dev_query_gpu_info gi = {};
+	struct drm_powervr_sgx_dev_query_limits lim = {};
+	struct drm_powervr_sgx_ioctl_dev_query_args q = {
+		.type = DRM_POWERVR_SGX_DEV_QUERY_GPU_INFO_GET, .size = sizeof(gi), .pointer = (uintptr_t)&gi,
+	};
+	struct sgxtex_core c = {
+		.pds_base = (uint32_t)heap_base[DRM_POWERVR_SGX_HEAP_PDS_PIXEL],
+		.use_base = (uint32_t)heap_base[DRM_POWERVR_SGX_HEAP_USSE_PIXEL],
+		.use_window_log2 = use->usse_window_log2, .tile_w_log2 = 5,
+	};
+	int e;
+
+	if ((e = xioctl(DRM_IOCTL_POWERVR_SGX_DEV_QUERY, &q)))
+		die("DEV_QUERY gpu info", e);
+	q = (struct drm_powervr_sgx_ioctl_dev_query_args){
+		.type = DRM_POWERVR_SGX_DEV_QUERY_LIMITS_GET, .size = sizeof(lim), .pointer = (uintptr_t)&lim,
+	};
+	if ((e = xioctl(DRM_IOCTL_POWERVR_SGX_DEV_QUERY, &q)))
+		die("DEV_QUERY limits", e);
+	c.doutu_offset_bytes = !!(lim.caps & DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES);
+	if (gi.core_id >> 16 == 0x0112) {
+		c.pds_8word = 1;
+		c.tile_w_log2 = 4;
+	}
+	if (verbose)
+		printf("core id 0x%08x: PDS %s, code window 2^%u, DOUTU offset in %s, tiles %u wide\n",
+		       gi.core_id, c.pds_8word ? "8-word" : "2-dword", c.use_window_log2,
+		       c.doutu_offset_bytes ? "bytes" : "instructions", 1u << c.tile_w_log2);
+	sgxtex_set_core(&c);
 }
 
 /* The powervr_sgx render node, found by driver name: a rebind can give it a new minor. */
@@ -319,18 +416,24 @@ int main(int argc, char **argv)
 	struct buf src, sb, tw, lin, mip;
 	struct sgxtex_surface s_src = { 0, 64, 64, 64, SGXTEX_LAYOUT_STRIDED, SGXTEX_FMT_BGRA8888,
 					SGXPBE_FMT_BGRA8888 };
-	struct sgxtex_surface s_copy = s_src, s_tw = s_src, s_lin = s_src, s_mip = s_src;
+	struct sgxtex_surface s_copy = s_src, s_tw = s_src, s_lin = s_src, s_mip = s_src, s_clr;
 	unsigned rounds = 1;
-	int opt, e, bad = 0, two = 0;
+	int opt, e, bad = 0, two = 0, clear_only = 0;
+	uint32_t pad = 0;
 
-	while ((opt = getopt(argc, argv, "vn:T2")) != -1) {
+	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:")) != -1) {
 		switch (opt) {
 		case 'v': verbose = 1; break;
 		case 'T': src_heap = DRM_POWERVR_SGX_HEAP_TEXTURE; break;
 		case 'n': rounds = (unsigned)strtoul(optarg, NULL, 0); break;
 		case '2': two = 1; break;
+		case 'c': clear_only = 1; break;
+		case 'E': eot_nop++; break;
+		case 'w': clear_w = (uint32_t)strtoul(optarg, NULL, 0); break;
+		case 'B': bg_pad = (uint32_t)strtoul(optarg, NULL, 0); break;
+		case 'p': pad = (uint32_t)strtoul(optarg, NULL, 0); break;
 		default:
-			fprintf(stderr, "usage: powervr_sgx_blit [-v] [-n rounds] [-T] [-2]\n");
+			fprintf(stderr, "usage: powervr_sgx_blit [-v] [-n rounds] [-T] [-2] [-c] [-p bytes]\n");
 			return 2;
 		}
 	}
@@ -358,6 +461,7 @@ int main(int argc, char **argv)
 		return 77;
 	for (int i = 0; i < DRM_POWERVR_SGX_HEAP_COUNT; i++)
 		heap_base[i] = h[i].base;
+	set_core(&h[DRM_POWERVR_SGX_HEAP_USSE_PIXEL]);
 	if ((e = xioctl(DRM_IOCTL_POWERVR_SGX_CREATE_VM_CONTEXT, &cv)))
 		die("CREATE_VM_CONTEXT", e);
 	vm = cc.vm_context_handle = cv.handle;
@@ -369,7 +473,11 @@ int main(int argc, char **argv)
 	programs();
 
 	src = bo(src_heap, 64 * 64 * 4);
+	if (pad)
+		bo(DRM_POWERVR_SGX_HEAP_GENERAL, pad);
 	sb = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 64 * 64 * 4);
+	if (verbose)
+		printf("clear/copy destination at 0x%08x\n", sb.va);
 	tw = bo(DRM_POWERVR_SGX_HEAP_TEXTURE, 64 * 64 * 4);
 	lin = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 64 * 64 * 4);
 	mip = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 32 * 32 * 4);
@@ -386,6 +494,13 @@ int main(int argc, char **argv)
 	s_mip.w = s_mip.h = s_mip.pitch = 32;
 
 	for (unsigned r = 0; r < rounds; r++) {
+		memset(sb.cpu, 0, 64 * 64 * 4);
+		s_clr = s_copy;
+		s_clr.w = s_clr.h = clear_w;
+		e = clear(&s_clr);
+		bad |= check("clear", e, &sb, clear_w, clear_w, 64, clear_colour);
+		if (clear_only)
+			continue;
 		memset(sb.cpu, 0, 64 * 64 * 4);
 		memset(tw.cpu, 0, 64 * 64 * 4);
 		memset(lin.cpu, 0, 64 * 64 * 4);

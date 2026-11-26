@@ -90,6 +90,12 @@ struct pvrsgx_fw {
 	struct pvrsgx_kmem code;
 	/** @pdtable: Single-context cores: the directory of each VM by slot, GPU read-only. */
 	struct pvrsgx_kmem pdtable;
+	/** @probe_kpage: Bring-up (SGX530): a patterned page in a firmware heap hole. */
+	struct pvrsgx_kmem probe_kpage;
+	/** @probe_kpage_fill: Set when every word of @probe_kpage holds @probe_kpage_val. */
+	bool probe_kpage_fill;
+	/** @probe_kpage_val: That value. */
+	u32 probe_kpage_val;
 	/** @pd_slots: The @pdtable slots VMs hold. */
 	struct ida pd_slots;
 	/** @addr: Device address of each buffer. */
@@ -393,6 +399,14 @@ static inline const struct pvrsgx_heap_layout *pvrsgx_heaps(const struct pvrsgx_
 }
 
 /* A register from the core table: 0 is one the core lacks, never written. */
+/* A pixel-event PDS program's address as the 3D takes it (0xa5c). */
+static inline u32 pvrsgx_pds_event_addr(const struct pvrsgx_device *sdev, u64 addr)
+{
+	if (sdev->family->features & PVRSGX_FEATURE_PDS_EVENT_OFFSET)
+		return (u32)(addr - pvrsgx_heaps(sdev)->pds_pixel.base);
+	return (u32)addr;
+}
+
 static inline void sgx_wr_opt(struct pvrsgx_device *sdev, u32 reg, u32 val)
 {
 	if (reg)

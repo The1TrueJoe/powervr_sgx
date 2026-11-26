@@ -191,6 +191,14 @@ struct drm_powervr_sgx_dev_query_limits {
 #define DRM_POWERVR_SGX_CAP_BACKWARD_BLITS _BITUL(0)
 
 /**
+ * DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES - A DOUTU's word 0 holds the code
+ * offset from its code base in bytes at bit 4, where a core without this cap
+ * takes the offset divided by 8 there. Either way the offset must stay inside
+ * the code base's window, &drm_powervr_sgx_heap.usse_window_log2.
+ */
+#define DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES _BITUL(1)
+
+/**
  * struct drm_powervr_sgx_dev_query_quirks - Hardware fixes userspace has to know
  *
  * Fetched with %DRM_POWERVR_SGX_DEV_QUERY_QUIRKS_GET. A quirk, once reported

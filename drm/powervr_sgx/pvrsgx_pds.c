@@ -7,24 +7,29 @@
 
 #include "pvrsgx_fw.h"
 #include "pvrsgx_pds.h"
+#include "pvrsgx_pds_interleave.h"
 
 /*
  * DOUTU word 0 for microkernel code at device address a: code base 15 plus the
- * 512 KiB segment, then the offset in the segment in 8-byte instructions, << 4.
- * Bit 27 is set on every microkernel entry.
+ * window, then the offset in the window: in 8-byte instructions << 4, or on a
+ * core with PVRSGX_FEATURE_DOUTU_OFFSET_BYTES in bytes << 4. Bit 27 is set on
+ * every microkernel entry.
  */
-u32 pvrsgx_doutu(u32 kcode, u32 a)
+u32 pvrsgx_doutu(const struct pvrsgx_device *sdev, u32 kcode, u32 a)
 {
-	u32 off = a - kcode, seg = off >> 19;
+	u32 log2 = pvrsgx_heaps(sdev)->usse_window_log2;
+	u32 off = a - kcode, seg = off >> log2, in = off - (seg << log2);
+	u32 w0 = ((seg + 15) & 15) | 0x8000000;
 
-	return ((seg + 15) & 15) | 0x8000000 | (((off - (seg << 19)) * 2) & 0x3ffff0);
+	if (sdev->family->features & PVRSGX_FEATURE_DOUTU_OFFSET_BYTES)
+		return w0 | ((in << 4) & GENMASK(log2 + 3, 4));
+	return w0 | ((in * 2) & 0x3ffff0);
 }
 
+/* The driver programs only the microkernel-entry PDS, all on 2-dword cores. */
 void pvrsgx_pds_ds(struct pvrsgx_pds *p, unsigned int r, u32 v)
 {
-	unsigned int k = r & 0x3f;
-
-	p->w[(k >> 1) * 4 + (r >= 0x40 ? 2 : 0) + (k & 1)] = v;
+	p->w[pvrsgx_pds_ds_word(r, 1)] = v;
 }
 
 static void pds_emit(struct pvrsgx_pds *p, u32 i)
@@ -73,7 +78,7 @@ struct pvrsgx_pds pvrsgx_pds_prog(struct pvrsgx_device *sdev, enum pvrsgx_fw_buf
 void pvrsgx_pds_entry(struct pvrsgx_device *sdev, enum pvrsgx_fw_buf b, u32 e)
 {
 	struct pvrsgx_pds p = pvrsgx_pds_prog(sdev, b, 4);
-	u32 doutu = pvrsgx_doutu(pvrsgx_heaps(sdev)->kernel_code.base,
+	u32 doutu = pvrsgx_doutu(sdev, pvrsgx_heaps(sdev)->kernel_code.base,
 				 sdev->fw.addr[PVRSGX_FW_UKERNEL] + e);
 
 	if (b == PVRSGX_FW_PDS0 && pvrsgx_edm_init &&
@@ -87,9 +92,13 @@ void pvrsgx_pds_entry(struct pvrsgx_device *sdev, enum pvrsgx_fw_buf b, u32 e)
 		 * init/event entry at offset 0.
 		 */
 		p = pvrsgx_pds_prog(sdev, b, 12);
-		p.w[0] = 0x0020000f;	/* DS0[0]: code base 15, bit 21, no temps */
-		p.w[1] = 0x04000000;	/* DS0[1] */
-		p.w[8] = 0x00000001;	/* DS1[0]: DOUTU word 2 */
+		/*
+		 * 8-word interleave (not a 2-dword core): DS0[0] = code base 15 |
+		 * bit 21, DS0[1], DS1[0] = DOUTU word 2. DS1[0] lands at word 8.
+		 */
+		p.w[pvrsgx_pds_ds_word(PDS_D0(0), 0)] = 0x0020000f;
+		p.w[pvrsgx_pds_ds_word(PDS_D0(1), 0)] = 0x04000000;
+		p.w[pvrsgx_pds_ds_word(PDS_D1(0), 0)] = 0x00000001;
 		pvrsgx_pds_movs(&p, PDS_DOUTU, PDS_D0(0), PDS_D0(1), PDS_D1(0), PDS_D0(0));
 		pvrsgx_pds_halt(&p);
 		return;

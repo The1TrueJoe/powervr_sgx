@@ -25,6 +25,16 @@ struct pvrsgx_cmd_core;
  * the GPL sgxconfig.h refuses any other layout.
  */
 #define PVRSGX_FEATURE_EDM_VERTEX_PDSADDR_FULL_RANGE	BIT(3)
+/*
+ * A DOUTU's word 0 holds the code offset in bytes at b4, not the offset / 8
+ * (SGX530, hardware: docs/PDS.md "DOUTU word 0 on the SGX530").
+ */
+#define PVRSGX_FEATURE_DOUTU_OFFSET_BYTES	BIT(4)
+/*
+ * The 3D's pixel-event PDS address (0xa5c) is an offset from PDS_EXEC_BASE,
+ * not a device address (SGX530: docs/porting/cores/sgx530.md, 3D-only).
+ */
+#define PVRSGX_FEATURE_PDS_EVENT_OFFSET		BIT(5)
 
 /* Errata the kernel works around (the GPL headers' FIX_HW_BRN_*). */
 /* A BIF directory or table invalidate and a data invalidate never in one command. */
@@ -61,6 +71,11 @@ struct pvrsgx_heap_layout {
 	struct pvrsgx_va_range texture;
 	/* The largest PB, in pages, the 3D parameters heap holds. */
 	u32 pb_max_pages;
+	/*
+	 * Log2 of the bytes each USE code base window covers: how far a DOUTU's
+	 * code offset reaches from its base, and what phas.i targets count from.
+	 */
+	u32 usse_window_log2;
 };
 
 /* Part flags (&struct pvrsgx_part). */
@@ -119,12 +134,16 @@ struct pvrsgx_core_regs {
 	u32 clkgatectl2_units;
 	u32 clkgatestatus;
 	u32 clkgatestatus_dpm;
+	u32 clkgatectlovr;
+	u32 pds_inv2;			/* SGX530 only (0 elsewhere) */
+	u32 pds_inv3;
 	u32 soft_reset_bif;
 	u32 soft_reset_cores;		/* every unit's reset but the BIF's */
 	u32 event_kick2;
 	u32 event_kick2_now;
 	u32 use_code_base0;
 	u32 pds_exec_base;
+	u32 pds_pc_base;		/* the PDS program counter, a debug read (0 if unnamed) */
 	u32 bif_int_stat_fault_req;
 	u32 bif_int_stat_fault_type;
 	u32 bif_fault_addr;		/* BIF_FAULT's address field */
@@ -189,6 +208,14 @@ struct pvrsgx_core_family {
 	 * already gives up client isolation on such a core.
 	 */
 	bool data_no_edmprotect;
+	/** @tile_w_log2: log2 of a tile's width in pixels (tiles are 16 high). */
+	u32 tile_w_log2;
+	/** @screen_y_shift: Where the TA command's screen size word puts h - 1. */
+	u32 screen_y_shift;
+	/** @te_aa: The TA command's TE anti-aliasing word, single sampled. */
+	u32 te_aa;
+	/** @vdm_ctl: The TA command's VDM control word. */
+	u32 vdm_ctl;
 	/** @cmds: What its client commands are checked against (pvrsgx_cmd_defs.c). */
 	const struct pvrsgx_cmd_core *cmds;
 	/** @init_regs: Init script part 2's register writes, in order. */

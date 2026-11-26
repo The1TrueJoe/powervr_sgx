@@ -6,9 +6,45 @@
 
 #include "sgxtex.h"
 
-#define PDS_BASE 0x2e000000u
-#define USE_BASE 0x37000000u
 #define TILE 16u
+
+/* The core the words are for: the SGX545's until sgxtex_set_core(). */
+static struct sgxtex_core core = {
+	.pds_base = 0x2e000000u, .use_base = 0x37000000u, .use_window_log2 = 19, .tile_w_log2 = 5,
+};
+#define PDS_BASE core.pds_base
+#define USE_BASE core.use_base
+
+void sgxtex_set_core(const struct sgxtex_core *c)
+{
+	core = *c;
+}
+
+/* DS0[k] / DS1[k] (reg 0x40 + k) in the core's data segment (docs/uapi/pvrsgx_pds_interleave.h). */
+static uint32_t ds_word(uint32_t reg)
+{
+	uint32_t k = reg & 0x3f, ds1 = reg >= 0x40;
+
+	if (!core.pds_8word)
+		return (k >> 1) * 4 + ds1 * 2 + (k & 1);
+	return (k >> 3) * 16 + ds1 * 8 + (k & 7);
+}
+
+uint32_t sgxtex_pds_rows(uint32_t rows)
+{
+	return rows ? ds_word(0x40 + rows * 2 - 1) / 4 + 1 : 0;
+}
+
+uint32_t sgxtex_pds_layout(uint32_t *dst, const uint32_t *src, uint32_t rows, uint32_t code_words)
+{
+	uint32_t out = sgxtex_pds_rows(rows);
+
+	memset(dst, 0, out * 16);
+	for (uint32_t i = 0; i < rows * 4; i++)
+		dst[ds_word((i >> 2) * 2 + (i & 1) + (i & 2 ? 0x40 : 0))] = src[i];
+	memcpy(dst + out * 4, src + rows * 4, code_words * 4);
+	return out;
+}
 
 int sgxtex_is_pot(uint32_t n)
 {
@@ -160,7 +196,8 @@ void sgxtex_blit_command(uint32_t *c, const struct sgxtex_blit_ctx *x, uint32_t 
 	c[10] = SGXTEX_EVENT_ROWS;
 	c[11] = 1;
 	c[12] = 0;				/* first tile */
-	c[13] = (((w + 31) >> 5) - 1) << 16 | (((h + 15) >> 4) - 1);	/* last tile */
+	c[13] = (((w + (1u << core.tile_w_log2) - 1) >> core.tile_w_log2) - 1) << 16 |
+		(((h + 15) >> 4) - 1);	/* last tile */
 	c[14] = 0x80;
 	c[15] = PDS_BASE;
 }
@@ -168,9 +205,9 @@ void sgxtex_blit_command(uint32_t *c, const struct sgxtex_blit_ctx *x, uint32_t 
 void sgxtex_blit_bg(uint32_t *b, const struct sgxtex_blit_ctx *x, uint32_t w, uint32_t h)
 {
 	memset(b, 0, SGXTEX_BLIT_BG_WORDS * 4);
-	b[0] = 1u << 26 | (x->pds_secondary - PDS_BASE) >> 4;
+	b[0] = sgxtex_pds_rows(1) << 26 | (x->pds_secondary - PDS_BASE) >> 4;
 	b[1] = 0x00030001;
-	b[2] = 3u << 26 | (x->pds_primary - PDS_BASE) >> 4;
+	b[2] = sgxtex_pds_rows(3) << 26 | (x->pds_primary - PDS_BASE) >> 4;
 	b[5] = b[8] = 0x3f800000;
 	b[10] = 0x202;
 	b[15] = 0x100000;
@@ -201,9 +238,10 @@ void sgxtex_blit_pixel_program(uint32_t *p, const struct sgxtex_blit_ctx *x, uin
 
 uint32_t sgxtex_doutu(uint32_t use_addr, uint32_t temps)
 {
-	uint32_t off = use_addr - USE_BASE;
+	uint32_t off = use_addr - USE_BASE, win = core.use_window_log2, in = off & ((1u << win) - 1);
+	uint32_t w0 = ((temps + 3) >> 2) << 24 | off >> win;
 
-	return ((temps + 3) >> 2) << 24 | off >> 19 | ((off & 0x7ffff) >> 3) << 4;
+	return w0 | (core.doutu_offset_bytes ? (in & ~7u) << 4 : (in >> 3) << 4);
 }
 
 void sgxtex_blit_source(uint32_t tex[4], const struct sgxtex_surface *src, int filter)
@@ -217,6 +255,16 @@ void sgxtex_blit_source(uint32_t tex[4], const struct sgxtex_surface *src, int f
 	tex[1] = sgxtex_t1(src->t1fmt, src->layout, src->w, src->h);
 	tex[2] = src->addr;
 	tex[3] = 0xa0800000;
+}
+
+void sgxtex_clear_pixel_program(uint32_t *p, uint32_t use_addr)
+{
+	static const uint32_t code[4] = { 0x07000305, 0xaf000000 };	/* DOUTU; HALT */
+
+	memset(p, 0, SGXTEX_BLIT_PDS_WORDS * 4);
+	p[0] = sgxtex_doutu(use_addr, 0);
+	p[1] = 0x00000004;	/* an untextured pixel task */
+	memcpy(p + 12, code, sizeof code);	/* after 3 rows, as the textured program's */
 }
 
 static void pixel_program_tex(uint32_t *p, const struct sgxtex_blit_ctx *x, const uint32_t tex[4])
@@ -276,9 +324,9 @@ int sgxtex_blit_build_rect(struct sgxtex_blit *b, const struct sgxtex_blit_ctx *
 	b->bg[3] = f32(u0), b->bg[4] = f32(v0);
 	b->bg[5] = f32(u1), b->bg[6] = f32(v0);
 	b->bg[7] = f32(u0), b->bg[8] = f32(v2);
-	/* tiles the rectangle touches (32x16) */
-	b->cmd[12] = (dr->x >> 5) << 16 | dr->y >> 4;
-	b->cmd[13] = (x1 >> 5) << 16 | y1 >> 4;
+	/* tiles the rectangle touches (32x16 on the SGX545) */
+	b->cmd[12] = (dr->x >> core.tile_w_log2) << 16 | dr->y >> 4;
+	b->cmd[13] = (x1 >> core.tile_w_log2) << 16 | y1 >> 4;
 	sgxpbe_words(&p, dst->w, dst->h, tw ? dst->w : dst->pitch, dst->addr, dst->pbefmt, tw, 0);
 	p.w[0] = dr->y << 16 | dr->x;
 	p.w[1] = y1 << 16 | x1;

@@ -24,6 +24,7 @@ int ioctl(int fd, unsigned long req, ...);	/* musl's sys/ioctl.h clashes with th
 
 #include "sgxgen.h"
 #include "usse_progs.h"
+#include "pvrsgx_pds_interleave.h"
 
 /* SGX heap ids (low byte of ui32HeapID) */
 enum { H_GENERAL = 0, H_TADATA = 1, H_KDATA = 3, H_PIXSHADER = 4, H_VTXSHADER = 5, H_PDSPIXEL = 6,
@@ -253,7 +254,43 @@ void sgx_ctx_rewind(struct sgx_ctx *c)
 static uint32_t usse_load(struct sgx_ctx *c, const struct usse_prog *pr, int vertex)
 {
 	struct sgx_ring *r = vertex ? &c->usse_vtx : &c->usse_pix;
-	struct sgx_ptr p = ring_alloc(r, pr->n * 8, USSE_ALIGN);
+	struct sgx_ptr p;
+
+	/* Probe (SGX530): the SGX535's one-phase state and vertex emits. */
+	/* =state or =vs limits it to the state-emit or the vertex programs; =state1 is
+	 * =state with the one-emit ending, whose last instruction SGXGEN_STATE_LAST=lo,hi
+	 * replaces (an emit-encoding sweep) */
+	const char *e530 = getenv("SGXGEN_EMIT530");
+	static uint32_t patched[64];
+
+	if (e530 && !strcmp(e530, "state1")) {
+		for (unsigned i = 0; i < sizeof(usse_emit530s) / sizeof(usse_emit530s[0]); i++)
+			if (usse_emit530s[i][0] == pr) {
+				pr = usse_emit530s[i][1];
+				if (getenv("SGXGEN_STATE_LAST") && pr->n <= 32) {
+					static struct usse_prog cp;
+					const char *v = getenv("SGXGEN_STATE_LAST");
+
+					memcpy(patched, pr->w, pr->n * 8);
+					patched[2 * pr->n - 2] = (uint32_t)strtoul(v, NULL, 0);
+					patched[2 * pr->n - 1] = (uint32_t)strtoul(strchr(v, ',') + 1, NULL, 0);
+					cp = *pr;
+					cp.w = patched;
+					pr = &cp;
+				}
+				break;
+			}
+		e530 = NULL;
+	}
+	if (e530)
+		for (unsigned i = 0; i < sizeof(usse_emit530) / sizeof(usse_emit530[0]); i++)
+			if (usse_emit530[i][0] == pr &&
+			    !(!strcmp(e530, "state") && strncmp(pr->name, "state_emit", 10)) &&
+			    !(!strcmp(e530, "vs") && !strncmp(pr->name, "state_emit", 10))) {
+				pr = usse_emit530[i][1];
+				break;
+			}
+	p = ring_alloc(r, pr->n * 8, USSE_ALIGN);
 	/* from the start of its 512 KiB code base window, not the heap (ISA.md) */
 	uint32_t pc0 = ((p.va - c->dev->heap_base[vertex ? H_VTXSHADER : H_PIXSHADER]) & 0x7ffff) / 8;
 
@@ -283,13 +320,46 @@ void sgx_bo_alloc(struct sgx_dev *d, struct sgx_bo *bo, uint32_t heap, uint32_t 
 	bo_alloc(d, bo, heap, attribs, size, align);
 }
 
-/* DOUTU word 0 (PDS.md): code base register (pixel 0-9 at the pixel heap +
- * n*512K, vertex 10+), offset/8 in that window at b4, temporaries in fours at b24 */
+/* The device's code base window and DOUTU offset form (DEV_QUERY: the USSE heaps'
+ * usse_window_log2, DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES); the SGX545's by default */
+static uint32_t usse_window_log2 = 19;
+static int doutu_offset_bytes;
+
+/* DOUTU word 0 (PDS.md): code base register (pixel 0-9 at the pixel heap + n windows,
+ * vertex 10+), the offset in that window at b4, temporaries in fours at b24 */
 static uint32_t doutu_w0(struct sgx_ctx *c, uint32_t va, int vertex, uint32_t temps)
 {
 	uint32_t off = va - c->dev->heap_base[vertex ? H_VTXSHADER : H_PIXSHADER];
+	uint32_t win = usse_window_log2, in = off & ((1u << win) - 1);
+	uint32_t w0 = ((temps + 3) >> 2) << 24 | ((off >> win) + (vertex ? 10 : 0));
 
-	return ((temps + 3) >> 2) << 24 | ((off >> 19) + (vertex ? 10 : 0)) | ((off & 0x7ffff) >> 3) << 4;
+	/* The SGX530 (DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES) takes the offset in bytes at
+	 * b4, in a 32 KiB window (docs/PDS.md); SGXGEN_DOUTU530 forces that form. */
+	if (doutu_offset_bytes || getenv("SGXGEN_DOUTU530"))
+		return w0 | (in & ~7u) << 4;
+	return w0 | (in >> 3) << 4;
+}
+
+/* Main vertex/pixel shader DOUTU. SGXGEN_SHADER_BIT21 probe: the 530 may drop a
+ * shader task's temp/memory writes unless the launch carries the write-retire
+ * context (bit21), the way §9 did for the microkernel's EDM task. Emit/state
+ * tasks don't take this (they retire on emit); only the main shaders do. */
+static uint32_t env_u32(const char *name)
+{
+	const char *v = getenv(name);
+
+	return v ? (uint32_t)strtoul(v, NULL, 0) : 0;
+}
+
+static uint32_t doutu_w0_shader(struct sgx_ctx *c, uint32_t va, int vertex, uint32_t temps)
+{
+	uint32_t w0 = doutu_w0(c, va, vertex, temps);
+
+	if (getenv("SGXGEN_SHADER_BIT21"))
+		w0 |= 0x200000;
+	/* SGXGEN_VS_W0OR / SGXGEN_FS_W0OR: bits ORed into the vertex / pixel main
+	 * shader's DOUTU word 0 (530 write-retire probes). */
+	return w0 | env_u32(vertex ? "SGXGEN_VS_W0OR" : "SGXGEN_FS_W0OR");
 }
 
 /* LIMM rN, #v (STATE.md, from the DDK's end-of-tile generator) */
@@ -352,19 +422,47 @@ static void pds_d1(struct pds *p, unsigned i, uint32_t v)
 		p->n1 = i + 1;
 }
 
-/* Lay a program out as 16-byte rows (DS0 DS0 DS1 DS1), code after. */
+/* The device's PDS data interleave (2-dword for the 545, 8-word for the 530);
+ * set at sgx_dev_open. sgxgen drives one device per run. */
+static int pds_2dwords = 1;
+
+/* Lay a program out as 16-byte data rows, code after. DS0/DS1 interleave per the
+ * device's rule (pvrsgx_pds_interleave.h); 2-dword is DS0 DS0 DS1 DS1 per row. */
+/* SGXGEN_PDS_TIGHT (8-word interleave): only the rows up to the last data word, with
+ * DS1[0] always inside, as the 530 vendor stream's 3-row (48-byte) programs; the
+ * default rounds each 8-word block pair up to 4 rows. */
+static uint32_t pds_rows(const struct pds *p)
+{
+	uint32_t last = 0;
+
+	if (pds_2dwords || !getenv("SGXGEN_PDS_TIGHT"))
+		return pvrsgx_pds_ds_rows(p->n0, p->n1, pds_2dwords);
+	if (p->n0)
+		last = pvrsgx_pds_ds_word(p->n0 - 1, 0);
+	if (pvrsgx_pds_ds_word(0x40 + (p->n1 ? p->n1 - 1 : 0), 0) > last)
+		last = pvrsgx_pds_ds_word(0x40 + (p->n1 ? p->n1 - 1 : 0), 0);
+	return last / 4 + 1;
+}
+
 static uint32_t pds_emit(struct sgx_ring *r, const struct pds *p, uint32_t *rows_out)
 {
-	uint32_t rows = ((p->n0 > p->n1 ? p->n0 : p->n1) + 1) / 2;
+	uint32_t rows = pds_rows(p);
 	struct sgx_ptr m = ring_alloc(r, rows * 16 + p->nc * 4, PDS_ALIGN);
 
-	for (uint32_t i = 0; i < rows; i++) {
-		m.p[4 * i + 0] = p->ds0[2 * i];
-		m.p[4 * i + 1] = p->ds0[2 * i + 1];
-		m.p[4 * i + 2] = p->ds1[2 * i];
-		m.p[4 * i + 3] = p->ds1[2 * i + 1];
-	}
+	memset(m.p, 0, rows * 16);
+	for (unsigned i = 0; i < p->n0; i++)
+		m.p[pvrsgx_pds_ds_word(i, pds_2dwords)] = p->ds0[i];
+	for (unsigned i = 0; i < p->n1; i++)
+		m.p[pvrsgx_pds_ds_word(0x40 + i, pds_2dwords)] = p->ds1[i];
 	memcpy(m.p + 4 * rows, p->code, p->nc * 4);
+	/* SGXGEN_DUMP_PDS: the data segment as uploaded, to confirm the interleave
+	 * reached the client BOs (2word: DS0 DS0 DS1 DS1 per 16-byte row). */
+	if (getenv("SGXGEN_DUMP_PDS")) {
+		fprintf(stderr, "pds @ 0x%08x rows=%u %s:", m.va, rows, pds_2dwords ? "2word" : "8word");
+		for (unsigned j = 0; j < rows * 4 && j < 16; j++)
+			fprintf(stderr, " %08x", m.p[j]);
+		fputc('\n', stderr);
+	}
 	if (rows_out)
 		*rows_out = rows;
 	return m.va;
@@ -385,7 +483,7 @@ static uint32_t pds_pixel(struct sgx_ctx *c, uint32_t task_w0, uint32_t task_w1,
 
 	pds_d0(&p, 0, task_w0);
 	pds_d0(&p, 1, task_w1);
-	pds_d1(&p, 0, 0);
+	pds_d1(&p, 0, env_u32("SGXGEN_FS_W2"));	/* DOUTU word 2 (0; 530 probes) */
 	pds_d1(&p, 1, douti);
 	CODE(&p, MOVS(MV, 0, 0, 0, 1, 2, 3, DOUTU));
 	if (douti) {
@@ -420,9 +518,16 @@ static uint32_t pds_secondary(struct sgx_ring *r, uint32_t src, uint32_t dma_ctr
 	return pds_emit(r, &p, rows);
 }
 
-/* DOUTD control: dwords-1, attribute register at b8, b22-24 [G], b25 = secondary attributes [G] */
+/*
+ * DOUTD control: dwords-1, attribute register at b8, b22-24 [G], b25 = secondary attributes [G].
+ * SGXGEN_DMA530: the 530 vendor stream has the fields above the register one bit lower
+ * (kind at b21-23, secondary at b24: 0x01000018 for a 25-dword block, 0x0140000a for
+ * 11 dwords of pixel uniforms).
+ */
 static uint32_t dma_ctrl(uint32_t dwords, uint32_t reg, uint32_t kind, int secondary)
 {
+	if (getenv("SGXGEN_DMA530"))
+		return (dwords - 1) | reg << 8 | kind << 21 | (secondary ? 0x1000000 : 0);
 	return (dwords - 1) | reg << 8 | kind << 22 | (secondary ? 0x2000000 : 0);
 }
 
@@ -469,20 +574,46 @@ int sgx_dev_open(struct sgx_dev *d, const char *node, const char *trace)
 	struct drm_powervr_sgx_ioctl_create_vm_context_args vm = {};
 	int e;
 
+	struct drm_powervr_sgx_dev_query_limits lim = {};
+	struct drm_powervr_sgx_ioctl_dev_query_args ql = {
+		.type = DRM_POWERVR_SGX_DEV_QUERY_LIMITS_GET, .size = sizeof(lim), .pointer = (uintptr_t)&lim,
+	};
+
 	(void)trace;
 	memset(d, 0, sizeof *d);
+	/* Bring-up: SGXGEN_PDS_8WORD selects the 530 interleave. The proper source
+	 * is a DEV_QUERY core/quirk field; wire that once the uAPI carries it. */
+	pds_2dwords = getenv("SGXGEN_PDS_8WORD") ? 0 : 1;
+	if (!pds_2dwords)
+		fprintf(stderr, "sgxgen: PDS data interleave: 8-word (SGX530)\n");
 	d->fd = node ? open(node, O_RDWR | O_CLOEXEC) : open_render_node();
 	if (d->fd < 0)
 		return -errno;
 	if ((e = xioctl(d->fd, DRM_IOCTL_POWERVR_SGX_DEV_QUERY, &q)) ||
+	    (e = xioctl(d->fd, DRM_IOCTL_POWERVR_SGX_DEV_QUERY, &ql)) ||
 	    (e = xioctl(d->fd, DRM_IOCTL_POWERVR_SGX_CREATE_VM_CONTEXT, &vm)))
 		return e;
+	usse_window_log2 = h[DRM_POWERVR_SGX_HEAP_USSE_PIXEL].usse_window_log2;
+	doutu_offset_bytes = !!(lim.caps & DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES);
+	if (usse_window_log2 != 19 || doutu_offset_bytes)
+		fprintf(stderr, "sgxgen: code window 2^%u, DOUTU offset in %s\n", usse_window_log2,
+			doutu_offset_bytes ? "bytes" : "instructions");
 	d->vm = vm.handle;
 	d->heap_base[H_GENERAL] = h[DRM_POWERVR_SGX_HEAP_GENERAL].base;
 	d->heap_base[H_PDSPIXEL] = h[DRM_POWERVR_SGX_HEAP_PDS_PIXEL].base;
 	d->heap_base[H_PDSVERTEX] = h[DRM_POWERVR_SGX_HEAP_PDS_VERTEX].base;
 	d->heap_base[H_PIXSHADER] = h[DRM_POWERVR_SGX_HEAP_USSE_PIXEL].base;
 	d->heap_base[H_VTXSHADER] = h[DRM_POWERVR_SGX_HEAP_USSE_VERTEX].base;
+	/* SGXGEN_MAP_PDS0=<fill> (bring-up probe, SGX530): map the PDS pixel heap's first
+	 * page (PDS_EXEC_BASE + 0), filled with <fill>, so an access there doesn't fault */
+	if (getenv("SGXGEN_MAP_PDS0")) {
+		static struct sgx_bo pad0;
+
+		d->heap_next[H_PDSPIXEL] = d->heap_base[H_PDSPIXEL];
+		bo_alloc(d, &pad0, H_PDSPIXEL, 0, 0x1000, 0x1000);
+		for (unsigned i = 0; i < 0x400; i++)
+			pad0.map[i] = env_u32("SGXGEN_MAP_PDS0");
+	}
 	return 0;
 }
 
@@ -496,6 +627,7 @@ int sgx_dev_open(struct sgx_dev *d, const char *node, const char *trace)
 	int e;
 
 	memset(d, 0, sizeof *d);
+	pds_2dwords = getenv("SGXGEN_PDS_8WORD") ? 0 : 1;
 	if ((e = pvr_open(&d->pvr, node)))
 		return e;
 	if (trace && (e = pvr_trace_open(&d->pvr, trace)))
@@ -560,7 +692,7 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 {
 	struct sgx_ctx *c = calloc(1, sizeof *c);
 	struct sgx_bo dummy;
-	uint32_t hw[17] = { 0 }, rows;
+	uint32_t hw[17] = { 0 };
 	struct sgx_ptr p;
 	struct pds t = { 0 };
 	int e;
@@ -570,6 +702,8 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 	{
 		struct drm_powervr_sgx_ioctl_create_context_args cc = {
 			.type = DRM_POWERVR_SGX_CTX_TYPE_RENDER, .vm_context_handle = d->vm,
+			/* SGXGEN_PB_PAGES: a PB size other than the device default */
+			.param_buffer_pages = env_u32("SGXGEN_PB_PAGES"),
 		};
 		struct drm_syncobj_create sc = {};
 
@@ -614,11 +748,21 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 		die("SGX_REGISTER_HW_RENDER_CONTEXT failed: %d", e);
 #endif
 
-	ring_init(d, &c->usse_pix, H_PIXSHADER, 0x8000);
-	ring_init(d, &c->usse_vtx, H_VTXSHADER, 0x8000);
+	/* SGXGEN_CODE_RING: the code rings' size, and so (aligned to it) their window offset.
+	 * The 530's DOUTU offset reaches less than 32 KiB (board, 2026-11-15), so 0x4000
+	 * puts the code at window offset 0x4000. */
+	uint32_t code_ring = getenv("SGXGEN_CODE_RING") ? env_u32("SGXGEN_CODE_RING") :
+			     usse_window_log2 < 17 ? 1u << (usse_window_log2 - 1) : 0x8000;
+
+	ring_init(d, &c->usse_pix, H_PIXSHADER, code_ring);
+	ring_init(d, &c->usse_vtx, H_VTXSHADER, code_ring);
 	ring_init(d, &c->pds_pix, H_PDSPIXEL, 0x10000);
 	ring_init(d, &c->pds_vtx, H_PDSVERTEX, 0x10000);
 	ring_init(d, &c->gen, H_GENERAL, 0x40000);
+	/* SGXGEN_GEN_PAD: bytes skipped at the gen ring's start, moving every buffer in it
+	 * (bring-up probe: does a fault address move with the vertex and index data?) */
+	if (getenv("SGXGEN_GEN_PAD"))
+		c->gen.used += env_u32("SGXGEN_GEN_PAD");
 	ring_init(d, &c->vdm, H_GENERAL, 0x5000);
 
 	/* fixed USSE programs */
@@ -632,22 +776,71 @@ struct sgx_ctx *sgx_ctx_create(struct sgx_dev *d)
 		c->state_emit[n] = 0;	/* loaded on first use */
 
 	/* VDM state programs that every frame ends with */
-	c->empty_state = pds_secondary(&c->pds_vtx, 0, 0, doutu_w0(c, c->empty_v, 1, 0), 0, NULL);
+	c->empty_state = pds_secondary(&c->pds_vtx, 0, 0, doutu_w0(c, c->empty_v, 1, 0), 0, &c->empty_rows);
 	/* TA terminate (VDM type 6): DOUTA (0x2000, 0), 3 x (0x16000e, 0x100), then
 	 * a state-emit task for the two attributes [D; the values' meaning G] */
 	c->state_emit[2] = usse_load(c, &usse_state_emit_2, 1);
-	pds_d0(&t, 0, 0x2000);
+	/* SGXGEN_TERM_A0=<w> / SGXGEN_PRETERM_A0=<w> (bring-up probes, SGX530): the first
+	 * word each end-of-stream task hands the MTE (0x2000, 0x800), to see whether the
+	 * MTE takes it as an address */
+	/* SGXGEN_END_PTR (bring-up probe, SGX530): the SGX530's MTE takes each update's
+	 * first output word as its record's address, so the end tasks hand it the address
+	 * of a record holding their two words, and 0 */
+	uint32_t term_w[2] = { getenv("SGXGEN_TERM_A0") ? env_u32("SGXGEN_TERM_A0") : 0x2000,
+			       getenv("SGXGEN_TERM530") ? env_u32("SGXGEN_TERM530") : 0x0016000e };
+	uint32_t pre_w[2] = { getenv("SGXGEN_PRETERM_A0") ? env_u32("SGXGEN_PRETERM_A0") : 0x800,
+			      env_u32("SGXGEN_PRETERM_A1") };
+	if (getenv("SGXGEN_END_PTR")) {
+		struct sgx_ptr tr = ring_alloc(&c->pds_vtx, 16, DMA_ALIGN), pr = ring_alloc(&c->pds_vtx, 16, DMA_ALIGN);
+
+		memset(tr.p, 0, 16);
+		memset(pr.p, 0, 16);
+		tr.p[0] = term_w[0];
+		tr.p[1] = term_w[1];
+		/* SGXGEN_TERM_W2=<w>: a third word in the terminate's record (a Rogue-style
+		 * terminate: header, TERMINATE0, TERMINATE1) */
+		tr.p[2] = env_u32("SGXGEN_TERM_W2");
+		pr.p[0] = pre_w[0];
+		pr.p[1] = pre_w[1];
+		term_w[0] = tr.va;
+		term_w[1] = 0;
+		pre_w[0] = pr.va;
+		pre_w[1] = 0;
+	}
+	pds_d0(&t, 0, term_w[0]);
 	pds_d0(&t, 1, 0);
-	pds_d0(&t, 2, 0x0016000e);
+	/* SGXGEN_TERM530=<word>: the 530 form seen from the vendor stack, one second
+	 * DOUTA of <word> (0x00030003 for a 64x64 target: the last tile, y<<16 | x) */
+	pds_d0(&t, 2, term_w[1]);
 	pds_d0(&t, 3, 0x100);
 	pds_d0(&t, 4, doutu_w0(c, c->state_emit[2], 1, 0));
 	pds_d0(&t, 5, 0);
 	CODE(&t, MOVS(MV, 0, 0x18, 0, 1, 2, 2, DOUTA));
-	for (int i = 0; i < 3; i++)
+	for (int i = 0; i < (getenv("SGXGEN_TERM530") ? 1 : 3); i++)
 		CODE(&t, MOVS(MV, 1, 0x18, 0, 1, 2, 2, DOUTA));
-	CODE(&t, MOVS(MV, 2, 0, 0, 1, 2, 2, DOUTU));
+	/* SGXGEN_TERM_NOTASK (bring-up probe, SGX530): the terminate without its task */
+	if (!getenv("SGXGEN_TERM_NOTASK"))
+		CODE(&t, MOVS(MV, 2, 0, 0, 1, 2, 2, DOUTU));
 	CODE(&t, HALT);
-	c->terminate = pds_emit(&c->pds_vtx, &t, &rows);
+	c->terminate = pds_emit(&c->pds_vtx, &t, &c->term_rows);
+	/* SGXGEN_PRETERM530: the vendor stream on the 530 runs a type 4 program of
+	 * DOUTA (0x800, 0), DOUTA (0, 0x100) and a task just before the terminate */
+	{
+		struct pds q = { 0 };
+
+		pds_d0(&q, 0, pre_w[0]);
+		pds_d0(&q, 1, 0);
+		/* SGXGEN_PRETERM_A1=<w> (bring-up probe, SGX530): its second DOUTA's word */
+		pds_d0(&q, 2, pre_w[1]);
+		pds_d0(&q, 3, 0x100);
+		pds_d0(&q, 4, doutu_w0(c, c->state_emit[2], 1, 0));
+		pds_d0(&q, 5, 0);
+		CODE(&q, MOVS(MV, 0, 0x18, 0, 1, 2, 2, DOUTA));
+		CODE(&q, MOVS(MV, 1, 0x18, 0, 1, 2, 2, DOUTA));
+		CODE(&q, MOVS(MV, 2, 0, 0, 1, 2, 2, DOUTU));
+		CODE(&q, HALT);
+		c->preterm = pds_emit(&c->pds_vtx, &q, &c->preterm_rows);
+	}
 
 	/* pixel programs shared by every object without inputs, and the clear's */
 	c->pds_empty_p = pds_secondary(&c->pds_pix, 0, 0, doutu_w0(c, c->empty_p, 0, 0), 0, NULL);
@@ -671,7 +864,9 @@ static void rt_numbers(struct sgx_rt_numbers *r, uint32_t w, uint32_t h)
 {
 	uint32_t n, big, m;
 
-	r->xt = (w + 31) >> 5;
+	/* SGXGEN_TILE16: the SGX530's 16x16 tiles (the vendor stack's 64x64 TA
+	 * command has 4x4 tiles); the SGX545's are 32 wide */
+	r->xt = getenv("SGXGEN_TILE16") ? (w + 15) >> 4 : (w + 31) >> 5;
 	r->yt = (h + 15) >> 4;
 	if (w * h < 0x4b000) {
 		r->mode = 0;
@@ -1060,6 +1255,17 @@ static void vdm(struct sgx_ctx *c, uint32_t w)
 	*ring_alloc(&c->vdm, 4, 4).p = w;
 }
 
+/* A PDS program's address in a VDM word, >>4. The SGX545 takes it absolute; the
+ * SGX530 takes it as an offset from the PDS exec base (the PDS pixel heap base),
+ * like the TA/3D state words (vendor stack on an OMAP3630 board, 2026-11-14).
+ * SGXGEN_VDM_REL selects the 530 form (bring-up knob). */
+static uint32_t vdm_pds(struct sgx_ctx *c, uint32_t va)
+{
+	if (getenv("SGXGEN_VDM_REL"))
+		va -= c->dev->heap_base[H_PDSPIXEL];
+	return va >> 4;
+}
+
 /* A TA state block goes to the MTE through a VDM state program: DMA the block into
  * USSE attributes, run a task that emits them (STATE.md section 2) */
 static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint32_t dma_dwords, uint32_t kind)
@@ -1069,27 +1275,149 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 	uint32_t rows, va;
 
 	memcpy(b.p, blk, n * 4);
-	if (!c->state_emit[n])
+	/* SGXGEN_STATE_PTR (bring-up probe, SGX530): the MTE takes the first emitted word
+	 * as an address, so emit one word, the block's address, and let it fetch the block */
+	if (getenv("SGXGEN_STATE_PTR")) {
+		struct sgx_ptr q = ring_alloc(&c->pds_vtx, 16, DMA_ALIGN);
+
+		memset(q.p, 0, 16);
+		q.p[0] = b.va + env_u32("SGXGEN_STATE_PTR_ADD");
+		/* SGXGEN_STATE_PTR_FILL=<v>: point it at 256 bytes of <v> instead of the block */
+		if (getenv("SGXGEN_STATE_PTR_FILL")) {
+			struct sgx_ptr f = ring_alloc(&c->pds_vtx, 256, DMA_ALIGN);
+
+			for (unsigned i = 0; i < 64; i++)
+				f.p[i] = env_u32("SGXGEN_STATE_PTR_FILL");
+			/* SGXGEN_STATE_PTR_HDR=<h>: word 0 of that buffer is <h> (a header-bit sweep:
+			 * which header bit makes the MTE take an address from the words after it) */
+			if (getenv("SGXGEN_STATE_PTR_HDR"))
+				f.p[0] = env_u32("SGXGEN_STATE_PTR_HDR");
+			/* SGXGEN_STATE_PTR_REC=<w0>,<w1>,...: the buffer's first words (up to 64),
+			 * the rest stay <fill> (a per-word sweep of the fetched record) */
+			if (getenv("SGXGEN_STATE_PTR_REC")) {
+				char *s = getenv("SGXGEN_STATE_PTR_REC"), *e;
+
+				for (unsigned i = 0; i < 64 && *s; i++, s = *e ? e + 1 : e)
+					f.p[i] = (uint32_t)strtoul(s, &e, 0);
+			}
+			q.p[0] = f.va;
+		}
+		b = q;
+		dma_dwords = 1;
+		kind = 0;
+		/* SGXGEN_STATE_PTR_WORDS=<w1>,<w2>,... (bring-up probe, SGX530): more output words
+		 * after the pointer (up to 15), DMA'd with it, and the matching state task */
+		if (getenv("SGXGEN_STATE_PTR_WORDS")) {
+			struct sgx_ptr q2 = ring_alloc(&c->pds_vtx, 64, DMA_ALIGN);
+			char *sp = getenv("SGXGEN_STATE_PTR_WORDS"), *ep;
+			unsigned m = 1;
+
+			memset(q2.p, 0, 64);
+			q2.p[0] = q.p[0];
+			for (; m < 16 && *sp; m++, sp = *ep ? ep + 1 : ep)
+				q2.p[m] = (uint32_t)strtoul(sp, &ep, 0);
+			b = q2;
+			dma_dwords = m;
+			kind = 3;
+			if (!c->state_emit[m])
+				c->state_emit[m] = usse_load(c, usse_state_emit[m], 1);
+		}
+		/* SGXGEN_STATE_PTR_W1=<v>: a second output word, <v> (is o1 a PDS program word?) */
+		if (getenv("SGXGEN_STATE_PTR_W1")) {
+			q.p[1] = env_u32("SGXGEN_STATE_PTR_W1");
+			dma_dwords = 2;
+			kind = 1;
+		}
+		if (!c->state_emit[dma_dwords])
+			c->state_emit[dma_dwords] = usse_load(c, usse_state_emit[dma_dwords], 1);
+		/* SGXGEN_STATE_PTR_N=<k> (bring-up probe, SGX530): launch the k-word state task
+		 * (its one-emit ending passes #k) while DMAing only the pointer: does the MTE fetch
+		 * #k words at the pointer? */
+		if (getenv("SGXGEN_STATE_PTR_N")) {
+			uint32_t k = env_u32("SGXGEN_STATE_PTR_N");
+
+			if (k >= 1 && k <= 32 && !c->state_emit[k])
+				c->state_emit[k] = usse_load(c, usse_state_emit[k], 1);
+		}
+	} else if (!c->state_emit[n])
 		c->state_emit[n] = usse_load(c, usse_state_emit[n], 1);
+	/* Bring-up probes (SGX530), once per run, ahead of the first state program:
+	 * SGXGEN_LEAD_EMPTY an empty update (DOUTU of the empty vertex task),
+	 * SGXGEN_LEAD_HALT a program that is only HALT. Whether the PDS then moves on
+	 * to this program tells a blocked fetch from a blocked DMA/task. */
+	static int lead_done;
+	if (!lead_done && (getenv("SGXGEN_LEAD_EMPTY") || getenv("SGXGEN_LEAD_HALT"))) {
+		uint32_t lrows = c->empty_rows, lva = c->empty_state;
+
+		if (getenv("SGXGEN_LEAD_HALT")) {
+			struct pds h = { 0 };
+
+			pds_d0(&h, 0, 0);
+			CODE(&h, HALT);
+			lva = pds_emit(&c->pds_vtx, &h, &lrows);
+		}
+		vdm(c, 0x40000000 | vdm_pds(c, lva));
+		vdm(c, lrows << 26 | 0x16100);
+		lead_done = 1;
+	}
 	/* the DDK's static state program: tst; bra; doutd; tst; bra; doutd; doutu */
-	pds_d0(&p, 0, b.va);
-	pds_d0(&p, 1, dma_ctrl(dma_dwords, 0, kind, 1));
+	/* SGXGEN_STATE_EMPTYTASK (below): the empty vertex task instead of the state emit
+	 * (bring-up probe: is a fault the MTE's, fed by the emit?) */
+	/* SGXGEN_STATE_NODMA: DS0[0] = 0, so the program's own tst/bra skips the DOUTD
+	 * (bring-up probe: does the PDS block in the DMA?) */
+	pds_d0(&p, 0, getenv("SGXGEN_STATE_NODMA") ? 0 : b.va);
+	/* SGXGEN_STATE_PRIMARY: the 530 vendor's TA state block DMA, 0x00e00007 for 8 dwords:
+	 * kind (dwords - 1) & 7 and no secondary bit (its vertex secondary DMA has it) */
+	if (getenv("SGXGEN_STATE_PRIMARY"))
+		pds_d0(&p, 1, dma_ctrl(dma_dwords, 0, (dma_dwords - 1) & 7, 0));
+	else
+		pds_d0(&p, 1, dma_ctrl(dma_dwords, 0, kind, 1));
 	pds_d0(&p, 2, 0);
 	pds_d0(&p, 3, 0);
-	pds_d0(&p, 4, doutu_w0(c, c->state_emit[n], 1, 0));
-	pds_d0(&p, 5, 0);
-	CODE(&p, TST1(S1_DS0(0)));
-	CODE(&p, BRA_P0(6));
-	CODE(&p, MOVS(MV, 0, 0, 0, 1, 0, 0, DOUTD));
-	CODE(&p, TST1(S1_DS0(2)));
-	CODE(&p, BRA_P0(6));
-	CODE(&p, MOVS(MV, 1, 0, 0, 1, 0, 0, DOUTD));
-	CODE(&p, MOVS(MV, 2, 0, 0, 1, 2, 0, DOUTU));
-	CODE(&p, HALT);
+	/* SGXGEN_DOUTU_B4: b4, set in every 530 vendor DOUTU of a task that emits to the MTE
+	 * (0x00200f1a, 0x0020111a, 0x00201a1a, 0x0000281a) and in none of the others */
+	pds_d0(&p, 4, doutu_w0(c, getenv("SGXGEN_STATE_EMPTYTASK") ? c->empty_v :
+			       c->state_emit[getenv("SGXGEN_STATE_PTR") ?
+					     (getenv("SGXGEN_STATE_PTR_N") ? env_u32("SGXGEN_STATE_PTR_N") :
+					      getenv("SGXGEN_STATE_PTR_WORDS") ? dma_dwords :
+					      getenv("SGXGEN_STATE_PTR_W1") ? 2 : 1) : n], 1, 0) |
+		      (getenv("SGXGEN_STATE_BIT21") ? 0x200000 : 0) | (getenv("SGXGEN_DOUTU_B4") ? 0x10 : 0));
+	/* SGXGEN_STATE_W1 / SGXGEN_STATE_W2 (bring-up probes, SGX530): the state task's
+	 * DOUTU words 1 and 2 (0; the 530 microkernel's launch needs word 2 = 1 with b21) */
+	pds_d0(&p, 5, env_u32("SGXGEN_STATE_W1"));
+	pds_d1(&p, 0, env_u32("SGXGEN_STATE_W2"));
+	/* SGXGEN_STATE_1DMA (bring-up probe, SGX530): one unconditional DOUTD and the DOUTU,
+	 * without the tst/bra pairs or the optional second DMA */
+	if (getenv("SGXGEN_STATE_1DMA")) {
+		CODE(&p, MOVS(MV, 0, 0, 0, 1, 0, 0, DOUTD));
+		CODE(&p, MOVS(MV, 2, 0, 0, 1, 2, 0, DOUTU));
+		CODE(&p, HALT);
+	} else {
+		CODE(&p, TST1(S1_DS0(0)));
+		CODE(&p, BRA_P0(6));
+		CODE(&p, MOVS(MV, 0, 0, 0, 1, 0, 0, DOUTD));
+		CODE(&p, TST1(S1_DS0(2)));
+		CODE(&p, BRA_P0(6));
+		CODE(&p, MOVS(MV, 1, 0, 0, 1, 0, 0, DOUTD));
+		CODE(&p, MOVS(MV, 2, 0, 0, 1, 2, 0, DOUTU));
+		CODE(&p, HALT);
+	}
 	va = pds_emit(&c->pds_vtx, &p, &rows);
-	vdm(c, 0x40000000 | va >> 4);
+	/* SGXGEN_VDM_PDS_ADD: bytes added to the state program's address in the VDM word
+	 * (bring-up probe: point the PDS at an unmapped page to see whether its fetch faults) */
+	if (getenv("SGXGEN_VDM_PDS_ADD"))
+		va += env_u32("SGXGEN_VDM_PDS_ADD");
+	vdm(c, 0x40000000 | vdm_pds(c, va));
 	/* info: rows, the rotating buffer index + 0x2000, 0x2020400, dwords */
-	vdm(c, rows << 26 | ((c->vdm_counter + 0x2000) | 0x2020400 | ((n + 3) >> 2)));
+	/* SGXGEN_VDMINFO530: the 530 vendor stream's low bits, 0x2a200 | dwords */
+	/* SGXGEN_STATE_INFO=<form>: the state program's info-word form instead (bring-up probe:
+	 * the 530 runs programs under 0x16100 but holds the PC at one under 0x2a200) */
+	if (getenv("SGXGEN_STATE_INFO"))
+		vdm(c, rows << 26 | env_u32("SGXGEN_STATE_INFO") | ((n + 3) >> 2));
+	else if (getenv("SGXGEN_VDMINFO530"))
+		vdm(c, rows << 26 | 0x2a200 | ((n + 3) >> 2));
+	else
+		vdm(c, rows << 26 | ((c->vdm_counter + 0x2000) | 0x2020400 | ((n + 3) >> 2)));
 	c->vdm_counter = (c->vdm_counter + 1) & 3;
 }
 
@@ -1109,10 +1437,16 @@ static void vdm_draw(struct sgx_ctx *c, uint32_t prim, uint32_t count, uint32_t 
 	struct pds p = { 0 };
 	uint32_t rows, va, vpt = vertices_per_task(out_dwords), batch = 16;
 
+	/* SGXGEN_DRAW_EMPTYVS: launch the empty vertex task instead of the draw's (bring-up
+	 * probe: is a fault the vertex program's or the TA's behind it?) */
+	if (getenv("SGXGEN_DRAW_EMPTYVS"))
+		vs_w0 = doutu_w0(c, c->empty_v, 1, 0);
+	if (getenv("SGXGEN_DOUTU_B4"))
+		vs_w0 |= 0x10;
 	pds_d0(&p, 0, vb);
 	pds_d0(&p, 1, attr_dwords - 1);		/* DOUTD: dwords-1, attribute register 0 */
 	pds_d1(&p, 0, stride);
-	pds_d1(&p, 1, 0);
+	pds_d1(&p, 1, env_u32("SGXGEN_VS_W2"));	/* DOUTU word 2 (0; 530 probes) */
 	pds_d0(&p, 2, vs_w0);
 	pds_d0(&p, 3, 0);
 	CODE(&p, ALU(OP_MUL16, 0, S1_IN(0), S2_DS1(0), U_DS1(0x32)));	/* index * stride */
@@ -1120,13 +1454,29 @@ static void vdm_draw(struct sgx_ctx *c, uint32_t prim, uint32_t count, uint32_t 
 	CODE(&p, MOVS(MV_CC3, 1, 0, 0, 1, 3, 3, DOUTU));
 	CODE(&p, HALT);
 	va = pds_emit(&c->pds_vtx, &p, &rows);
-	vdm(c, 0x80000000 | 0x00c00000 | prim << 26 | count);
+	/* SGXGEN_DRAW_PDS_ADD=<bytes> (bring-up probe, SGX530): move the vertex program's
+	 * address in the draw entry, to see whether a PDS fault follows it */
+	va += env_u32("SGXGEN_DRAW_PDS_ADD");
+	/* SGXGEN_DRAW530: the 530 vendor stream's draw: word 0 b24 set, index
+	 * batches of 8, and the batching field 2 at 8 vertices per task */
+	int d530 = getenv("SGXGEN_DRAW530") != NULL;
+	uint32_t bf = vpt - 1 < 3 ? vpt - 1 : 3;
+
+	if (d530) {
+		batch = 8;
+		bf = vpt >= 16 ? 3 : vpt >= 8 ? 2 : vpt >= 4 ? 1 : 0;
+	}
+	/* SGXGEN_DRAW535 (bring-up probe): the public SGX535 driver's draw entry, without
+	 * b23 and the index-range word it flags */
+	int d535 = getenv("SGXGEN_DRAW535") != NULL;
+
+	vdm(c, 0x80000000 | (d535 ? 0x00400000 : 0x00c00000) | (d530 ? 0x01000000 : 0) | prim << 26 | count);
 	vdm(c, idx & ~1u);				/* 16-bit indices */
 	vdm(c, (batch - 1) << 28);
-	vdm(c, 0x003fffff);
-	vdm(c, (vpt - 1) << 28 | va >> 4);
-	vdm(c, (out_dwords + 3) >> 2 << 24 | ((in_dwords * 4 + 0xf) >> 4) << 7 |
-	       (vpt - 1 < 3 ? vpt - 1 : 3) << 22 | rows);
+	if (!d535)
+		vdm(c, 0x003fffff);
+	vdm(c, (vpt - 1) << 28 | vdm_pds(c, va));
+	vdm(c, (out_dwords + 3) >> 2 << 24 | ((in_dwords * 4 + 0xf) >> 4) << 7 | bf << 22 | rows);
 }
 
 /* glClear(COLOR): a screen-covering triangle, the DDK's way (NOTES.md "Clear") */
@@ -1137,6 +1487,11 @@ void sgx_clear(struct sgx_ctx *c, const float rgba[4], float depth)
 	uint32_t argb = u8(rgba[3]) << 24 | u8(rgba[0]) << 16 | u8(rgba[1]) << 8 | u8(rgba[2]);
 	float xy[3][2] = { { 0, 0 }, { 2.0f * s->w, 0 }, { 0, 2.0f * s->h } };
 	uint32_t blk[12];
+
+	/* SGXGEN_SKIP_CLEAR (bring-up probe, SGX530): no clear at all, so the TA stream is
+	 * only its end (is a fault the clear's, or the end's and the kick's?) */
+	if (getenv("SGXGEN_SKIP_CLEAR"))
+		return;
 
 	for (int i = 0; i < 3; i++) {
 		v.p[4 * i + 0] = f32(xy[i][0]);
@@ -1153,12 +1508,40 @@ void sgx_clear(struct sgx_ctx *c, const float rgba[4], float depth)
 	blk[5] = pds_word(c, c->clear_pds, 2);
 	blk[6] = 0x80000000 | 0 << 16 | (s->rt.xt - 1);		/* region clip: whole surface, in tiles */
 	blk[7] = 0 << 16 | (s->rt.yt - 1);
-	blk[8] = 8 << 16 | 0x1800;				/* 8 output dwords [D], 0x1800 [G] */
-	blk[9] = 0x40;						/* MTE ctrl of the clear [G] */
+	/* SGXGEN_PIX535 / SGXGEN_RGN535 (bring-up probes): the public SGX535 driver's forms of
+	 * the pixel group (secondary word without rows, DMS 0x30000) and the region clip (0, 0) */
+	if (getenv("SGXGEN_PIX535")) {
+		blk[3] &= 0x03ffffff;
+		blk[4] = 0x00030000;
+	}
+	if (getenv("SGXGEN_RGN535"))
+		blk[6] = blk[7] = 0;
+	/* SGXGEN_OUTSEL530: the 530 vendor stream has the output dword count at b24 */
+	blk[8] = 8 << (getenv("SGXGEN_OUTSEL530") ? 24 : 16) | 0x1800;	/* 8 output dwords [D], 0x1800 [G] */
+	/* SGXGEN_MTE530: the 530 vendor clear's MTE control */
+	blk[9] = getenv("SGXGEN_MTE530") ? 0x00010000 : 0x40;	/* MTE ctrl of the clear [G] */
 	blk[10] = 5;						/* one 4-component set */
 	blk[11] = 0;
-	state_block(c, blk, 12, 12, 3);
-	vdm_draw(c, SGX_TRIANGLES, 3, c->idx, v.va, 16, 4, doutu_w0(c, c->clear_vs, 1, 0), 4, 8);
+	/* SGXGEN_CLEAR_KIND: the DMA kind (ours 3; the 530 vendor's 10-dword state block uses 1) */
+	/* SGXGEN_CLEAR_PDSADD=<bytes> (bring-up probe): move the block's secondary PDS word
+	 * by <bytes> and its primary by twice that, to see whether a fault follows them */
+	if (getenv("SGXGEN_CLEAR_PDSADD")) {
+		blk[3] += env_u32("SGXGEN_CLEAR_PDSADD") >> 4;
+		blk[5] += env_u32("SGXGEN_CLEAR_PDSADD") >> 3;
+	}
+	/* SGXGEN_CLEAR_NOB15 (bring-up probe): the clear's block without its last group
+	 * (header 0x54c3, 11 dwords), to see whether a fault address follows the header */
+	if (getenv("SGXGEN_CLEAR_NOB15")) {
+		blk[0] &= ~0x8000u;
+		state_block(c, blk, 11, 11, 3);
+	} else
+		state_block(c, blk, 12, 12,
+			    getenv("SGXGEN_CLEAR_KIND") ? env_u32("SGXGEN_CLEAR_KIND") : 3);
+	/* SGXGEN_CLEAR_NODRAW (bring-up probe, SGX530): the clear's state update without its
+	 * draw, to see which faults the draw's own fetches cause */
+	if (getenv("SGXGEN_CLEAR_NODRAW"))
+		return;
+	vdm_draw(c, SGX_TRIANGLES, 3, c->idx, v.va, 16, 4, doutu_w0_shader(c, c->clear_vs, 1, 0), 4, 8);
 }
 
 static uint32_t ispa(const struct sgx_state *st)
@@ -1214,12 +1597,13 @@ int sgx_draw(struct sgx_ctx *c, const struct sgx_draw *d)
 			    doutu_w0(c, fs->sec, 0, 0), 4, &rows);
 	blk[n++] = 0;
 	blk[n++] = ispa(st);
-	blk[n++] = 0x10 << 8 | 0xf << 4;			/* ISPB: line width 1.0, colour mask */
+	/* SGXGEN_ISPB530: the 530 vendor draw's ISPB has no line width */
+	blk[n++] = (getenv("SGXGEN_ISPB530") ? 0 : 0x10 << 8) | 0xf << 4;	/* ISPB: line width 1.0, colour mask */
 	blk[n++] = pds_word(c, sec, rows);
 	/* PDS middle word: b18-24 = (secondary dwords+3)>>2 [D]; the rest from the DDK's
 	 * shader object (b0, b16-17 constant; b25-28 = 0xb for this shader) [G] */
 	blk[n++] = 0x00030001 | ((fs->sec_dwords + 3) >> 2) << 18 | 0xbu << 25;
-	prim = pds_pixel(c, fs->w0 ? fs->w0 : doutu_w0(c, fs->code, 0, fs->temps), 4, 0, &rows);
+	prim = pds_pixel(c, fs->w0 ? fs->w0 : doutu_w0_shader(c, fs->code, 0, fs->temps), 4, 0, &rows);
 	blk[n++] = pds_word(c, prim, rows);
 	/* viewport: a window flips y, a pbuffer doesn't [C x offset, D rest] */
 	blk[n++] = f32(vx + vwid * 0.5f);
@@ -1234,9 +1618,9 @@ int sgx_draw(struct sgx_ctx *c, const struct sgx_draw *d)
 	blk[n++] = f32((zn + zf) * 0.5f);
 	blk[n++] = f32((zf - zn) * 0.5f);
 	blk[n++] = 0;						/* header 0x200 */
-	blk[n++] = vs->out_dwords << 16 | 0x3000;		/* output select */
+	blk[n++] = vs->out_dwords << (getenv("SGXGEN_OUTSEL530") ? 24 : 16) | 0x3000;	/* output select */
 	blk[n++] = 0x3727c5ac;					/* W clamp 1e-5 */
-	blk[n++] = mte_ctrl(st);
+	blk[n++] = getenv("SGXGEN_MTE530") ? 0x00088000 : mte_ctrl(st);	/* SGXGEN_MTE530: the vendor draw's */
 	blk[n++] = 0;						/* TSP: no texcoords */
 	blk[n++] = 0;
 	blk[0] = 0x1 | 0x2 | 0x40 | 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000;
@@ -1255,14 +1639,16 @@ int sgx_draw(struct sgx_ctx *c, const struct sgx_draw *d)
 	for (uint32_t i = 0; i < vs->sec_init_n; i++)
 		vsec.p[6 + i] = vs->sec_init[i];
 	sec = pds_secondary(&c->pds_vtx, vsec.va, dma_ctrl(10, 0, 1, 1), doutu_w0(c, c->empty_v, 1, 0), 0, &vrows);
-	vdm(c, 0x40000000 | sec >> 4);
-	vdm(c, vrows << 26 | 0xe100 | (10 + 3) >> 2);
+	vdm(c, 0x40000000 | vdm_pds(c, sec));
+	/* SGXGEN_VSEC530: the 530 vendor stream's secondary-DMA form, 0x16100 (0xc016103 for 10 dwords) */
+	vdm(c, vrows << 26 | (getenv("SGXGEN_VSEC530") ? 0x16100 : getenv("SGXGEN_VDMINFO530") ? 0x2a200 : 0xe100) |
+	    (10 + 3) >> 2);
 
 	/* SGXGEN_FAULT: vertices from an unmapped address, a TA page fault (recovery tests) */
 	if (getenv("SGXGEN_FAULT"))
 		v.va = c->dev->heap_base[H_GENERAL] + 0x800000;
 	vdm_draw(c, d->prim, d->count, c->idx, v.va, vw, vs->attr_dwords,
-		 vs->w0 ? vs->w0 : doutu_w0(c, vs->code, 1, vs->temps), vs->in_dwords, vs->out_dwords);
+		 vs->w0 ? vs->w0 : doutu_w0_shader(c, vs->code, 1, vs->temps), vs->in_dwords, vs->out_dwords);
 	return 0;
 }
 
@@ -1273,11 +1659,44 @@ static uint32_t vdm_end(struct sgx_ctx *c)
 {
 	uint32_t at = c->vdm.bo.va + c->vdm.used;
 
-	vdm(c, 0x40000000 | c->empty_state >> 4);
-	vdm(c, 1u << 26 | 0xe100);
-	vdm(c, 0x60000000 | c->terminate >> 4);
-	vdm(c, 3u << 26 | 0x2022401);
-	vdm(c, 0xc0000000);
+	int i530 = getenv("SGXGEN_VDMINFO530") != NULL;
+
+	/* SGXGEN_END_ADD=<a>,<b>,<c> (bring-up probe, SGX530): bytes added to the empty
+	 * secondary update's, the pre-terminate's and the terminate's program addresses,
+	 * to see which one a PDS fault follows */
+	uint32_t add[3] = { 0 };
+	if (getenv("SGXGEN_END_ADD"))
+		sscanf(getenv("SGXGEN_END_ADD"), "%i,%i,%i", (int *)&add[0], (int *)&add[1], (int *)&add[2]);
+	/* SGXGEN_END_NOEMPTY (bring-up probe, SGX530): leave out the empty secondary update,
+	 * whose task emits nothing (does the MTE take its o0 = 0 as a record address?) */
+	if (!getenv("SGXGEN_END_NOEMPTY")) {
+		vdm(c, 0x40000000 | vdm_pds(c, c->empty_state + add[0]));
+		/* each word's rows are its program's own (the 8-word interleave gives 4 where
+		 * the 2-dword one gives 1 or 3; a mismatch starts the PDS inside the data) */
+		vdm(c, c->empty_rows << 26 | (i530 ? 0x16100 : 0xe100));
+	}
+	if (getenv("SGXGEN_PRETERM530")) {
+		vdm(c, 0x40000000 | vdm_pds(c, c->preterm + add[1]));
+		/* SGXGEN_PRETERM_INFO=<form> (bring-up probe): its info word's low bits */
+		vdm(c, c->preterm_rows << 26 | (getenv("SGXGEN_PRETERM_INFO") ? env_u32("SGXGEN_PRETERM_INFO") : 0x2c201));
+	}
+	/* SGXGEN_VDM_EXTRA=<w>,<w>,... (bring-up probe, SGX530): raw VDM words ahead of the
+	 * terminate (e.g. a block type the stream doesn't use otherwise) */
+	if (getenv("SGXGEN_VDM_EXTRA")) {
+		char *sp = getenv("SGXGEN_VDM_EXTRA"), *ep;
+
+		for (unsigned i = 0; i < 16 && *sp; i++, sp = *ep ? ep + 1 : ep)
+			vdm(c, (uint32_t)strtoul(sp, &ep, 0));
+	}
+	/* SGXGEN_END_NOTERM (bring-up probe, SGX530): no TA terminate program, only the
+	 * stream's end word; SGXGEN_TERM_INFO=<form>: the terminate's info-word low bits;
+	 * SGXGEN_VDM_ENDWORD=<w>: the end word (0xc0000000) */
+	if (!getenv("SGXGEN_END_NOTERM")) {
+		vdm(c, 0x60000000 | vdm_pds(c, c->terminate + add[2]));
+		vdm(c, c->term_rows << 26 | (getenv("SGXGEN_TERM_INFO") ? env_u32("SGXGEN_TERM_INFO") :
+					     i530 ? 0x2a201 : 0x2022401));
+	}
+	vdm(c, getenv("SGXGEN_VDM_ENDWORD") ? env_u32("SGXGEN_VDM_ENDWORD") : 0xc0000000);
 	return at;
 }
 

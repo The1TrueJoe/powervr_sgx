@@ -234,4 +234,32 @@ extern const uint32_t sgxtex_emit_shader[6];	/* phas.i #0, #0; limm r0, #0; emit
 /* DOUTU word 0 for a pixel-shader-heap program (PDS.md): temporaries in fours at b24 */
 uint32_t sgxtex_doutu(uint32_t use_addr, uint32_t temps);
 
+/* ---- another core ---- */
+
+/*
+ * What differs on a core other than the SGX545 (an SGX530: docs/porting/cores/sgx530.md).
+ * The builders above take it from sgxtex_set_core(); the default is the SGX545's.
+ */
+struct sgxtex_core {
+	uint32_t pds_base;		/* the PDS pixel heap: PDS_EXEC_BASE */
+	uint32_t use_base;		/* the USSE pixel heap: code base 0 */
+	uint32_t use_window_log2;	/* each code base's window (drm_powervr_sgx_heap) */
+	int doutu_offset_bytes;		/* DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES */
+	int pds_8word;			/* PDS data in 8-word blocks, not 2-dword rows */
+	uint32_t tile_w_log2;		/* tile width: 32 on the SGX545, 16 on the SGX530 */
+};
+void sgxtex_set_core(const struct sgxtex_core *c);
+
+/*
+ * The PDS programs above are built with rows of DS0 DS0 DS1 DS1. For the core's
+ * layout: the data rows a program of `rows` such rows takes, and the program
+ * itself (its data, then code_words of code) moved into dst. dst takes
+ * sgxtex_pds_rows(rows) * 4 + code_words words. Returns the data rows.
+ */
+uint32_t sgxtex_pds_rows(uint32_t rows);
+uint32_t sgxtex_pds_layout(uint32_t *dst, const uint32_t *src, uint32_t rows, uint32_t code_words);
+
+/* a background pixel program (3 data rows, as the blit's) that runs use_addr's shader, no iterations */
+void sgxtex_clear_pixel_program(uint32_t *pds, uint32_t use_addr);
+
 #endif

@@ -37,6 +37,7 @@ DEV_QUERY
                  drm_powervr_sgx_heap
                  drm_powervr_sgx_dev_query_heap_info
                  DRM_POWERVR_SGX_CAP_BACKWARD_BLITS
+                 DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES
 
 CREATE_BO
 ---------

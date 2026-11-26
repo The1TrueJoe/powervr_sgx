@@ -49,7 +49,8 @@ static void check(struct counts *c, u64 w)
 	bool abs = false;
 
 	c->total++;
-	if (pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, FIRST, OBJ_INSTS, PLACE, &abs, &why) < 0) {
+	if (pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, FIRST, OBJ_INSTS, PLACE,
+			     PVRSGX_USSE_WINDOW_INSTS, &abs, &why) < 0) {
 		c->accepted++;
 		printf("A %s %08" PRIx32 " %08" PRIx32 "\n", c->name, (u32)(w >> 32), (u32)w);
 		return;
