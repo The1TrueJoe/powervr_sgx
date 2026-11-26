@@ -50,11 +50,13 @@ struct sgx_const {
  * SGX_K_TEXSIZE + 2u (st's textureSize, as its rectangle lookups scale by
  * it); past every uniform's number (a uniform is its dword in constant
  * buffer 0) */
-#define SGX_K_TEXSIZE       2024
-#define SGX_K_TEXSIZE_UNITS 8
+#define SGX_K_TEXSIZE       2008
+#define SGX_K_TEXSIZE_UNITS 16
 /* the vertex constant the draw fills with gl_InstanceID, as a float
  * (sgx_program.c lower_instance_id) */
 #define SGX_K_INSTANCE 2040
+static_assert(SGX_K_TEXSIZE + 2 * SGX_K_TEXSIZE_UNITS <= SGX_K_INSTANCE,
+              "the texture sizes overlap gl_InstanceID");
 /* The driver's block of constant numbers for programs compiled with the
  * compiler's native integers (docs/GL3.md, "Crossing the driver/compiler
  * line"): unit u's base-level width, height and depth at SGX_K_SIZE + 3u,

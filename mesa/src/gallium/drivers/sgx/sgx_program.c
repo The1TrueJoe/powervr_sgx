@@ -1011,6 +1011,34 @@ layout_first_free(void *data, enum sgx_layout_kind kind)
    return next;
 }
 
+/* A projected sample on a unit the shader filters or wraps itself
+ * (lower_srgb_filter, lower_word32_wrap): divided by its projector here, as
+ * nir_lower_tex's lower_txp does, so those passes see the coordinate GL
+ * filters and wraps.  data: the units. */
+static bool
+lower_unit_txp(nir_builder *b, nir_instr *instr, void *data)
+{
+   uint32_t units = *(const uint32_t *)data;
+
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+
+   if (tex->texture_index >= 32 || !(units >> tex->texture_index & 1) ||
+       tex->is_array || nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0)
+      return false;
+   b->cursor = nir_before_instr(instr);
+   nir_def *inv = nir_frcp(b, nir_steal_tex_src(tex, nir_tex_src_projector));
+
+   for (unsigned i = 0; i < tex->num_srcs; i++) {
+      if (tex->src[i].src_type == nir_tex_src_coord ||
+          tex->src[i].src_type == nir_tex_src_comparator)
+         nir_src_rewrite(&tex->src[i].src,
+                         nir_fmul(b, tex->src[i].src.ssa, inv));
+   }
+   return true;
+}
+
 /*
  * Linear filtering of an sRGB texture, in the shader: the TPU filters the
  * encoded texels and the decode comes after, where GL decodes first.  The four
@@ -1080,8 +1108,9 @@ lower_srgb_filter(nir_builder *b, nir_instr *instr, void *data)
  * every pixel outside [0, 1]; R32F in one axis), so the coordinate is
  * wrapped here and the TPU clamps (sgx_texture.c).  After
  * lower_srgb_filter, so each of a LINEAR filter's taps is wrapped on its
- * own; exact for the texel a NEAREST read picks.  Projected, 1D and array
- * samples, and units from 16, aren't wrapped: they keep the TPU's clamp.
+ * own; exact for the texel a NEAREST read picks.  A projected sample comes
+ * here divided (lower_unit_txp).  1D and array samples, and units from 16,
+ * aren't wrapped: they keep the TPU's clamp.
  * data: the shader variant (wrap_rep, wrap_mir). */
 static bool
 lower_word32_wrap(nir_builder *b, nir_instr *instr, void *data)
@@ -1823,6 +1852,15 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
       if (sgx_tbo())
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_tbo,
                   nir_metadata_control_flow, so->buf_fmt);
+      uint32_t txp_units = srgb_filter;
+
+      for (unsigned u = 0; u < 16; u++) {
+         if ((so->wrap_rep | so->wrap_mir) >> (2 * u) & 3)
+            txp_units |= 1u << u;
+      }
+      if (txp_units)
+         NIR_PASS(_, nir, nir_shader_instructions_pass, lower_unit_txp,
+                  nir_metadata_control_flow, &txp_units);
       if (srgb_filter)
          NIR_PASS(_, nir, nir_shader_instructions_pass, lower_srgb_filter,
                   nir_metadata_control_flow, &srgb_filter);
