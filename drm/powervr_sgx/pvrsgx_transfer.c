@@ -137,7 +137,7 @@ void pvrsgx_transfer_job_build(struct pvrsgx_job *job, u32 data[6])
 	cmd->req_base_3d = base;
 	cmd->rt_ctl = BIT(31);
 	cmd->rt_flags = 0x88;
-	cmd->pixel_event_pds = (u32)in->pixel_event_pds_addr;
+	cmd->pixel_event_pds = pvrsgx_pds_event_addr(job->ctx->sdev, in->pixel_event_pds_addr);
 	cmd->pixel_event_rows = in->pixel_event_pds_rows;
 	cmd->unk_2c = 1;
 	cmd->first_tile = in->first_tile_x << 16 | in->first_tile_y;

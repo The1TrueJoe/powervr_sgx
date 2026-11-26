@@ -30,6 +30,11 @@ struct pvrsgx_cmd_core;
  * (SGX530, hardware: docs/PDS.md "DOUTU word 0 on the SGX530").
  */
 #define PVRSGX_FEATURE_DOUTU_OFFSET_BYTES	BIT(4)
+/*
+ * The 3D's pixel-event PDS address (0xa5c) is an offset from PDS_EXEC_BASE,
+ * not a device address (SGX530: docs/porting/cores/sgx530.md, 3D-only).
+ */
+#define PVRSGX_FEATURE_PDS_EVENT_OFFSET		BIT(5)
 
 /* Errata the kernel works around (the GPL headers' FIX_HW_BRN_*). */
 /* A BIF directory or table invalidate and a data invalidate never in one command. */
