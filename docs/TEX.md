@@ -120,6 +120,19 @@ powers of two). m16 (16×16, 5 levels, 0x554 bytes), m32x8 (32×8 → 16×4 →
 texel for texel. T2 is the base; nothing else in the texture words moves
 with the level count (STATE.md).
 
+**A chain from any level** (**hardware**, open driver:
+`mesa/tests/sgx_baselevel`, a CE5300 board, 2026-11-25): T2 at a level's
+offset in the chain and T1 that level's size sample that level, and with
+mipmaps the levels after it as its chain (GL_TEXTURE_BASE_LEVEL). Checked at
+every level of chains uploaded from the CPU, RGBA8888, RGBA4444, RGB565 and
+L8, 32x32, 64x64, 64x16, 16x64 and 256x256, BASE = MAX = l with NEAREST and
+BASE = l with NEAREST_MIPMAP_NEAREST past the chain's end. One exception:
+a base address that isn't a multiple of 4 bytes, which only the last levels
+of an L8 chain have, reads the texel at the word below. 64x16's 1x1 level
+at offset 0x556 reads 0x554, the 2x1 level's first texel; 128x8's 1x1 at
+0x55e reads 0x55c. 32x32's 1x1 at 0x554 reads right. So T2's low two bits
+look ignored (**guess**; not avoided by the driver yet).
+
 **glGenerateMipmap runs on the GPU** (**capture**): one transfer per level
 (mg64: six, before the frame's kicks), each sampling the previous level as a
 twiddled texture (T0 `001e0090`: clamp, nearest, no mips) and writing the

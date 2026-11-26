@@ -427,7 +427,7 @@ Counts (rows with hardware facts): **covered 44, partial 27, missing 2**; 12 row
 - The layout the TPU expects for a T1 layout-2 cube whose faces are not powers of two (the driver lays out linear faces at an 8-texel pitch, packed as for POT faces < 16, and draws only those < 16 texels without mipmaps). TEX.md says no NPOT form of layout 2 is known; a capture of the DDK's NPOT cube (or a hardware sweep) is needed.
 
 ##### `sgx_texture.c:289-293` base level (partial) — TEX.md §1 "Mipmaps"
-- That T2 may point at any level of a chain and T1 carry that level's size, with the levels after it read as that texture's mips (GL_TEXTURE_BASE_LEVEL). TEX.md implies it (chain implied by the size) but doesn't state or test it.
+- That T2 may point at any level of a chain and T1 carry that level's size, with the levels after it read as that texture's mips (GL_TEXTURE_BASE_LEVEL): established on hardware since (TEX.md "A chain from any level", `sgx_baselevel`), except a base address that isn't 4-byte aligned (an L8 chain's last levels).
 
 ##### `sgx_texture.c:319-335` strided T0 (partial) — TEX.md §10 "Sources and filters"
 - Whether mag-filter LINEAR (T0 b12) works on a layout-6 (strided) source: TEX.md says strided sources "sample nearest" because the pitch occupies the min-filter bit; the driver sets b12 for a linear mag filter.
@@ -494,7 +494,7 @@ Counts (rows with hardware facts): **covered 44, partial 27, missing 2**; 12 row
 
 ##### Screen caps (partial) — TEX.md / STATE.md
 - Maximum texture width/height (driver 2048; T1's 12-bit fields allow 4096) and cube size; maximum render-target size.
-- LOD bias range (driver 16; LOD bias isn't wired up).
+- LOD bias range (driver 16; the bias goes through the program's explicit LOD, `lower_lod_ctl`, not T0 b21-26).
 - Line-width granularity: ISPB holds width × 16 truncated (1/16 steps), the driver reports 0.1.
 - No 3-D textures known (PIGLIT.md says the DDK desktop GL has `EXT_texture3D`).
 
