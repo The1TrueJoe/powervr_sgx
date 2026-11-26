@@ -447,6 +447,10 @@ void pvrsgx_fw_pd_slot_put(struct pvrsgx_device *sdev, int slot)
 static unsigned int probe_kpage;
 module_param(probe_kpage, uint, 0444);
 MODULE_PARM_DESC(probe_kpage, "Bring-up (SGX530): firmware-heap address to map a patterned page at (default 0, off)");
+/* With bit 0 of probe_kpage set: every word of the page is this value instead. */
+static unsigned int probe_kpage_fill;
+module_param(probe_kpage_fill, uint, 0444);
+MODULE_PARM_DESC(probe_kpage_fill, "Bring-up (SGX530): with probe_kpage bit 0 set, the value of every word of its page (default 0)");
 
 static int probe_kpage_init(struct pvrsgx_device *sdev)
 {
@@ -460,8 +464,10 @@ static int probe_kpage_init(struct pvrsgx_device *sdev)
 	if (err)
 		return err;
 	for (u32 i = 0; i < SGX_MMU_PAGE_SIZE / 4; i++)
-		((u32 *)km->cpu)[i] = PROBE_KPAGE_WORD(i);
-	drm_warn(&sdev->base, "probe: patterned page at 0x%08x\n", km->dev_addr);
+		((u32 *)km->cpu)[i] = probe_kpage & 1 ? probe_kpage_fill : PROBE_KPAGE_WORD(i);
+	sdev->fw.probe_kpage_fill = probe_kpage & 1;
+	drm_warn(&sdev->base, "probe: page at 0x%08x, %s 0x%08x\n", km->dev_addr,
+		 probe_kpage & 1 ? "every word" : "word 0", ((u32 *)km->cpu)[0]);
 	return 0;
 }
 

@@ -92,6 +92,8 @@ struct pvrsgx_fw {
 	struct pvrsgx_kmem pdtable;
 	/** @probe_kpage: Bring-up (SGX530): a patterned page in a firmware heap hole. */
 	struct pvrsgx_kmem probe_kpage;
+	/** @probe_kpage_fill: Its words all hold one value, so the dump compares with word 0. */
+	bool probe_kpage_fill;
 	/** @pd_slots: The @pdtable slots VMs hold. */
 	struct ida pd_slots;
 	/** @addr: Device address of each buffer. */
