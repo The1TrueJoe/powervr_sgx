@@ -282,6 +282,35 @@ On a 32-bit kernel, all the GPU's memory comes from the first 896 MiB of RAM ("l
 which the kernel needs too. If programs get closed for lack of memory, lower `SGX_SLOTS` as
 described in "32-bit games".
 
+## Stutter in games: the CPU's C2 idle state
+
+On some Cedarview netbooks the CPU's C2 idle state makes the computer wake up late: timers
+fire 15 to 85 ms late, and games stutter even when the average frame rate is fine. It isn't
+the GPU driver, but it looks like it. danilolc measured it on an N2600 with the Super
+Mario 64 PC port (4000 frames, 30 FPS target, three runs each):
+
+| | Frames over 50 ms | Over 100 ms | Worst frame |
+|---|---|---|---|
+| C2 off | 1 to 3 | 0 | 66 ms |
+| C2 on | 544 to 572 | 9 to 17 | 175 to 487 ms |
+
+Check which idle states your CPU has, and whether they're on:
+
+```bash
+grep . /sys/devices/system/cpu/cpu0/cpuidle/state*/name /sys/devices/system/cpu/cpu0/cpuidle/state*/disable
+```
+
+If `state2` is the one named `C2` and its `disable` is `0`, turn it off until the next
+restart:
+
+```bash
+for f in /sys/devices/system/cpu/cpu*/cpuidle/state2/disable; do echo 1 | sudo tee $f; done
+```
+
+If that helps, keep it off: add `intel_idle.states_off=4` to `GRUB_CMDLINE_LINUX_DEFAULT`
+in `/etc/default/grub`, run `sudo update-grub` and restart. The `4` is a bit mask: bit 2,
+state 2.
+
 ## Upgrading
 
 The kernel, the firmware and Mesa change together: Mesa only works with a kernel from the
@@ -330,7 +359,8 @@ You can undo each piece on its own.
 
 ## Reporting problems
 
-Please include:
+Open a [bug report](https://github.com/The1TrueJoe/powervr_sgx/issues/new?template=bug.yml).
+It asks for:
 
 - your computer model;
 - the output of `sudo dmesg | grep -i -E 'powervr|gma500|drm'`;
