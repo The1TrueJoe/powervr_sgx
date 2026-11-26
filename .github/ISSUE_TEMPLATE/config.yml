@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Install help and questions
+    url: https://github.com/The1TrueJoe/powervr_sgx/discussions/categories/q-a
+    about: Ask in Q&A.
+  - name: Game results and benchmarks
+    url: https://github.com/The1TrueJoe/powervr_sgx/discussions/categories/show-and-tell
+    about: Share them in Show and tell.

@@ -46,20 +46,26 @@ On Atom N2600 netbooks:
 | Game | Result |
 |---|---|
 | Doom 3 (dhewm3) | About 30 FPS, and smoother than Intel's Windows driver on the same netbook |
-| ioquake3, `opengl1` renderer | 60 to 65 FPS, held by vsync |
-| OpenArena, `opengl1` renderer | About 45 FPS in the timedemo |
-| Counter-Strike 1.6 | 37 to 40 FPS on de_dust2 |
+| ioquake3, `opengl1` renderer | 60 to 65 FPS with vsync, about 100 without |
+| OpenArena, `opengl1` renderer | 53 FPS in the timedemo (oa_dm4, 5 bots, 1024x600), about 100 in play |
+| Counter-Strike 1.6 | 37 to 40 FPS on de_dust2, 25 to 40 in busier matches |
+| Urban Terror | 30 to 40 FPS |
 | Quake (QuakeSpasm) | 37 to 40 FPS |
-| Yamagi Quake II | 40 to 70 FPS |
+| Yamagi Quake II | 40 to 70 FPS, 130 in a 640x480 window |
 | Geometry Dash (Wine) | 58 to 60 FPS |
 | Super Mario 64 PC port | A steady 30 FPS, the game's own cap, at 1024x600 |
 | Minecraft 1.12.2 | 25 to 30 FPS |
-| Minecraft 1.16.5 with OptiFine | Runs |
+| Minecraft 1.14.4 and 1.16.5 with OptiFine, and with Sodium | Run |
+| Minecraft 1.8.9 with OptiFine | Runs, but using the fishing rod hangs the GPU (#71) |
+| Luanti | Plays with a longer GPU time limit (#74) |
+| Red Eclipse 1.6 | In dev: draws correctly, 8 FPS with its occlusion queries and 15 to 16 with `oqfrags 0` (#75) |
 | SuperTuxKart | 15 to 20 FPS |
 | Call of Duty (Wine), PCSX-R with its OpenGL plugin | Run |
+| Half-Life: Source | Reaches the menu, then crashes loading a map (#72) |
 
-Something wrong in a game? [Open an issue](https://github.com/The1TrueJoe/powervr_sgx/issues)
-with what you ran and what you saw.
+Something wrong in a game? Open a [bug report](https://github.com/The1TrueJoe/powervr_sgx/issues/new?template=bug.yml).
+Results and benchmarks go in [Show and tell](https://github.com/The1TrueJoe/powervr_sgx/discussions/categories/show-and-tell),
+and questions in [Q&A](https://github.com/The1TrueJoe/powervr_sgx/discussions/categories/q-a).
 
 ## Installing
 

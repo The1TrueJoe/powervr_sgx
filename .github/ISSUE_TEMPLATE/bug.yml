@@ -1,0 +1,55 @@
+name: Bug report
+description: Something draws wrong, hangs, crashes or runs slower than it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Questions and install help go in [Q&A](https://github.com/The1TrueJoe/powervr_sgx/discussions/categories/q-a), and game results in [Show and tell](https://github.com/The1TrueJoe/powervr_sgx/discussions/categories/show-and-tell).
+  - type: input
+    id: version
+    attributes:
+      label: Driver version
+      description: The microkernel line of `sudo dmesg | grep -i powervr`, and 64-bit or 32-bit (i386).
+      placeholder: "ukernel-v0.2.3, 64-bit"
+    validations:
+      required: true
+  - type: input
+    id: computer
+    attributes:
+      label: Computer
+      description: Model and CPU, and the distribution and kernel (`uname -r`).
+      placeholder: "Asus Eee PC 1025C, Atom N2600, Debian 13, 7.3.3-sgx"
+    validations:
+      required: true
+  - type: input
+    id: program
+    attributes:
+      label: Game or program
+      description: Name and version, and the settings that matter (renderer, resolution, mods).
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you see, and what you expected. Screenshots help.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen
+      description: The steps, and whether it happens every time.
+  - type: textarea
+    id: dmesg
+    attributes:
+      label: Kernel log
+      description: |
+        `sudo dmesg | grep -i -E 'powervr|gma500|drm'` right after it happens. After a freeze and a restart, `sudo journalctl -k -b -1 | grep -i -E 'powervr|gma500|drm'`.
+      render: text
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: The program's own log, `glxinfo -B`, or files to attach.
