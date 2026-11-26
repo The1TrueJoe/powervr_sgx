@@ -2324,7 +2324,8 @@ r32_instr(nir_builder *b, nir_tex_instr *tex, void *data)
        tex->sampler_dim == GLSL_SAMPLER_DIM_BUF ||
        tex->sampler_dim == GLSL_SAMPLER_DIM_MS ||
        (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
-        tex->op != nir_texop_txl && tex->op != nir_texop_txf))
+        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
+        tex->op != nir_texop_txf))
       return false;
    unsigned n = o->tex_r32x4 >> u & 1 ? 4 : o->tex_r32x2 >> u & 1 ? 2 : 0;
    if (!n)

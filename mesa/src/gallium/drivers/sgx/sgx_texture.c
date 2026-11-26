@@ -275,6 +275,42 @@ sgx_tex_twiddled(const struct pipe_resource *prsc, unsigned w, unsigned h)
 
 #define twiddled(w, h) sgx_tex_twiddled(prsc, w, h)
 
+/* An R32, RG32 or RGBA32 2D texture (the 32-bit word formats but depth)
+ * whose levels are twiddled: each plane is a twiddled chain to 1x1, as an
+ * RGBA8 texture's, sampled as 0x0c, which returns the word unchanged
+ * (docs/GL3.md H2), NEAREST, so the sampler picks the level.  The other
+ * word textures are strided rows (sgx_tex_words), which have no chain: a
+ * mipmapped one reads its base level at every LOD. */
+bool
+sgx_tex_word_chain(const struct pipe_resource *prsc)
+{
+   return sgx_tex_raw32(prsc->format) && prsc->target == PIPE_TEXTURE_2D &&
+          sgx_tex_twiddled(prsc, prsc->width0, prsc->height0);
+}
+
+/* texel (x, y)'s index in a twiddled w x h level: tiles of min(w, h, 16)
+ * square, Morton order inside (y in bit 0), the tiles row by row */
+static size_t
+twiddle_index(unsigned w, unsigned h, unsigned x, unsigned y)
+{
+   unsigned n = MIN3(util_logbase2(w), util_logbase2(h), util_logbase2(TILE));
+   unsigned t = 1u << n, m = 0;
+
+   for (unsigned b = 0; b < n; b++)
+      m |= (y >> b & 1) << (2 * b) | (x >> b & 1) << (2 * b + 1);
+   return ((size_t)(y >> n) * (w >> n) + (x >> n)) * t * t + m;
+}
+
+/* the word of texel (x, y) of a w x h level in a plane of a word format */
+static size_t
+word_index(const struct pipe_resource *prsc, unsigned w, unsigned h, unsigned x,
+           unsigned y)
+{
+   if (sgx_tex_word_chain(prsc))
+      return twiddle_index(w, h, x, y);
+   return (size_t)y * depth_pitch(dev_width(prsc->format, w)) + x;
+}
+
 static size_t
 level_bytes(const struct pipe_resource *prsc, unsigned w, unsigned h,
             unsigned bpp)
@@ -293,8 +329,9 @@ chain_offset(const struct pipe_resource *prsc, unsigned level)
    for (unsigned l = 0; l < level; l++) {
       unsigned w = u_minify(prsc->width0, l), h = u_minify(prsc->height0, l);
 
-      off += word32 ? (size_t)depth_pitch(dev_width(prsc->format, w)) * h * 4
-                    : level_bytes(prsc, w, h, bpp);
+      off += word32 && !sgx_tex_word_chain(prsc)
+                ? (size_t)depth_pitch(dev_width(prsc->format, w)) * h * 4
+                : level_bytes(prsc, w, h, bpp);
    }
    return off;
 }
@@ -436,7 +473,7 @@ sgx_tex_dev_last(const struct pipe_resource *prsc)
 {
    if (prsc->target != PIPE_TEXTURE_2D || prsc->array_size > 1 ||
        !prsc->last_level || !twiddled(prsc->width0, prsc->height0) ||
-       sgx_tex_word32(prsc->format))
+       (sgx_tex_word32(prsc->format) && !sgx_tex_word_chain(prsc)))
       return prsc->last_level;
    return util_logbase2(MAX2(prsc->width0, prsc->height0));
 }
@@ -510,32 +547,25 @@ encode_rect(struct sgx_resource *res, unsigned level, const uint8_t *src,
       return;
    }
    if (sgx_tex_raw32(prsc->format)) {
-      /* word c of each texel into plane c, an R32 row each */
-      size_t pitch = (size_t)depth_pitch(dev_width(prsc->format, w)) * 4,
-             ps = sgx_tex_plane_stride(prsc);
+      /* word c of each texel into plane c, an R32 row each or a twiddled
+       * level (sgx_tex_word_chain) */
+      size_t ps = sgx_tex_plane_stride(prsc);
       unsigned n = sgx_tex_raw32(prsc->format);
+      bool conv = sgx_tex_f32_conv(prsc->format);
 
-      if (sgx_tex_f32_conv(prsc->format)) {
-         /* channel c as an F32 into plane c */
-         for (unsigned y = y0; y < y1; y++)
-            for (unsigned x = x0; x < x1; x++) {
-               float f[4];
+      for (unsigned y = y0; y < y1; y++)
+         for (unsigned x = x0; x < x1; x++) {
+            const uint8_t *t = src + y * src_stride + (size_t)x * cbpp;
+            size_t at = word_index(prsc, w, h, x, y) * 4;
+            float f[4];
 
-               util_format_unpack_rgba(prsc->format, f,
-                                       src + y * src_stride + (size_t)x * cbpp,
-                                       1);
-               for (unsigned c = 0; c < n; c++)
-                  memcpy(dst + c * ps + y * pitch + (size_t)x * 4, &f[c], 4);
+            /* channel c as an F32 into plane c */
+            if (conv) {
+               util_format_unpack_rgba(prsc->format, f, t, 1);
+               t = (const uint8_t *)f;
             }
-         return;
-      }
-      for (unsigned c = 0; c < n; c++)
-         for (unsigned y = y0; y < y1; y++) {
-            uint32_t *d = (uint32_t *)(dst + c * ps + y * pitch);
-            const uint32_t *s = (const uint32_t *)(src + y * src_stride);
-
-            for (unsigned x = x0; x < x1; x++)
-               d[x] = s[x * n + c];
+            for (unsigned c = 0; c < n; c++)
+               memcpy(dst + c * ps + at, t + 4 * c, 4);
          }
       return;
    }
@@ -731,13 +761,16 @@ fill_tail(struct sgx_resource *res)
             unsigned x0 = MIN2(2 * x, w - 1), x1 = MIN2(2 * x + 1, w - 1),
                      y0 = MIN2(2 * y, h - 1), y1 = MIN2(2 * y + 1, h - 1);
 
+            /* (an integer format's words decimated: they aren't floats) */
             for (unsigned c = 0; c < 4; c++)
                b[((size_t)y * nw + x) * 4 + c] =
-                  (a[((size_t)y0 * w + x0) * 4 + c] +
-                   a[((size_t)y0 * w + x1) * 4 + c] +
-                   a[((size_t)y1 * w + x0) * 4 + c] +
-                   a[((size_t)y1 * w + x1) * 4 + c]) *
-                  0.25f;
+                  util_format_is_pure_integer(f)
+                     ? a[((size_t)y0 * w + x0) * 4 + c]
+                     : (a[((size_t)y0 * w + x0) * 4 + c] +
+                        a[((size_t)y0 * w + x1) * 4 + c] +
+                        a[((size_t)y1 * w + x0) * 4 + c] +
+                        a[((size_t)y1 * w + x1) * 4 + c]) *
+                          0.25f;
          }
       }
       for (unsigned y = 0; y < nh; y++)
@@ -847,31 +880,21 @@ sgx_tex_decode_box(struct sgx_resource *res, unsigned level, unsigned layer,
        sgx_tex_volume(prsc))
       return;
    if (sgx_tex_raw32(prsc->format)) {
-      size_t pitch = (size_t)depth_pitch(dev_width(prsc->format, w)) * 4,
-             ps = sgx_tex_plane_stride(prsc);
+      size_t ps = sgx_tex_plane_stride(prsc);
       unsigned n = sgx_tex_raw32(prsc->format);
+      bool conv = sgx_tex_f32_conv(prsc->format);
 
-      if (sgx_tex_f32_conv(prsc->format)) {
-         unsigned cbpp = util_format_get_blocksize(prsc->format);
+      for (unsigned y = y0; y < y1; y++)
+         for (unsigned x = x0; x < x1; x++) {
+            uint8_t *t = dst + y * stride + (size_t)x * cbpp;
+            size_t at = word_index(prsc, w, h, x, y) * 4;
+            float f[4] = {0, 0, 0, 1};
 
-         for (unsigned y = y0; y < y1; y++)
-            for (unsigned x = x0; x < x1; x++) {
-               float f[4] = {0, 0, 0, 1};
-
-               for (unsigned c = 0; c < n; c++)
-                  memcpy(&f[c], src + c * ps + y * pitch + (size_t)x * 4, 4);
-               util_format_pack_rgba(prsc->format,
-                                     dst + y * stride + (size_t)x * cbpp, f, 1);
-            }
-         return;
-      }
-      for (unsigned c = 0; c < n; c++)
-         for (unsigned y = y0; y < y1; y++) {
-            uint32_t *d = (uint32_t *)(dst + y * stride);
-            const uint32_t *s = (const uint32_t *)(src + c * ps + y * pitch);
-
-            for (unsigned x = x0; x < x1; x++)
-               d[x * n + c] = s[x];
+            for (unsigned c = 0; c < n; c++)
+               memcpy(conv ? (uint8_t *)&f[c] : t + 4 * c, src + c * ps + at,
+                      4);
+            if (conv)
+               util_format_pack_rgba(prsc->format, t, f, 1);
          }
       return;
    }
@@ -960,7 +983,10 @@ sgx_tex_words(const struct pipe_sampler_view *view,
 {
    const struct pipe_resource *prsc = view->texture;
    const struct sgx_resource *res = (const struct sgx_resource *)prsc;
-   unsigned fmt = sgx_tex_format(prsc->format);
+   /* a word chain's words come back unchanged through 0x0c, never filtered
+    * (sgx_tex_word_chain) */
+   bool chain = sgx_tex_word_chain(prsc);
+   unsigned fmt = chain ? 0x0c : sgx_tex_format(prsc->format);
    /* A view from a later base level (GL_TEXTURE_BASE_LEVEL) of a 2D texture
     * starts at that level: the levels after it follow it as they follow
     * level 0 (TEX.md "Mipmaps"), so it reads as a texture of that size */
@@ -990,10 +1016,12 @@ sgx_tex_words(const struct pipe_sampler_view *view,
             t0.wrap_r = wrap(sampler->wrap_r);
          t0.wrap_t = wrap(sampler->wrap_t);
          t0.wrap_s = wrap(sampler->wrap_s);
-         t0.mip_linear =
-            mips && sampler->min_mip_filter == PIPE_TEX_MIPFILTER_LINEAR;
-         t0.min_linear = sampler->min_img_filter == PIPE_TEX_FILTER_LINEAR;
-         t0.mag_linear = sampler->mag_img_filter == PIPE_TEX_FILTER_LINEAR;
+         t0.mip_linear = mips && !chain &&
+                         sampler->min_mip_filter == PIPE_TEX_MIPFILTER_LINEAR;
+         t0.min_linear =
+            !chain && sampler->min_img_filter == PIPE_TEX_FILTER_LINEAR;
+         t0.mag_linear =
+            !chain && sampler->mag_img_filter == PIPE_TEX_FILTER_LINEAR;
       }
    }
    /* T1: a cube map's layout from a DDK capture */
@@ -1050,7 +1078,7 @@ sgx_tex_words(const struct pipe_sampler_view *view,
             t2.address = SGX_DEV_ADDR(res->bo.va + res->plane_offset);
       }
    }
-   if (sgx_tex_word32(prsc->format)) {
+   if (sgx_tex_word32(prsc->format) && !chain) {
       /* rows of depth_pitch texels, strided as a render target is read
        * (16x16: T0 00060e00, T1 d200f00f), base level only; an RG32 or
        * RGBA32 texture's plane 0 (a read of channel c adds c planes,

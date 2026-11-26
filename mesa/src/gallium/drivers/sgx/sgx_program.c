@@ -1631,18 +1631,29 @@ tex_units(nir_tex_instr *tex)
    return first < 32 ? BITFIELD_RANGE(first, MIN2(n, 32 - first)) : 0;
 }
 
-/* an implicit-LOD 2D or cube sample the program makes itself */
+/* an implicit-LOD 2D or cube sample */
 static bool
-dep_lod_sample(nir_tex_instr *tex)
+lod_sample(nir_tex_instr *tex)
 {
    return (tex->op == nir_texop_tex || tex->op == nir_texop_txb) &&
           (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
            (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE && !tex->is_array)) &&
           nir_tex_instr_src_index(tex, nir_tex_src_coord) >= 0 &&
           nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0 &&
-          nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) < 0 &&
-          !pds_sample(tex);
+          nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) < 0;
 }
+
+/* one the program makes itself */
+static bool
+dep_lod_sample(nir_tex_instr *tex)
+{
+   return lod_sample(tex) && !pds_sample(tex);
+}
+
+struct dep_lod_data {
+   uint32_t units;  /* dep_mip */
+   uint32_t planar; /* units read a plane at a time: dependent anyway */
+};
 
 /* the units a fragment shader's implicit-LOD dependent samples read */
 static uint32_t
@@ -1674,7 +1685,9 @@ dep_lod_units(nir_shader *nir)
  * same) it matches the PDS sample: the sample becomes a txd, which smp
  * takes as it is (LOD mode 3, hwt_grad).  A bias scales the gradients by
  * 2^bias.  Not in divergent flow, where derivatives are undefined; only on
- * the units in data (dep_mip).
+ * the units in data (dep_mip).  An RG32 / RGBA32 unit's samples too, plain
+ * ones included: the compiler reads each plane dependently (tex_r32x2 / x4;
+ * dEQP-GLES3 texture.specification.basic_teximage2d.rg32ui_2d).
  *
  * A cube sample does the same (measured: textureCube(s, d * one) takes
  * level 0 in the quads on the diagonal, mesa/tests/sgx_cubelod.c), but smp
@@ -1689,10 +1702,11 @@ dep_lod_units(nir_shader *nir)
 static bool
 lower_dep_lod(nir_builder *b, nir_tex_instr *tex, void *data)
 {
-   uint32_t units = *(const uint32_t *)data;
+   const struct dep_lod_data *d = data;
+   uint32_t u = tex_units(tex);
 
-   if (!dep_lod_sample(tex) || !(units & tex_units(tex)) ||
-       tex->instr.block->divergent)
+   if (!lod_sample(tex) || !(d->units & u) || tex->instr.block->divergent ||
+       (pds_sample(tex) && !(d->planar & u)))
       return false;
    b->cursor = nir_before_instr(&tex->instr);
    int ci = nir_tex_instr_src_index(tex, nir_tex_src_coord);
@@ -1881,9 +1895,11 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
       nir_lower_tex_options txd = {.lower_txd_cb = sgx_txd_lowered,
                                    .lower_txd_clamp = true};
 
+      struct dep_lod_data d = {dep_mip, so->r32x4 | so->r32x2};
+
       nir_divergence_analysis(nir);
       NIR_PASS(_, nir, nir_shader_tex_pass, lower_dep_lod,
-               nir_metadata_control_flow, &dep_mip);
+               nir_metadata_control_flow, &d);
       /* (sgx_lower_tex lowers the others with native integers) */
       if (!opts.native_integers)
          NIR_PASS(_, nir, nir_lower_tex, &txd);
@@ -2579,8 +2595,10 @@ tex_key_of(const nir_shader *nir, uint32_t dep_lod,
          any_buf = true;
          continue;
       }
-      /* mipmapped: lower_dep_lod's units */
-      if ((dep_lod >> unit & 1) && samplers[unit] &&
+      /* mipmapped: lower_dep_lod's units, and an RG32 / RGBA32 one, whose
+       * planes are read dependently (tex_r32x2 / x4) */
+      if (((dep_lod >> unit & 1) || sgx_tex_raw32(v->format) > 1) &&
+          samplers[unit] &&
           samplers[unit]->min_mip_filter != PIPE_TEX_MIPFILTER_NONE &&
           v->u.tex.last_level > v->u.tex.first_level)
          k->dep_mip |= 1u << unit;
@@ -2604,7 +2622,8 @@ tex_key_of(const nir_shader *nir, uint32_t dep_lod,
          k->snorm |= 1u << unit;
       /* a strided F32 texture's REPEAT / MIRRORED_REPEAT axes
        * (lower_word32_wrap) */
-      if (sgx_tex_word32(v->texture->format) && samplers[unit] && unit < 16) {
+      if (sgx_tex_word32(v->texture->format) &&
+          !sgx_tex_word_chain(v->texture) && samplers[unit] && unit < 16) {
          const struct pipe_sampler_state *ss = samplers[unit];
          unsigned w[2] = {ss->wrap_s, ss->wrap_t};
 

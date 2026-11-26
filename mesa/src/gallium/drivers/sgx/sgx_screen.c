@@ -61,7 +61,7 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
    {"nozls", SGX_DEBUG_NO_ZLS,
     "depth and stencil not kept across renders (no ZLS load or store)"},
    {"glsl130", SGX_DEBUG_GLSL130,
-    "GLSL 1.30 and native integers, and so EXT_texture_integer (RG32 and RGBA32 sample wrong until the compiler fetches them word by word): for the GL 3.0 work's tests"},
+    "GLSL 1.30 and native integers, and so EXT_texture_integer: for the GL 3.0 work's tests"},
    {"nomrt", SGX_DEBUG_NO_MRT,
     "one colour buffer, as before MRT (a draw a pass a buffer, H1: a second PBE emit hangs the GPU)"},
    {"ubo", SGX_DEBUG_UBO,
@@ -480,12 +480,13 @@ sgx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
        format != PIPE_FORMAT_R32_FLOAT &&
        !(sgx_drv_debug & SGX_DEBUG_GLSL130))
       return false;
-   /* RG32 and RGBA32 are stored for the compiler's word-by-word fetches
-    * (sgx_tex_raw32), which it doesn't do yet: not sampled until it does */
+   /* RG32 and RGBA32: a read a plane (the compiler's tex_r32x2 / x4), with
+    * the native integers */
    if ((usage & PIPE_BIND_SAMPLER_VIEW) && sgx_tex_raw32(format) > 1 &&
        !(sgx_drv_debug & SGX_DEBUG_GLSL130))
       return false;
-   /* a raw 32-bit format is sampled NEAREST only, the one level */
+   /* no word format as a cube yet: a word chain is 2D (sgx_tex_word_chain),
+    * and a plane would be a whole cube */
    if ((usage & PIPE_BIND_SAMPLER_VIEW) && sgx_tex_raw32(format) &&
        target == PIPE_TEXTURE_CUBE)
       return false;
