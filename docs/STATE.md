@@ -845,6 +845,7 @@ vertex buffers), so CPU expansion costs a copy it already makes.
 | line width | native: ISPB b8-15 = width × 16, at most 16 | hardware |
 | point size, sprites | native: a vertex output; ISPA object type 4 generates gl_PointCoord | hardware |
 | line strips and loops | lowered: no strip primitive; expanded to line lists | hardware |
+| discard, alpha test on lines | dropped: a line drawn by a discarding program locks the 3D up, so lines get a variant without the discards; gl_FragDepth on lines works (ISA.md "Phases, visibility feedback and discard") | hardware |
 | scissor, viewport | native: region clip plus pass-type-3 objects | hardware |
 | user clip planes | native: `fdpc` into cp<n> in the vertex program, enabled by output select b0-5 | capture (`cp1`, `cp2`, `cp6`, `cpnone`) |
 | flat shading, provoking vertex | native for the color source (0x20): pixel PDS DOUTI b25-26 = 2; coordinate sets have no flat switch; the last vertex provokes | hardware (`fl-douti` replay); capture (`flat`) |

@@ -2237,6 +2237,15 @@ On hardware (2026-10-28; `tools/isa/discard/results.txt`):
   program with lines (pcoeff's plane-coefficient iteration, or the ISP's
   line handling), not the kill. Lines without discard draw normally. Not
   explained; avoid discard on lines (or draw lines as thin triangles).
+- On the open stack (powervr_sgx) the same draw locks the 3D core up:
+  every frame times out, and the job is reset (hardware, 2026-11-26:
+  `mesa/tests/sgx_lines.c` cases `alpha`, `alphalist`, `discard`). st
+  lowers GL's alpha test to a discard, so a line drawn with alpha test on
+  is one (Minecraft 1.8.9's fishing line, issue #5). The same line drawn
+  by a program that writes gl_FragDepth (pass type 5, depthf, no discard)
+  renders correctly (case `fragdepth`). The gallium driver draws lines with
+  a variant of the program without its discards (`drop_discards`), so every
+  pixel of the line is kept.
 
 ### What a compiler must emit to discard
 
