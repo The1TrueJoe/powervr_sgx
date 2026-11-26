@@ -159,6 +159,9 @@ static int eot_nop;
 static uint32_t bg_pad;
 /* -w (bring-up): the clear's destination is w x w (at most 64) */
 static uint32_t clear_w = 64;
+/* -Z (bring-up): the pixel-event program at the start of the PDS pixel heap (PDS_EXEC_BASE + 0) */
+static int event_at_0;
+static struct buf evb;
 
 /* phas.i #0, #0 [wait=7]; limm o0, #CLEAR_COLOUR [end] */
 #define CLEAR_COLOUR 0xff00ff00u
@@ -187,7 +190,8 @@ static void eot_place(void)
 	X.eot_use = usse.va + eot_next;
 	eot_next += 0x80;
 	sgxtex_xctx_pixel_event(ev, X.eot_use, emit);
-	put_pds(&pdsc, X.pds_event, ev, SGXTEX_EVENT_ROWS, SGXTEX_EVENT_WORDS - 4 * SGXTEX_EVENT_ROWS);
+	put_pds(event_at_0 ? &evb : &pdsc, X.pds_event, ev, SGXTEX_EVENT_ROWS,
+		SGXTEX_EVENT_WORDS - 4 * SGXTEX_EVENT_ROWS);
 }
 
 static void programs(void)
@@ -203,6 +207,14 @@ static void programs(void)
 	X.bg = bgb.va;
 	X.pds_secondary = pdsc.va;
 	X.pds_event = pdsc.va + 0x40;	/* past an 8-word core's secondary */
+	if (event_at_0) {
+		uint64_t next = heap_next[DRM_POWERVR_SGX_HEAP_PDS_PIXEL];
+
+		heap_next[DRM_POWERVR_SGX_HEAP_PDS_PIXEL] = heap_base[DRM_POWERVR_SGX_HEAP_PDS_PIXEL];
+		evb = bo(DRM_POWERVR_SGX_HEAP_PDS_PIXEL, 0x1000);
+		heap_next[DRM_POWERVR_SGX_HEAP_PDS_PIXEL] = next;
+		X.pds_event = evb.va;
+	}
 	X.pds_primary = pdsp.va;
 	emit = usse.va + 0x80;
 	nop = usse.va + 0xc0;
@@ -421,7 +433,7 @@ int main(int argc, char **argv)
 	int opt, e, bad = 0, two = 0, clear_only = 0;
 	uint32_t pad = 0;
 
-	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:")) != -1) {
+	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:Z")) != -1) {
 		switch (opt) {
 		case 'v': verbose = 1; break;
 		case 'T': src_heap = DRM_POWERVR_SGX_HEAP_TEXTURE; break;
@@ -429,6 +441,7 @@ int main(int argc, char **argv)
 		case '2': two = 1; break;
 		case 'c': clear_only = 1; break;
 		case 'E': eot_nop++; break;
+		case 'Z': event_at_0 = 1; break;
 		case 'w': clear_w = (uint32_t)strtoul(optarg, NULL, 0); break;
 		case 'B': bg_pad = (uint32_t)strtoul(optarg, NULL, 0); break;
 		case 'p': pad = (uint32_t)strtoul(optarg, NULL, 0); break;
