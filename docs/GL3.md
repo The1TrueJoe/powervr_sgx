@@ -790,8 +790,10 @@ SGX545 rev 1014, 2026-11-26, `docs/log/entries/2026-11-26-0500-buffer-textures.m
   `textureSize`, `glTexBufferRange` at an offset, a rewrite between two
   draws of one frame, and a fetch in a vertex program: all pass.
 - piglit (`arb_texture_buffer_object`, `_range`, `ext_texture_buffer_object`,
-  at GL 3.1 / GLSL 1.40 by override): 2 pass on dev, 165 pass on the branch.
-  `data-sync` and `subdata-sync` go from fail to pass; the rest from skip.
+  at GL 3.1 / GLSL 1.40 by override): 2 pass on dev; 97 pass, 11 skip and
+  no fail with `tbo`. `data-sync` and `subdata-sync` go from fail to pass,
+  the rest from skip. The `ext_gpu_shader4` variants of `formats` skip until
+  the driver reports GLSL 1.40, and pass with it (165 pass in all).
   `ranges` first failed: an `if` kept as a branch around the load gave its
   result to pixels that skip it (ISA.md "Branches"), so the load is marked
   speculatable and the `if` becomes a select.

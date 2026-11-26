@@ -22,7 +22,8 @@ at an address it computes in a temporary (ISA.md "Address").
   - `glTexBufferRange` at an offset of 16 texels;
   - a `glBufferSubData` between two draws of one frame;
   - a fetch in a vertex program.
-- piglit's buffer-texture lists: 165 pass, against 2 on dev.
+- piglit's buffer-texture lists: 97 pass, 11 skip, no fail, against 2 pass on dev. With GLSL 1.40
+  reported too, the `ext_gpu_shader4` variants also pass (165 pass).
 - dEQP-GLES2 with the default switches is the same as dev: 16,636 pass, 70 expected fails.
 
 **Found on the way:** `arb_texture_buffer_range-ranges` failed where an `if (pos < size)`
