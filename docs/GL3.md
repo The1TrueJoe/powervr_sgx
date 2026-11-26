@@ -224,7 +224,7 @@ rotation of each triangle's vertices on the CPU before step 2.
 | `EXT_texture_snorm` | no signed sampler format known | done (glsl130): R8 / RG8 / RGBA8 snorm stored offset binary (each byte XOR 0x80) in the RGBA8 format, the TPU filtering it right (the map is linear), decoded in the shader after the view swizzle, max(v·255/127 − 128/127, −1) (`lower_snorm_texel`) | `mesa/tests/sgx_es3fmt.c` 8a-8d | done (glsl130) |
 | primitive restart (`NV_primitive_restart`) | none known | split on the CPU (`util_draw_vbo_without_prim_restart`); the driver already reads indices on the CPU | `sgx_draw.c` | high |
 | rectangle textures (`NV_texture_rectangle`) | NPOT linear layout (T1 layout 3) | unnormalized coordinates scaled in NIR (`nir_lower_tex` `lower_rect`) | TEX.md §1 (hardware) | high |
-| texture buffer objects (3.1 core; Mesa doesn't gate on them) | — | a linear 1D texture of the buffer, `texelFetch` through `ld` | ISA.md `ld` | medium |
+| texture buffer objects (3.1 core; Mesa doesn't gate on them) | `ld.a.d` from a computed address reads a buffer's device copy | done (`SGX_DEBUG=tbo,glsl130`): `texelFetch` is `ld.a.d` from the buffer's vertex-heap copy, whose address the driver puts in constant `SGX_K_TBO` + u; the program unpacks the texel's channels for the view's format and swizzles them (`lower_tbo`), and a texel past the end reads 0. See "Status" | ISA.md "Address" (hardware, `mesa/tests/sgx_tbo.c`) | done (tbo) |
 | 16 vertex texture units | the vertex program samples with `smp` (h8-9 = 2) | the compiler emits vertex samples (dependent `smp`); the driver's vertex sampler views and states, their DOUTT words in the vertex program's SA, and the size constants (lower_txs_int) for vertex units (in, `SGX_DEBUG=vtf,glsl130`: see "Status") | ISA.md "Vertex texture fetch" (corpus; hardware, open stack: `mesa/tests/sgx_vtf.c`); listed (ICD: 16) | high |
 
 ## GL 3.2
@@ -770,6 +770,35 @@ section 14; a CE5300 board, 2026-11-20):
   Every check that wants 0 gets 0 (2026-11-24).
   `occlusion_query_conform@GetObjivAval_multi2` fails with the cap and
   without. `nv_conditional_render` stays off.
+
+**Buffer textures** (`SGX_DEBUG=tbo`, with `glsl130`; a CE5300 board,
+SGX545 rev 1014, 2026-11-26, `docs/log/entries/2026-11-26-0500-buffer-textures.md`):
+
+- `texelFetch` on a `samplerBuffer` is lowered in the driver (`lower_tbo`):
+  `ld.a.d` from the buffer's vertex-heap copy (`sgx_buffer_vbo`, the one
+  vertex buffers use), at the address the draw puts in constant
+  `SGX_K_TBO` + u plus the texel's byte offset. The program unpacks the
+  view's format (8-, 16- and 32-bit channels; unorm, snorm, half, float and
+  integer) and applies its swizzle. A texel past the end reads 0 and loads
+  texel 0, so nothing outside the buffer is read, and the load can be
+  hoisted out of an `if`. `textureSize` is the size in texels from the
+  native-integer block.
+- `ARB_texture_buffer_object`, `_range` and `_rgb32`: 2^27 texels, offsets
+  of 16 bytes, every GL 3.1 buffer format, and the legacy alpha, luminance
+  and intensity ones (compatibility contexts refuse `rgba_only`).
+- `mesa/tests/sgx_tbo.c`: 34 formats bit for bit, texels past the end,
+  `textureSize`, `glTexBufferRange` at an offset, a rewrite between two
+  draws of one frame, and a fetch in a vertex program: all pass.
+- piglit (`arb_texture_buffer_object`, `_range`, `ext_texture_buffer_object`,
+  at GL 3.1 / GLSL 1.40 by override): 2 pass on dev; 97 pass, 11 skip and
+  no fail with `tbo`. `data-sync` and `subdata-sync` go from fail to pass,
+  the rest from skip. The `ext_gpu_shader4` variants of `formats` skip until
+  the driver reports GLSL 1.40, and pass with it (165 pass in all).
+  `ranges` first failed: an `if` kept as a branch around the load gave its
+  result to pixels that skip it (ISA.md "Branches"), so the load is marked
+  speculatable and the `if` becomes a select.
+- dEQP-GLES2 with the default switches: the same as dev (16,636 pass, 70
+  expected fails).
 
 Provoking vertex first waits for flat shading, which the driver doesn't do
 yet (DOUTI b25-26, STATE.md §3).

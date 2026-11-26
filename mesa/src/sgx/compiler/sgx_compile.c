@@ -3119,6 +3119,29 @@ emit_clip_distance(struct sgx_ctx *c, unsigned p, struct sgx_ref x)
    emit(c, f);
 }
 
+/* nc words into v: ld from base (an address less one word) + 4 * (first +
+ * j + 1), then a wait for them */
+static void
+emit_ld_words(struct sgx_ctx *c, struct sgx_val *v, struct sgx_ref base,
+              int first, unsigned nc)
+{
+   unsigned t = new_vreg(c, nc);
+   for (unsigned j = 0; j < nc; j++) {
+      struct sgx_ins *ld = ins_alloc(c, SGX_INS_ALU, SGX_OP_LD);
+      ld->nops = 3;
+      ld->op[0] = vref(t, j);
+      ld->op[1] = base;
+      ld->op[2] = ref(SGX_F_IMM, first + j);
+      emit(c, ld);
+   }
+   struct sgx_ins *w = ins_alloc(c, SGX_INS_ALU, SGX_OP_WDF);
+   w->ndst = 0;
+   emit(c, w);
+   v->kind = VAL_V;
+   v->n = t;
+   v->comp = 0;
+}
+
 /* A uniform block's words: ld.a.d from its address, which the driver loads
  * as constant ubo_base_k + block. ld.a.d #i reads base + 4 * (i + 1), so a
  * word past the first 128, or at an offset in a register, gets its address
@@ -3156,21 +3179,25 @@ emit_load_ubo(struct sgx_ctx *c, nir_intrinsic_instr *in, struct sgx_val *v)
       emit_isub(c, a4, a, ref(SGX_F_K, 4));
       base = a4;
    }
-   unsigned t = new_vreg(c, nc);
-   for (unsigned j = 0; j < nc; j++) {
-      struct sgx_ins *ld = ins_alloc(c, SGX_INS_ALU, SGX_OP_LD);
-      ld->nops = 3;
-      ld->op[0] = vref(t, j);
-      ld->op[1] = base;
-      ld->op[2] = ref(SGX_F_IMM, first + j);
-      emit(c, ld);
+   emit_ld_words(c, v, base, first, nc);
+}
+
+/* A 32-bit address's words (the driver's buffer textures: an address it
+ * loads from a constant, plus the texel's offset): ld from the address less
+ * one word */
+static void
+emit_load_global(struct sgx_ctx *c, nir_intrinsic_instr *in, struct sgx_val *v)
+{
+   unsigned nc = in->def.num_components;
+   if (in->def.bit_size != 32 || in->src[0].ssa->bit_size != 32 ||
+       in->src[0].ssa->num_components != 1 || nc > 4) {
+      sgx_fail(c, "global load");
+      return;
    }
-   struct sgx_ins *w = ins_alloc(c, SGX_INS_ALU, SGX_OP_WDF);
-   w->ndst = 0;
-   emit(c, w);
-   v->kind = VAL_V;
-   v->n = t;
-   v->comp = 0;
+   nir_legacy_src ls = nir_legacy_chase_src(&in->src[0]);
+   struct sgx_ref a4 = vref(new_vreg(c, 1), 0);
+   emit_isub(c, a4, src_comp(c, &ls, 0), ref(SGX_F_K, 4));
+   emit_ld_words(c, v, a4, 0, nc);
 }
 
 static void
@@ -3442,6 +3469,9 @@ emit_intrinsic(struct sgx_ctx *c, nir_intrinsic_instr *in)
       return;
    case nir_intrinsic_load_ubo:
       emit_load_ubo(c, in, v);
+      return;
+   case nir_intrinsic_load_global_constant:
+      emit_load_global(c, in, v);
       return;
    case nir_intrinsic_load_output: {
       /* the tile's packed word (rt_packed), for a blend in the program */
