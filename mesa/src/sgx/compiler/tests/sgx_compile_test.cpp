@@ -1916,9 +1916,9 @@ TEST_F(sgx_compile_test, fragment_volume_sample_is_3d)
 
 /* user clip planes in the TA: gl_ClipVertex through st's lowering
  * (nir_lower_clip_vs, planes 0..n-1), each distance an fdpc into cp<p> and
- * o<clip_o + p>, after every other output */
+ * o<clip_o + p>, after the sets and before the point size */
 static void
-clip_vs(nir_builder *b, unsigned enables)
+clip_vs(nir_builder *b, unsigned enables, bool psize)
 {
    nir_variable *a =
       nir_variable_create(b->shader, nir_var_shader_in, glsl_vec4_type(), "a");
@@ -1934,6 +1934,13 @@ clip_vs(nir_builder *b, unsigned enables)
    nir_store_var(b, cv, nir_fmul_imm(b, p, 2.0), 0xf);
    b->shader->info.outputs_written =
       VARYING_BIT_POS | BITFIELD64_BIT(VARYING_SLOT_CLIP_VERTEX);
+   if (psize) {
+      nir_variable *ps = nir_variable_create(
+         b->shader, nir_var_shader_out, glsl_float_type(), "gl_PointSize");
+      ps->data.location = VARYING_SLOT_PSIZ;
+      nir_store_var(b, ps, nir_imm_float(b, 3.0), 0x1);
+      b->shader->info.outputs_written |= VARYING_BIT_PSIZ;
+   }
    /* (st's STATE_CLIPPLANE; only the uniforms' names matter here) */
    gl_state_index16 state[8][STATE_LENGTH] = {};
    for (unsigned i = 0; i < 8; i++) {
@@ -1945,14 +1952,17 @@ clip_vs(nir_builder *b, unsigned enables)
 
 TEST_F(sgx_compile_test, vertex_clip_planes_fdpc)
 {
-   for (unsigned enables : {0x1u, 0x3u, 0x21u, 0x3fu}) {
+   for (unsigned enables : {0x1u, 0x3u, 0x21u, 0x3fu, 0x40u, 0x80u, 0xffu})
+   for (bool psize : {false, true}) {
       start(MESA_SHADER_VERTEX);
-      clip_vs(&b, enables);
+      clip_vs(&b, enables, psize);
       ASSERT_TRUE(compile()) << out.log;
       expect_decodes();
       unsigned n = util_last_bit(enables);
       EXPECT_EQ(out.n_clip, n) << enables;
-      EXPECT_EQ(out.clip_o + n, out.n_out_regs);
+      /* the TA takes the last output as the point size */
+      EXPECT_EQ(out.point_size, psize);
+      EXPECT_EQ(out.clip_o + n + psize, out.n_out_regs) << enables;
       EXPECT_GE(out.clip_o, 4u);
       std::string s = disasm();
       for (unsigned p = 0; p < n; p++) {

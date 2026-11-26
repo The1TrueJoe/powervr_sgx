@@ -301,11 +301,12 @@ struct sgx_shader {
    uint32_t in_mask[4];
    /* vertex: output set sizes (o4 on); 0 = unused */
    unsigned set_comps[SGX_MAX_SETS];
-   bool point_size; /* vertex: writes the point size (f32), after the sets */
+   bool point_size; /* vertex: writes the point size (f32), the last output */
    unsigned n_out_regs; /* vertex: o registers written */
    /* vertex: user clip distances 0..n_clip-1, plane p's in o<clip_o + p>
-    * through fdpc into cp<p>; the driver enables planes 0..n_clip-1 in the
-    * TA's output select (b0-5) and counts n_clip more output dwords */
+    * through fdpc into cp<p>, after the sets; the driver enables planes
+    * 0..n_clip-1 in the TA's output select (b0-7) and counts n_clip more
+    * output dwords */
    unsigned n_clip, clip_o;
    /* SA registers used from sa_base on (constants and the compiler's own) */
    unsigned sa_slots;

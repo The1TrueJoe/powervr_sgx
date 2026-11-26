@@ -846,7 +846,7 @@ vertex buffers), so CPU expansion costs a copy it already makes.
 | point size, sprites | native: a vertex output; ISPA object type 4 generates gl_PointCoord | hardware |
 | line strips and loops | lowered: no strip primitive; expanded to line lists | hardware |
 | scissor, viewport | native: region clip plus pass-type-3 objects | hardware |
-| user clip planes | native: `fdpc` into cp<n> in the vertex program, enabled by output select b0-5 | capture (`cp1`, `cp2`, `cp6`, `cpnone`) |
+| user clip planes | native: `fdpc` into cp<n> in the vertex program, enabled by output select b0-7 (8 planes); the results after the sets, before the point size | capture (`cp1`, `cp2`, `cp6`, `cpnone`); hardware (`sgx_ucp`, planes 6 and 7, points) |
 | flat shading, provoking vertex | native for the color source (0x20): pixel PDS DOUTI b25-26 = 2; coordinate sets have no flat switch; the last vertex provokes | hardware (`fl-douti` replay); capture (`flat`) |
 | logic ops | shader code: pass type 1, and the program combines its color with o0, which holds the destination | capture (`lxor`, `lcinv`) |
 | polygon mode LINE/POINT, edge flags | native for the mode: ISPA object type 5 draws a triangle's edges, 6 its vertices; edge flags not known | hardware (`ot5`, `ot6` replays) |
@@ -871,32 +871,34 @@ control, TA header or ISP word):
 - **Output select** (TA block word, `0x304110b4` in these captures) gets
   one bit per plane in b0-5 and one more output dword per plane:
   `00083800` with none, `00093801` with one, `000a3803` with two,
-  `000e383f` with six. The `fdpc` result is that extra output. Which output
-  register it lands in (o7+n as printed, or o8+n after the repeat) is
-  **unconfirmed**: the count says 8 + n dwords.
+  `000e383f` with six. The `fdpc` result is that extra output, o(8+n)
+  (fdpc writes its last iteration's register, ISA.md): plane p's in
+  o<clip_o + p>, with clip_o the first dword after the sets [hardware,
+  below].
 - **The VDM draw words** follow the bigger program: the vertex PDS
   program's address and data size.
 
 So the TA clips against the `fdpc` results of the planes whose bit is set.
-The driver sets `caps->clip_planes = 0` today, so st/mesa lowers user planes
-into the vertex shader (`nir_lower_clip_vs` writes gl_ClipDistance). The
-native path is: the compiler emits each distance with an `fdpc` into cp<n>
-as an extra output, and the driver sets output select's mask and count. How
-the compiler gets a gl_ClipDistance through `fdpc` (a dot product of the
-distance with a unit vector, or of the position with the plane) is its
-choice (**guess** until the hardware test below). Clipping in the TA works
-on lines too, so the discard fallback, which can't run on lines, isn't
-needed.
+The driver sets `caps->clip_planes = 0`, so st/mesa lowers user planes into
+the vertex shader (`nir_lower_clip_vs` writes gl_ClipDistance). The
+compiler emits each distance with an `fdpc` into cp<n> as an extra output,
+and the driver sets output select's mask and count. How
+the compiler gets a gl_ClipDistance through `fdpc` is its choice: it
+takes the dot product of (distance, 0) with (1, 0) (`emit_clip_distance`).
 
-- **Test (open stack):** a replay or `sgx_hwt` frame with one `fdpc` into
-  cp0 and output select `00093801`, drawing a triangle and a line across
-  the plane, read back. It confirms the output slot and that lines clip.
-- **Fallback, if the test fails:** `nir_lower_clip_fs` turns the distances
-  into varyings and a discard. That costs the punch-through pass and a
-  varying per four planes, and **not on lines:** any program with
-  visibility feedback breaks a frame drawn with lines, whether or not the
-  discard is taken (ISA.md, "Phases, visibility feedback and discard":
-  hardware). Clipped lines would have to be drawn as thin triangles.
+- **Planes 6 and 7** (GLSL 1.30's 8 clip distances): output select b6 and
+  b7 enable cp6 and cp7, as b0-5 do the first six [hardware].
+- **With a point size:** output select b8 takes the *last* output dword as
+  the size, so the clip results go before it. After it, a point under a
+  plane at distance 4 was drawn 4 px wide [hardware].
+- **Test:** `mesa/tests/sgx_ucp.c` (2026-11-26, a CE5300 board, SGX545 rev
+  1014): plane 0 keeps x ≥ 0 for a quad, a strip, a transformed plane, a
+  line, a row of points, an FBO and a GLSL 1.20 gl_ClipVertex; plane 5;
+  planes 6 and 7 and gl_ClipDistance[7] (glsl130); 1 px points under a plane
+  that keeps all. Lines clip in the TA, so the discard path
+  (`nir_lower_clip_fs`, which can't run on lines: ISA.md, "Phases,
+  visibility feedback and discard") isn't needed. Not yet run on rev 10131
+  (Cedarview).
 
 **Flat shading.** ES1 has `glShadeModel(GL_FLAT)`, so a `probe1` capture with
 `PROBE_SHADEMODEL=0x1D00` against the base (`0x1D01`) (**capture**, `flat`,

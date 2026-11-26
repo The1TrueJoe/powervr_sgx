@@ -1,2 +1,5 @@
 # 2026-11-03: 28515 tests, Crash 87, Fail 1729, Missing 437, Pass 4280, Skip 21978, Timeout 2, Warn 2
 # piglit gpu profile on the CE5300 board; every test that didn't skip rerun on um-re c111b12 + the varyings driver (lib-pg17)
+
+# about half the runs: plane 2 isn't applied when the enables go from 0, 1, 4, 5 to 0-3 (line 112), as often on dev (2026-11-26)
+spec@glsl-1.20@execution@clipping@fixed-clip-enables

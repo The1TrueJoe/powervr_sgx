@@ -1914,14 +1914,10 @@ assign_io(struct sgx_ctx *c)
          obase[i] = c->vary->set_comps[i] ? (int)k : -1;
          k += c->vary->set_comps[i];
       }
-      c->psize_reg = k;
-      c->n_out_regs = k + (c->vary->point_size ? 1 : 0);
       for (unsigned j = 0; j < 4; j++)
          c->out_reg[VARYING_SLOT_POS * 4 + j] = j;
-      if (c->vary->point_size)
-         c->out_reg[VARYING_SLOT_PSIZ * 4] = c->psize_reg;
       /* the clip distances (nir_lower_clip_vs: planes 0..n-1, a disabled one
-       * below the last 0.0) after everything else, one o register each */
+       * below the last 0.0) after the sets, one o register each */
       unsigned nclip = 0;
       nir_foreach_shader_out_variable (var, s) {
          if (var->data.location == VARYING_SLOT_CLIP_DIST0 ||
@@ -1938,10 +1934,14 @@ assign_io(struct sgx_ctx *c)
       if (s->info.clip_distance_array_size)
          nclip = MIN2(nclip, s->info.clip_distance_array_size);
       c->n_clip = nclip;
-      c->clip_o = c->n_out_regs;
+      c->clip_o = k;
       for (unsigned p = 0; p < nclip; p++)
          c->out_reg[VARYING_SLOT_CLIP_DIST0 * 4 + p] = c->clip_o + p;
-      c->n_out_regs += nclip;
+      /* then the point size: the TA takes the last output dword as it */
+      c->psize_reg = k + nclip;
+      c->n_out_regs = c->psize_reg + (c->vary->point_size ? 1 : 0);
+      if (c->vary->point_size)
+         c->out_reg[VARYING_SLOT_PSIZ * 4] = c->psize_reg;
       nir_foreach_shader_out_variable (var, s)
          if (var->data.location >= VARYING_SLOT_VAR0)
             if (!map_varying(c->out_reg, c->out_hi, var, c->vary, obase,
