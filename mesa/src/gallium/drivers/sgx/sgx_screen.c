@@ -74,6 +74,8 @@ static const struct debug_named_value sgx_drv_debug_options[] = {
     "3D textures up to 256 on a side, in the volume layout (docs/TEX.md section 14): until piglit and dEQP pass them"},
    {"tbo", SGX_DEBUG_TBO,
     "buffer textures (ARB_texture_buffer_object; with glsl130 only, as texelFetch takes an integer): each texel read with ld from the buffer's device copy (sgx_program.c lower_tbo), until they pass on a board"},
+   {"cbf", SGX_DEBUG_CBF,
+    "ARB_color_buffer_float, a GL 3.0 gate: Mesa clamps vertex and fragment colors in the shader when GL asks (compatibility contexts only), until piglit passes it on a board"},
    {"noocclusion", SGX_DEBUG_NO_OCCLUSION,
     "no occlusion queries: Mesa's stand-ins, which count 0 (0.2.3 and earlier; ARB_occlusion_query stays, with no counter bits)"},
    {"flushrt", SGX_DEBUG_FLUSH_RT,
@@ -281,6 +283,10 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
       caps->max_texel_buffer_elements = SGX_TBO_MAX_TEXELS;
       caps->texture_buffer_offset_alignment = 16;
    }
+   /* ARB_color_buffer_float (SGX_DEBUG=cbf): the driver has no color clamp
+    * of its own, so st clamps with fsat in the shader as GL's state asks.
+    * Mesa leaves the extension out of core contexts */
+   caps->vertex_color_unclamped = !!(sgx_drv_debug & SGX_DEBUG_CBF);
    /* occlusion queries, ARB_occlusion_query2, EXT_occlusion_query_boolean
     * (sgx_state.c).  Without the cap Mesa still exposes ARB_occlusion_query
     * and answers every query 0 itself, and an engine culls what it sees */
