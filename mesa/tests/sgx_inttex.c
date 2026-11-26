@@ -5,7 +5,7 @@
 
 /*
  * Integer textures and integer render targets (docs/GL3.md), under
- * SGX_DEBUG=glsl130 (GLSL 1.30, EXT_texture_integer):
+ * GLSL 1.30 and EXT_texture_integer (off with SGX_DEBUG=noglsl130):
  *
  *   sample  a 16x16 texture of each integer format (RGBA8UI, RGBA8I, RG8UI,
  *           R8UI, R32UI, R32I, RG32UI, RGBA32UI, RGBA32I) whose every
@@ -19,7 +19,7 @@
  *           writing values made from the pixel's position; read back with
  *           GL_RGBA_INTEGER: the left half the draw's, the right the clear's
  *
- *   SGX_DEBUG=glsl130 sgx_inttex
+ *   sgx_inttex
  *
  * zig cc -target x86_64-linux-gnu.2.36 -I<mesa include> -o sgx_inttex
  * sgx_inttex.c -ldl
@@ -449,7 +449,7 @@ main(void)
           glGetString_(GL_SHADING_LANGUAGE_VERSION),
           ext && strstr(ext, "GL_EXT_texture_integer") ? "yes" : "no");
    if (!ext || !strstr(ext, "GL_EXT_texture_integer")) {
-      printf("FAIL: no EXT_texture_integer (SGX_DEBUG=glsl130?)\n");
+      printf("FAIL: no EXT_texture_integer (SGX_DEBUG=noglsl130?)\n");
       return 1;
    }
    GET(glClearColorIuiEXT);

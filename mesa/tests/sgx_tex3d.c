@@ -4,10 +4,10 @@
  */
 
 /*
- * Volume textures (SGX_DEBUG=tex3d, docs/TEX.md section 14) through GLES2's
- * OES_texture_3D: RGBA8 volumes whose texel (x, y, z) of level l is the
- * bytes (x, y, z, 0x80 | l), read back slice by slice with texture3D at
- * texel centres into a pbuffer:
+ * Volume textures (not with SGX_DEBUG=notex3d, docs/TEX.md section 14)
+ * through GLES2's OES_texture_3D: RGBA8 volumes whose texel (x, y, z) of
+ * level l is the bytes (x, y, z, 0x80 | l), read back slice by slice with
+ * texture3D at texel centres into a pbuffer:
  *
  *   size   every texel of power-of-two, flat, deep and NPOT volumes, up to
  *          256 on a side (256^3: every 15th slice)
@@ -22,10 +22,10 @@
  *          texel of each level the mean of its 2x2x2 parent (+-1)
  *   nondep sizes again with the coordinate a varying the PDS samples from
  *          (the cases above compute it: dependent samples)
- *   vertex a vertex program's texture3DLod, a point a texel (SGX_DEBUG=vtf,
- *          glsl130 as well)
+ *   vertex a vertex program's texture3DLod, a point a texel (not with
+ *          SGX_DEBUG=novtf or noglsl130)
  *
- *   SGX_DEBUG=tex3d sgx_tex3d [case...]
+ *   sgx_tex3d [case...]
  *
  * zig cc -target x86_64-linux-gnu.2.36 -I<mesa include> -o sgx_tex3d
  * sgx_tex3d.c -ldl
@@ -728,7 +728,7 @@ main(int argc, char **argv)
    glGetIntegerv_(GL_MAX_3D_TEXTURE_SIZE_OES, &max3d);
    printf("%s, GL_MAX_3D_TEXTURE_SIZE %d\n", glGetString_(GL_RENDERER), max3d);
    if (max3d < 256) {
-      printf("needs SGX_DEBUG=tex3d\n");
+      printf("no volumes (SGX_DEBUG=notex3d?)\n");
       return 2;
    }
    glPixelStorei_(GL_UNPACK_ALIGNMENT, 1);
@@ -790,7 +790,7 @@ main(int argc, char **argv)
 
       glGetIntegerv_(GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS, &units);
       if (!units) {
-         printf("vertex: no vertex texture units (SGX_DEBUG=vtf,glsl130)\n");
+         printf("vertex: no vertex texture units (SGX_DEBUG=novtf or noglsl130?)\n");
       } else {
          case_vertex(16, 16, 4);
          case_vertex(24, 40, 20);
