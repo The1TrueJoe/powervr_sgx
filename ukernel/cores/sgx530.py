@@ -65,6 +65,9 @@ ISA_CORE = 545               # assembled with the SGX545's encodings: sgx.xml de
 # for 0x23; the SGX545's 0x27 needs b2, which only PDS_INV1 sets here, and timed
 # out on every TA kick (bounded wait 0xd).
 INV_DONE_TA = 0x23
+# The 3D side (PDS_INV1 + CSC) sets b2+b6 and b0, so it waits for 0x45; the
+# SGX545's 0x4b timed out on every transfer (C, an OMAP3630 board, 2026-11-26).
+INV_DONE_3D = 0x45
 WAIT_BOUND = 0xffff          # every wait gives up after 65535 polls and logs itself
                              # in WAIT_TIMEOUT_ID/CT (the manifest's "waits" names it)
 FEATURES = 0x4              # PVRSGX_UKFW_SINGLE_CONTEXT (bit 2, proposed): EDM on list
