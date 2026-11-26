@@ -127,6 +127,27 @@ bool pvrsgx_edm_init;
 module_param_named(edm_init, pvrsgx_edm_init, bool, 0444);
 MODULE_PARM_DESC(edm_init, "Start the open microkernel via the §9 launch folded into real init (single-context cores)");
 
+/* Bring-up probe (SGX530): a value for 0xa74 in place of the init script's (0 = the script's). */
+static unsigned int probe_a74;
+module_param(probe_a74, uint, 0444);
+MODULE_PARM_DESC(probe_a74, "Bring-up (SGX530): value written to 0xa74 at init instead of the script's (default 0, off)");
+static unsigned int probe_a58, probe_clkgate;
+module_param(probe_a58, uint, 0444);
+MODULE_PARM_DESC(probe_a58, "Bring-up (SGX530): event PDS enable value instead of the core's (default 0, off)");
+module_param(probe_clkgate, uint, 0444);
+MODULE_PARM_DESC(probe_clkgate, "Bring-up (SGX530): CLKGATECTL value at start instead of the core's (default 0, off)");
+
+/* Bring-up probe (SGX530): extra init writes, reg,value pairs, after the core's script. */
+static unsigned int probe_init[32];
+static int probe_init_n;
+module_param_array(probe_init, uint, &probe_init_n, 0444);
+MODULE_PARM_DESC(probe_init, "Bring-up (SGX530): reg,value pairs written after the init script (default none)");
+
+static bool probe_530(struct pvrsgx_device *sdev, unsigned int v)
+{
+	return v && sdev->family->core == 530;
+}
+
 static u32 *fw_words(struct pvrsgx_device *sdev, enum pvrsgx_fw_buf b)
 {
 	return sdev->fw.cpu[b];
@@ -552,8 +573,21 @@ static int init_script_part2(struct pvrsgx_device *sdev)
 	struct pvrsgx_fw *f = &sdev->fw;
 	int err;
 
-	for (u32 i = 0; i < fam->num_init_regs; i++)
-		sgx_wr(sdev, fam->init_regs[i].reg, fam->init_regs[i].val);
+	for (u32 i = 0; i < fam->num_init_regs; i++) {
+		u32 val = fam->init_regs[i].val;
+
+		if (probe_a74 && fam->core == 530 && fam->init_regs[i].reg == 0xa74) {
+			drm_warn(&sdev->base, "probe: 0xa74 = 0x%08x\n", probe_a74);
+			val = probe_a74;
+		}
+		sgx_wr(sdev, fam->init_regs[i].reg, val);
+	}
+	for (int i = 0; fam->core == 530 && i + 1 < probe_init_n; i += 2) {
+		if (probe_init[i] >= 0x4000 || probe_init[i] & 3)
+			continue;
+		drm_warn(&sdev->base, "probe: init 0x%04x = 0x%08x\n", probe_init[i], probe_init[i + 1]);
+		sgx_wr(sdev, probe_init[i], probe_init[i + 1]);
+	}
 	/*
 	 * Code bases 0-9 the pixel shader heap, 10-13 the vertex shader heap, 15
 	 * ours. A client's PDS program can name any of them, so 14 is a second
@@ -561,13 +595,13 @@ static int init_script_part2(struct pvrsgx_device *sdev)
 	 */
 	for (u32 i = 0; i < 10; i++)
 		sgx_wr(sdev, use_code_base(sdev, PVRSGX_USSE_PIXEL_BASE_INDEX + i),
-		       use_code_base_val(sdev, h->usse_pixel.base + (i << PVRSGX_USSE_WINDOW_LOG2),
+		       use_code_base_val(sdev, h->usse_pixel.base + (i << h->usse_window_log2),
 					 USE_CODE_BASE_DM_PIXEL));
 	sgx_wr(sdev, use_code_base(sdev, PVRSGX_USSE_SPARE_BASE_INDEX),
 	       use_code_base_val(sdev, h->usse_pixel.base, USE_CODE_BASE_DM_PIXEL));
 	for (u32 i = 0; i < 4; i++)
 		sgx_wr(sdev, use_code_base(sdev, PVRSGX_USSE_VERTEX_BASE_INDEX + i),
-		       use_code_base_val(sdev, h->usse_vertex.base + (i << PVRSGX_USSE_WINDOW_LOG2),
+		       use_code_base_val(sdev, h->usse_vertex.base + (i << h->usse_window_log2),
 					 0));
 	sgx_wr(sdev, use_code_base(sdev, PVRSGX_USSE_UKERNEL_BASE_INDEX),
 	       use_code_base_val(sdev, h->kernel_code.base, USE_CODE_BASE_DM_UKERNEL));
@@ -587,7 +621,8 @@ static int init_script_part2(struct pvrsgx_device *sdev)
 	err = check_event_pds(sdev);
 	if (err)
 		return err;
-	sgx_wr(sdev, cr->event_pds_enable, cr->event_pds_enable_all);
+	sgx_wr(sdev, cr->event_pds_enable,
+	       probe_530(sdev, probe_a58) ? probe_a58 : cr->event_pds_enable_all);
 	return 0;
 }
 
@@ -668,7 +703,7 @@ int pvrsgx_fw_start(struct pvrsgx_device *sdev)
 	mutex_unlock(&sdev->ccb_lock);
 
 	/* Every unit's clock gated automatically, but the DPM's: it stays on. */
-	sgx_wr(sdev, SGX_CR_CLKGATECTL,
+	sgx_wr(sdev, SGX_CR_CLKGATECTL, probe_530(sdev, probe_clkgate) ? probe_clkgate :
 	       (SGX_CLKG_ALL(cr->clkgatectl_units, SGX_CLKG_AUTO) & ~cr->clkgatectl_dpm) |
 	       field_prep(cr->clkgatectl_dpm, SGX_CLKG_ON));
 	sgx_wr_opt(sdev, cr->clkgatectl2, SGX_CLKG_ALL(cr->clkgatectl2_units, SGX_CLKG_AUTO));

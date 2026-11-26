@@ -30,6 +30,7 @@ static const struct pvrsgx_core_regs sgx545_regs = {
 	.clkgatectl2_units = SGX_CR_CLKGATECTL2_UNITS,
 	.clkgatestatus = SGX_CR_CLKGATESTATUS,
 	.clkgatestatus_dpm = SGX_CR_CLKGATESTATUS_DPM_CLKS,
+	.clkgatectlovr = 0x000c,
 	.soft_reset_bif = SGX_CR_SOFT_RESET_BIF_RESET,
 	.soft_reset_cores = SGX_CR_SOFT_RESET_DPM_RESET | SGX_CR_SOFT_RESET_TA_RESET |
 			    SGX_CR_SOFT_RESET_USE_RESET | SGX_CR_SOFT_RESET_ISP_RESET |
@@ -71,6 +72,7 @@ static const struct pvrsgx_heap_layout sgx545_heaps = {
 	.general = { PVRSGX_HEAP_GENERAL, PVRSGX_HEAP_TEXTURE },
 	.texture = { PVRSGX_HEAP_TEXTURE, SZ_4G },
 	.pb_max_pages = 0x8000,
+	.usse_window_log2 = PVRSGX_USSE_WINDOW_LOG2,
 };
 
 /*
@@ -100,11 +102,16 @@ static const struct pvrsgx_core_regs sgx530_regs = {
 	.clkgatectl_dpm = GENMASK(17, 16),
 	.clkgatestatus = 0x0004,
 	.clkgatestatus_dpm = BIT(16),
+	.clkgatectlovr = 0x0008,
+	.pds_inv2 = 0x0ad8,
+	.pds_inv3 = 0x0adc,
 	.soft_reset_bif = BIT(0),
 	/* 2D b1, DPM b2, TA b3, USE b4, ISP b5, TSP b6 */
 	.soft_reset_cores = GENMASK(6, 1),
 	.use_code_base0 = SGX_CR_USE_CODE_BASE_0,
 	.pds_exec_base = SGX_CR_PDS_EXEC_BASE,
+	/* Named in the GPL header; its debug dump reads it. */
+	.pds_pc_base = 0x0b2c,
 	.bif_int_stat_fault_req = GENMASK(13, 0),
 	.bif_int_stat_fault_type = BIT(14),	/* read or write */
 	.bif_fault_addr = GENMASK(27, 12),
@@ -146,6 +153,8 @@ static const struct pvrsgx_heap_layout sgx530_heaps = {
 	.usse_vertex = { 0x0fc00000, 0x0fe00000 },
 	/* Half the 64 MiB heap, as the SGX545's: the rest holds the free list and VM objects. */
 	.pb_max_pages = 0x2000,
+	/* 32 KiB: a DOUTU reaches no further on this core (docs/PDS.md, SGX530). */
+	.usse_window_log2 = 15,
 };
 
 static const struct pvrsgx_core_family families[] = {
@@ -162,6 +171,10 @@ static const struct pvrsgx_core_family families[] = {
 		.num_dir_lists = 16,
 		.va_bits = 32,
 		.heaps = &sgx545_heaps,
+		.tile_w_log2 = 5,
+		.screen_y_shift = 16,
+		.te_aa = 0x20000000,
+		.vdm_ctl = 0xa2,
 		.cmds = &pvrsgx_cmd_core_sgx545,
 		.init_regs = sgx545_init_regs,
 		.num_init_regs = ARRAY_SIZE(sgx545_init_regs),
@@ -174,6 +187,7 @@ static const struct pvrsgx_core_family families[] = {
 		.core_id = 0x01120000,
 		.regs = &sgx530_regs,
 		.isa = PVRSGX_ISA_SGX545,
+		.features = PVRSGX_FEATURE_DOUTU_OFFSET_BYTES,
 		.num_dir_lists = 1,
 		.va_bits = 28,
 		.heaps = &sgx530_heaps,
@@ -181,6 +195,15 @@ static const struct pvrsgx_core_family families[] = {
 		.event_pds_guessed = true,
 		/* Its task's stores to EDMPROTECT pages fault. */
 		.data_no_edmprotect = true,
+		/*
+		 * The vendor stack's TA command for a 64x64 target on an OMAP3630
+		 * board: 4x4 tiles, so 16x16 ones; screen (h-1)<<12 | (w-1); TE AA 0;
+		 * VDM control 0x1a2.
+		 */
+		.tile_w_log2 = 4,
+		.screen_y_shift = 12,
+		.te_aa = 0,
+		.vdm_ctl = 0x1a2,
 		.cmds = &pvrsgx_cmd_core_sgx530,
 		.init_regs = sgx530_init_regs,
 		.num_init_regs = ARRAY_SIZE(sgx530_init_regs),

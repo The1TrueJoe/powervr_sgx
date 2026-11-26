@@ -10,6 +10,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/devcoredump.h>
+#include <linux/module.h>
 #include <linux/seq_buf.h>
 #include <linux/vmalloc.h>
 
@@ -25,6 +26,41 @@
 #include "pvrsgx_render.h"
 #include "pvrsgx_vm.h"
 
+/*
+ * Bring-up, read only (off unless read_ukregs=1, SGX530 only): the registers the
+ * SGX530 microkernel itself reads that the core's GPL header doesn't name. The
+ * host only reads them, never writes.
+ */
+static bool pvrsgx_read_ukregs;
+module_param_named(read_ukregs, pvrsgx_read_ukregs, bool, 0444);
+MODULE_PARM_DESC(read_ukregs, "Bring-up: dump the SGX530 registers its microkernel reads (read only; default off)");
+
+/* Bring-up, read only (with read_ukregs, SGX530): more registers for the dump */
+static unsigned int pvrsgx_probe_read[32];
+static int pvrsgx_probe_read_n;
+module_param_array_named(probe_read, pvrsgx_probe_read, uint, &pvrsgx_probe_read_n, 0444);
+MODULE_PARM_DESC(probe_read, "Bring-up (SGX530, with read_ukregs): register offsets to add to the hang dump, read only (default none)");
+
+static void dump_ukregs(struct seq_buf *sb, struct pvrsgx_device *sdev)
+{
+	static const u16 regs[] = {
+		0x138, 0x218, 0x274, 0x408, 0x624, 0x628, 0x630, 0x700,
+		0x710, 0x724, 0x72c, 0x734, 0x804, 0xa74,
+		/* the EDM-task progress pair the vendor's host XORs (sgx530-vendor-setup.md §7) */
+		0xb10, 0xb1c,
+	};
+
+	if (!pvrsgx_read_ukregs || sdev->family->core != 530)
+		return;
+	for (int i = 0; i < ARRAY_SIZE(regs); i++)
+		seq_buf_printf(sb, "UK_READ              0x%04x 0x%08x\n", regs[i],
+			       sgx_rd(sdev, regs[i]));
+	for (int i = 0; i < pvrsgx_probe_read_n; i++)
+		if (pvrsgx_probe_read[i] < 0x4000 && !(pvrsgx_probe_read[i] & 3))
+			seq_buf_printf(sb, "PROBE_READ           0x%04x 0x%08x\n", pvrsgx_probe_read[i],
+				       sgx_rd(sdev, pvrsgx_probe_read[i]));
+}
+
 /* Registers safe to read while the clocks are on. */
 static void dump_regs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 {
@@ -37,6 +73,7 @@ static void dump_regs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 		{ "CLKGATECTL", SGX_CR_CLKGATECTL },
 		{ "CLKGATECTL2", cr->clkgatectl2 },
 		{ "CLKGATESTATUS", cr->clkgatestatus },
+		{ "CLKGATECTLOVR", cr->clkgatectlovr },
 		{ "CORE_ID", cr->core_id },
 		{ "CORE_REVISION", cr->core_revision },
 		{ "SOFT_RESET", SGX_CR_SOFT_RESET },
@@ -52,6 +89,14 @@ static void dump_regs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 		{ "BIF_DIR_LIST_BASE1", lists > 1 ? SGX_CR_BIF_DIR_LIST_BASE1 : 0 },
 		{ "BIF_DIR_LIST_BASE2", lists > 2 ? SGX_CR_BIF_DIR_LIST_BASE1 + 4 : 0 },
 		{ NULL, edm ? sgx_cr_bif_dir_list_base(edm) : 0 },
+		{ "BIF_TA_REQ_BASE", SGX_CR_BIF_TA_REQ_BASE },
+		{ "BIF_3D_REQ_BASE", SGX_CR_BIF_3D_REQ_BASE },
+		{ "BIF_ZLS_REQ_BASE", SGX_CR_BIF_ZLS_REQ_BASE },
+		{ "BIF_MEM_REQ_STAT", SGX_CR_BIF_MEM_REQ_STAT },
+		{ "PDS_EXEC_BASE", cr->pds_exec_base },
+		{ "PDS_PC_BASE", cr->pds_pc_base },
+		{ "EVENT_KICKER", SGX_CR_EVENT_KICKER },
+		{ "EVENT_TIMER", SGX_CR_EVENT_TIMER },
 		{ "EDM_TASK_REG0", cr->edm_task_reg0 },
 		{ "EDM_TASK_REG1", cr->edm_task_reg1 },
 	};
@@ -69,6 +114,7 @@ static void dump_regs(struct seq_buf *sb, struct pvrsgx_device *sdev)
 		seq_buf_printf(sb, "%-20s 0x%04x 0x%08x\n", name, regs[i].reg,
 			       sgx_rd(sdev, regs[i].reg));
 	}
+	dump_ukregs(sb, sdev);
 }
 
 void pvrsgx_dump_status(struct seq_buf *sb, struct pvrsgx_device *sdev, bool regs)

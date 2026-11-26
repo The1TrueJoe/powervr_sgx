@@ -148,6 +148,61 @@ for n in range(1, 33):
     PROGS[f"state_emit_{n}"] = state_emit(n)
 
 
+# SGX530 forms (a probe, picked by SGXGEN_EMIT530). The SGX535's public driver
+# (poulsback, MIT) ends a TA state task with one "emit.t1 r0, #n, #0 [end f3_20]"
+# (n = the words in o0..) and a vertex task with "emit.t1 r0, #0, #0 [end f12
+# f3_20]", each in one phase; the SGX545's are the emit.t3 forms above. Leads
+# for the SGX530 until the board confirms them.
+def to530(lines):
+    """One phase: the phase that pointed at the epilogue ends the task with the
+    SGX535's vertex emit; the epilogue is dropped."""
+    if lines[-len(VS_EPILOGUE):] != VS_EPILOGUE:
+        return None
+    body = lines[:-len(VS_EPILOGUE)]
+    last = body[-1].rstrip(":") if body[-1].endswith(":") else None
+    out = []
+    for ln in body:
+        if last and ln.startswith("phas.i @" + last + ","):
+            ln = "phas.i #0," + ln.split(",", 1)[1]
+        if ln == "emit.t3 r0, #0, #0 [end f12 f10]":
+            ln = "emit.t1 r0, #0, #0 [end f12 f3_20]"
+        if ln != last + ":":
+            out.append(ln)
+    return out
+
+
+# SGXGEN_EMIT530 twins have no phas.i, as the SGX535's tasks don't: on the 530 a
+# phas.i #0 looks to start a next phase at the code window's base. Built when
+# MKUSSE_530_PHAS is unset; set it to keep the phas.i line.
+def NOPHAS(lines):
+    if os.environ.get("MKUSSE_530_PHAS"):
+        return lines
+    out = [ln for ln in lines if not ln.startswith("phas.i")]
+    last = max(i for i, ln in enumerate(out) if not ln.endswith(":"))
+    for i, ln in enumerate(out):     # one phase: only the last instruction ends it
+        if i != last and "[" in ln:
+            head, flags = ln.split("[", 1)
+            f = [x for x in flags.rstrip("]").split() if x != "end"]
+            out[i] = head.rstrip() + (f" [{' '.join(f)}]" if f else "")
+    return out
+
+
+EMIT530 = []
+EMIT530S = []
+for name in list(PROGS):
+    if name.startswith("state_emit_"):
+        n = int(name.rsplit("_", 1)[1])
+        # MKUSSE_530_EMIT535: the SGX535's one emit; by default the SGX545's three-emit
+        # ending, which delivers o0 to the SGX530's MTE (the one-emit form delivers 0)
+        PROGS[name + "_530"] = NOPHAS(PROGS[name])
+        PROGS[name + "_530s"] = NOPHAS(PROGS[name][:-3] + [f"emit.t1 r0, #{n}, #0 [end f3_20]"])
+        EMIT530.append(name)
+        EMIT530S.append(name)
+    elif to530(PROGS[name]):
+        PROGS[name + "_530"] = NOPHAS(to530(PROGS[name]))
+        EMIT530.append(name)
+
+
 def assemble(lines):
     labels, insts = {}, []
     for ln in lines:
@@ -200,6 +255,17 @@ def main():
         names.append(c)
     out.append("static const struct usse_prog *const usse_state_emit[33] = { 0,")
     out.append("\t" + ", ".join(f"&usse_state_emit_{n}" for n in range(1, 33)))
+    out.append("};")
+    out.append("")
+    out.append("/* the SGX530 twin of each program that has one (SGXGEN_EMIT530) */")
+    out.append("static const struct usse_prog *const usse_emit530[][2] = {")
+    for name in EMIT530:
+        out.append(f"\t{{ &usse_{name}, &usse_{name}_530 }},")
+    out.append("};")
+    out.append("/* the state-emit programs ending in one emit (SGXGEN_EMIT530=state1) */")
+    out.append("static const struct usse_prog *const usse_emit530s[][2] = {")
+    for name in EMIT530S:
+        out.append(f"\t{{ &usse_{name}, &usse_{name}_530s }},")
     out.append("};")
     out += ["", "#endif", ""]
     sys.stdout.write("\n".join(out))

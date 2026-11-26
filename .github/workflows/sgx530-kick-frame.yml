@@ -1,0 +1,139 @@
+# Generate the kick-test reference frame offline: build tools/gen/frame-fake
+# (native host build, no GPU, touches no hardware) and render a 64x64 frame,
+# capturing the pvrtrace and the post-render structure dump. The artifact feeds
+# the CMDTA/RT/PB command-block annotation that is done on the ukernel side.
+# Exploration only: this builds host tools, not the driver, and no golden image.
+name: sgx530-kick-frame
+
+permissions:
+  contents: read
+
+# workflow_dispatch needs the file on the default branch to appear in the UI;
+# the push trigger on wip/** is what actually runs it on this feature branch.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['wip/**']
+    paths:
+      - tools/gen/**
+      - tools/ukernel/**
+      - drm/tests/powervr_sgx_frame.c
+      - .github/workflows/sgx530-kick-frame.yml
+
+concurrency:
+  group: sgx530-kick-frame-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frame:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: sgx-asm, from sgx.xml (tools/gen/mkusse.py assembles with it)
+        run: |
+          set -eux
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3-mako
+          sh ukernel/sgx-asm.sh "$RUNNER_TEMP/sgx-asm"
+          echo "SGX_ASM=$RUNNER_TEMP/sgx-asm/sgx-asm" >> "$GITHUB_ENV"
+
+      - name: Build frame-fake (native, no GPU)
+        run: |
+          set -eux
+          R=$PWD
+          G=$R/tools/gen
+          . "$R/libpvr/abi/flags.sh"
+          CC="cc -O2 -Wno-unused-function $DEFS $INC -I$R/libpvr"
+          python3 "$G/mkusse.py" > "$G/usse_progs.h"
+          $CC -c -Dioctl=fake_ioctl -Dmmap=fake_mmap -o "$G/pvr-fake.o" "$R/libpvr/pvr.c"
+          $CC -o "$G/frame-fake" "$G/frame.c" "$G/sgxgen.c" "$G/fakepvr.c" "$G/pvr-fake.o" -lm
+
+      - name: Render 64x64, capture trace and post-render dump
+        run: |
+          set -eux
+          G=$PWD/tools/gen
+          O=$RUNNER_TEMP/kick
+          mkdir -p "$O"
+          SGXGEN_DUMP_AFTER=1 "$G/frame-fake" -n /dev/null -s 64x64 \
+            -t "$O/frame64.trace" 2> "$O/dump64.txt"
+          echo "--- dump64.txt ---"; cat "$O/dump64.txt"
+          ls -l "$O"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sgx530-kick-frame64
+          path: ${{ runner.temp }}/kick/
+          if-no-files-found: error
+          retention-days: 14
+
+  # The DRM frame client (drm/tests/powervr_sgx_frame.c on sgxgen -DSGXGEN_DRM)
+  # cross-built static for the board's armhf/musl, to run on the 530 against the
+  # driver with edm_init=1. Same build as powervr-sgx.yml's x86 frame, Bootlin
+  # musl toolchain instead of host musl-gcc. NOTE: still 545-shaped sgxgen — the
+  # frame must be made 530-correct (PDS interleave, state, heaps) before any
+  # board run; this job validates the cross-build and records the md5.
+  frame-armhf:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TOOLCHAIN: armv7-eabihf--musl--stable-2026.08-1
+      TOOLCHAIN_SHA256: 9147bafae4aa272321a3c6440d04d83b7e23411b2d344f875541d84c4444ba9b
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLCHAIN }}.tar.xz
+          key: toolchain-${{ env.TOOLCHAIN }}
+
+      - name: The board's musl toolchain (Bootlin)
+        run: |
+          set -eux
+          [ -f $TOOLCHAIN.tar.xz ] ||
+            curl -sfLO https://toolchains.bootlin.com/downloads/releases/toolchains/armv7-eabihf/tarballs/$TOOLCHAIN.tar.xz
+          echo "$TOOLCHAIN_SHA256  $TOOLCHAIN.tar.xz" | sha256sum -c -
+          mkdir -p $RUNNER_TEMP/tc && tar xf $TOOLCHAIN.tar.xz -C $RUNNER_TEMP/tc
+          gcc=$(ls $RUNNER_TEMP/tc/$TOOLCHAIN/bin/*-linux-*-gcc | head -1)
+          echo "CROSS=${gcc%gcc}" >> $GITHUB_ENV
+          "$gcc" --version | head -1
+
+      - name: DRM uapi headers (arch-neutral, from linux-libc-dev)
+        run: |
+          set -eux
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends linux-libc-dev
+          mkdir -p hdr/include
+          cp -r /usr/include/drm hdr/include/
+
+      - name: sgx-asm, from sgx.xml (tools/gen/mkusse.py assembles with it)
+        run: |
+          set -eux
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3-mako
+          sh ukernel/sgx-asm.sh "$RUNNER_TEMP/sgx-asm"
+          echo "SGX_ASM=$RUNNER_TEMP/sgx-asm/sgx-asm" >> "$GITHUB_ENV"
+
+      - name: Build the DRM frame client, static armhf
+        run: |
+          set -eux
+          python3 tools/gen/mkusse.py > tools/gen/usse_progs.h
+          ${CROSS}gcc -static -O2 -fno-strict-aliasing -Wall -Wno-unused-function -DSGXGEN_DRM \
+            -I hdr/include -I hdr/include/drm -I drm/powervr_sgx/include/uapi/drm -I tools/gen \
+            -o $RUNNER_TEMP/powervr_sgx_frame-armhf \
+            drm/tests/powervr_sgx_frame.c tools/gen/sgxgen.c -lm
+          ${CROSS}readelf -h $RUNNER_TEMP/powervr_sgx_frame-armhf | grep -E 'Machine|Class|Type'
+          file $RUNNER_TEMP/powervr_sgx_frame-armhf
+          md5sum $RUNNER_TEMP/powervr_sgx_frame-armhf | tee $RUNNER_TEMP/powervr_sgx_frame-armhf.md5
+          echo "NOTE: 545-shaped sgxgen; make the frame 530-correct before any board run."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: powervr_sgx_frame-armhf
+          path: |
+            ${{ runner.temp }}/powervr_sgx_frame-armhf
+            ${{ runner.temp }}/powervr_sgx_frame-armhf.md5
+          if-no-files-found: error
+          retention-days: 14

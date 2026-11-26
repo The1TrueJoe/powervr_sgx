@@ -163,6 +163,7 @@ static s64 refuse(enum pvrsgx_usse_refusal *why, enum pvrsgx_usse_refusal r, u32
  * @place: The object's start, in instructions from the start of the code base
  *	window it is mapped in, or %PVRSGX_USSE_PLACE_NONE. An absolute target
  *	(phas.i) needs it, and an object with one must lie in one window.
+ * @window_insts: The core's code base window, in instructions.
  * @abs: Set when an instruction has an absolute target.
  * @why: If not NULL, why the instruction returned was refused.
  *
@@ -171,7 +172,7 @@ static s64 refuse(enum pvrsgx_usse_refusal *why, enum pvrsgx_usse_refusal r, u32
  * Return: the index in @w of the first refused instruction, or -1.
  */
 s64 pvrsgx_usse_scan(enum pvrsgx_isa isa, const u64 *w, u32 n, u32 first, u32 obj_insts,
-		     s64 place, bool *abs, enum pvrsgx_usse_refusal *why)
+		     s64 place, u32 window_insts, bool *abs, enum pvrsgx_usse_refusal *why)
 {
 	const struct pvrsgx_usse_form *forms = isas[isa].forms;
 
@@ -210,7 +211,7 @@ s64 pvrsgx_usse_scan(enum pvrsgx_isa isa, const u64 *w, u32 n, u32 first, u32 ob
 				break;
 			if (place == PVRSGX_USSE_PLACE_NONE || target < place ||
 			    target >= place + obj_insts ||
-			    place + obj_insts > (s64)PVRSGX_USSE_WINDOW_INSTS)
+			    place + obj_insts > (s64)window_insts)
 				return refuse(why, PVRSGX_USSE_REFUSAL_PHAS, i);
 			*abs = true;
 			break;

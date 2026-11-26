@@ -66,7 +66,7 @@ static void client_heaps(const struct pvrsgx_device *sdev,
 			.size = from[i].r->end - from[i].r->base,
 			.page_size_log2 = SGX_MMU_PAGE_SHIFT,
 			.usse_base_index = from[i].usse_base_index,
-			.usse_window_log2 = usse ? PVRSGX_USSE_WINDOW_LOG2 : 0,
+			.usse_window_log2 = usse ? h->usse_window_log2 : 0,
 		};
 	}
 }
@@ -321,6 +321,60 @@ static void vm_put_work(struct work_struct *work)
 	drm_gpuvm_put(&container_of(work, struct pvrsgx_vm, put_work)->gpuvm);
 }
 
+/*
+ * Bring-up probe (SGX530, test only, default off): map a page at device address 0
+ * in every client VM, every word set to probe_va0, so an access there doesn't fault.
+ * The words the GPU changed are logged when the VM goes (what it wrote, and where).
+ */
+static unsigned int pvrsgx_probe_va0;
+module_param_named(probe_va0, pvrsgx_probe_va0, uint, 0444);
+MODULE_PARM_DESC(probe_va0, "Bring-up (SGX530): map a page at device address 0 in client VMs, filled with this pattern (default 0: off)");
+
+static void probe_va0_map(struct pvrsgx_vm *vm, struct pvrsgx_device *sdev)
+{
+	struct pvrsgx_kmem *km;
+	u32 *p;
+
+	if (!pvrsgx_probe_va0 || sdev->family->core != 530)
+		return;
+	km = kzalloc(sizeof(*km), GFP_KERNEL);
+	if (!km)
+		return;
+	km->mmu = vm->mmu;
+	if (pvrsgx_kmem_alloc(sdev, km, 0, PAGE_SIZE, 0, 0)) {
+		drm_warn(&sdev->base, "probe_va0: no page\n");
+		kfree(km);
+		return;
+	}
+	p = km->cpu;
+	for (int i = 0; i < PAGE_SIZE / 4; i++)
+		p[i] = pvrsgx_probe_va0;
+	wmb();
+	vm->probe_va0 = km;
+}
+
+static void probe_va0_unmap(struct pvrsgx_vm *vm)
+{
+	struct pvrsgx_kmem *km = vm->probe_va0;
+	const u32 *p;
+	int changed = 0;
+
+	if (!km)
+		return;
+	rmb();
+	p = km->cpu;
+	for (int i = 0; i < PAGE_SIZE / 4; i++) {
+		if (p[i] == pvrsgx_probe_va0)
+			continue;
+		if (changed++ < 64)
+			drm_info(&vm->sdev->base, "probe_va0: +0x%03x = 0x%08x\n", i * 4, p[i]);
+	}
+	drm_info(&vm->sdev->base, "probe_va0: %d words changed\n", changed);
+	pvrsgx_kmem_free(vm->sdev, km);
+	kfree(km);
+	vm->probe_va0 = NULL;
+}
+
 static void vm_release(struct kref *ref)
 {
 	struct pvrsgx_vm *vm = container_of(ref, struct pvrsgx_vm, ref);
@@ -329,6 +383,7 @@ static void vm_release(struct kref *ref)
 	/* No job holds this VM any more, so nothing on the GPU uses it. */
 	vm_unmap_all(vm, &freed);
 	vas_free(&freed);
+	probe_va0_unmap(vm);
 	if (vm->pb)
 		pvrsgx_pb_unmap(vm);
 	drm_mm_takedown(&vm->params);
@@ -431,6 +486,7 @@ struct pvrsgx_vm *pvrsgx_vm_create(struct pvrsgx_device *sdev)
 		       0, BIT_ULL(sdev->family->va_bits), 0, 0, &pvrsgx_gpuvm_ops);
 	drm_gem_object_put(r_obj);
 	vm->sdev = sdev;
+	probe_va0_map(vm, sdev);
 	drm_mm_init(&vm->params, pvrsgx_heaps(sdev)->params_3d.base,
 		    pvrsgx_heaps(sdev)->params_3d.end - pvrsgx_heaps(sdev)->params_3d.base);
 	mutex_init(&vm->lock);

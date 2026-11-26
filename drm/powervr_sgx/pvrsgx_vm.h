@@ -50,6 +50,8 @@ struct pvrsgx_vm {
 	int pd_slot;
 	/** @put_work: Its last put, from a work item (vm_release()). */
 	struct work_struct put_work;
+	/** @probe_va0: Bring-up probe (SGX530, probe_va0): a page at device address 0. */
+	struct pvrsgx_kmem *probe_va0;
 };
 
 struct pvrsgx_vm *pvrsgx_vm_create(struct pvrsgx_device *sdev);
