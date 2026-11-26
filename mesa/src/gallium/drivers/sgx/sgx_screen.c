@@ -304,9 +304,13 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
     * render targets (SGX_DEBUG=glsl130) */
    caps->dest_surface_srgb_control = !!(sgx_drv_debug & SGX_DEBUG_GLSL130);
    /* 1.30 with SGX_DEBUG=glsl130 (native integers, EXT_texture_integer),
-    * for the GL 3.0 work's tests on a board */
+    * for the GL 3.0 work's tests on a board; 1.40 with its uniform blocks
+    * and buffer textures as well (SGX_DEBUG=glsl130,ubo,tbo).  Mesa takes
+    * either only with the GL version it belongs to (GL 3.0, 3.1) */
    caps->glsl_feature_level = caps->glsl_feature_level_compatibility =
-      sgx_drv_debug & SGX_DEBUG_GLSL130 ? 130 : 120;
+      sgx_ubos() && sgx_tbo()                ? 140
+      : sgx_drv_debug & SGX_DEBUG_GLSL130 ? 130
+                                          : 120;
    caps->essl_feature_level = 100;
    caps->max_viewports = 1;
    caps->vendor_id = screen->info->pci_vendor;
