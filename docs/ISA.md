@@ -1494,6 +1494,13 @@ into the low half, zero-extended (#0 -> 0x0302, #3 -> 0x0908); `ld.a.b #i`
 reads the byte at base + (i + 1), zero-extended (#0 -> 0x01, #5 -> 0x06).
 `ld.a.d #0`/`#2` read words 1 and 3 again. Untested: register offsets, modes
 l/t, and offsets past #127.
+A base computed in a temporary reaches any buffer of the client's VM
+(**hardware**, `mesa/tests/sgx_tbo.c`, a CE5300 board, SGX545 rev 1014,
+2026-11-26): fragment and vertex programs read buffer textures' texels from
+the buffers' vertex-heap copies with `ld.a.d rN, r<address - 4>, #0`-`#3`
+and a `wdf`, the address a driver constant plus the texel's byte offset.
+Every word read back as written, for 34 formats, at offsets of 16 bytes, and
+after a rewrite between two draws of one frame.
 
 ### hw 1d: eld, h22 = 1
 
@@ -2327,6 +2334,15 @@ backed above; this section only collects it.
   index, signed 18 bits, in instructions; `ba` is absolute: the instruction
   index from the task's USE code base (the program's load offset / 8 plus
   the label). Conditions are a `test` writing p0-p3, then a predicated `br`.
+- **A divergent branch** (hardware, 2026-11-26, a CE5300 board, rev 1014,
+  piglit `arb_texture_buffer_range-ranges`): an `if` kept as `(p0) br`
+  around an `ld.a.d` and the code using its result gave the then-side's
+  value to pixels whose condition was false, wherever they shared a block
+  of pixels (about 4 rows high) with pixels whose condition was true.
+  Whether a `br` whose instances disagree falls through for all of them,
+  or the `ld` ignores the instance mask, is **unconfirmed**. Our compiler
+  flattens every `if` it can (`nir_opt_peephole_select`); a load is only
+  flattened when it is marked speculatable.
 - **Calls**: `br [link]` to the function's label; the function returns with
   `lapc`; arguments and results in ordinary registers.
 - **Loops**: do-while with a float counter (`fmad r, r, c52, c52` = +1) and
