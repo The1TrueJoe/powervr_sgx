@@ -291,6 +291,10 @@ sgx_init_screen_caps(struct pipe_screen *pscreen)
     * (sgx_state.c).  Without the cap Mesa still exposes ARB_occlusion_query
     * and answers every query 0 itself, and an engine culls what it sees */
    caps->occlusion_query = !(sgx_drv_debug & SGX_DEBUG_NO_OCCLUSION);
+   /* NV_conditional_render and ARB_conditional_render_inverted on them,
+    * checked on the CPU (sgx_state.c sgx_render_condition) */
+   caps->conditional_render = caps->conditional_render_inverted =
+      caps->occlusion_query;
    /* a pass a colour buffer (sgx_draw_vbo); SGX_DEBUG=nomrt for one */
    caps->max_render_targets = sgx_drv_debug & SGX_DEBUG_NO_MRT ? 1 : 4;
    /* each target's pass has its own colour epilogue (sgx_blend_rt): its own

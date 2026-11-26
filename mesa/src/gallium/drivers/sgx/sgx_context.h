@@ -279,6 +279,11 @@ struct sgx_context {
    bool queries_off, query_pending;
    struct sgxws_bo query_bo;
    uint32_t query_next, *query_seq, query_last;
+   /* the render condition (sgx_state.c): its query (NULL when none), the
+    * result that skips (inverted) and its mode */
+   struct sgx_query *cond_query;
+   bool cond_cond;
+   enum pipe_render_cond_flag cond_mode;
    uint64_t rt_used[SGX_MAX_RTS], rt_clock;       /* when each was last taken */
    unsigned num_rts;
    struct sgx_resource *recording; /* the target of the frame being recorded */
@@ -410,6 +415,8 @@ void sgx_state_init(struct sgx_context *ctx);
  * stores to the slot: the frame noted and the slot listed) */
 uint32_t sgx_query_va(const struct sgx_context *ctx);
 void sgx_query_drawn(struct sgx_context *ctx, bool stored);
+/* false when the render condition says a draw, clear or blit is skipped */
+bool sgx_render_condition_passes(struct sgx_context *ctx);
 void sgx_draw_init(struct sgx_context *ctx);
 void sgx_draw_fini(struct sgx_context *ctx);
 void sgx_program_init(struct sgx_context *ctx);

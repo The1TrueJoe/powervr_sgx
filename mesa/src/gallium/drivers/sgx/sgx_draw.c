@@ -308,6 +308,8 @@ sgx_clear(struct pipe_context *pctx, unsigned buffers,
    unsigned zs = buffers & PIPE_CLEAR_DEPTHSTENCIL;
    bool done = false;
 
+   if (!sgx_render_condition_passes(ctx))
+      return;
    for (unsigned t = 0; t < targets; t++) {
       bool colour = buffers & (PIPE_CLEAR_COLOR0 << t);
 
@@ -2608,7 +2610,7 @@ sgx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
               ? util_format_short_name(ctx->framebuffer.cbufs[0].format)
               : "-",
            ctx->framebuffer.width, ctx->framebuffer.height);
-   if (!info->instance_count)
+   if (!info->instance_count || !sgx_render_condition_passes(ctx))
       return;
    /* Primitive restart, split on the CPU: no restart index is known in the
     * VDM draw words (docs/GL3.md), and the indices are read here anyway.

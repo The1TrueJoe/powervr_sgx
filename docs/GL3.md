@@ -176,7 +176,7 @@ Formats wider than 32 bits, and more than one draw buffer, need either:
 | `ARB_depth_buffer_float` (D32F, D32F_S8) | the ISP and ZLS keep float32 depth; it samples as F32 (0x12) | done (glsl130): Z32_FLOAT and Z32_FLOAT_S8X24_UINT as depth/stencil formats; depth and stencil tests as D24S8 | `mesa/tests/sgx_es3fmt.c` | done (glsl130) |
 | texture arrays (`EXT_texture_array`, 256 layers listed) | no layer field known in T0-T3 | one texture per layer at a layer stride; the shader adds `layer × stride` to the base address and samples with the dependent form, whose texture state comes from registers (ISA.md, "dependent: smp template"; hardware, open stack hwt_smp). Needs a compiler path (gl3-compiler). 1D arrays as 2D arrays of height 1 | TEX.md §5 (T2 = base); ISA.md (dependent smp with state in SA: hardware, A/B) | medium |
 | transform feedback (`EXT_transform_feedback`; ICD 4 × 4 separate, 64 interleaved) | no stream-out unit known | the vertex program stores its outputs with `st` at `vertex index × stride`; the driver unrolls strips, fans and indices on the CPU (it gathers them already) so the index is the output slot; counts and `PRIMITIVES_WRITTEN` are known on the CPU. Needs `st` to a driver address from a vertex program (**H4**). Fallback: gallium's `draw` module runs the vertex shader on the CPU and writes the buffers | ISA.md `ld`/`st` (corpus `st.l.d`); the ICD's small limits fit a store-based path | medium |
-| `NV_conditional_render` | — | `render_condition` waits on the query on the CPU and skips draws (the spec's NO_WAIT modes may draw) | needs occlusion queries | depends on queries |
+| `NV_conditional_render`, `ARB_conditional_render_inverted` | no predicate known in the VDM or ISP | done: `render_condition` reads the query's result on the CPU before each draw, clear and blit that honours it. The wait modes flush the query's frame and wait; the no-wait modes draw while the result isn't in, as the spec allows | piglit `nv_conditional_render` (13), `mesa/tests/sgx_condrender.c` (64 cases), a CE5300 board | done |
 | occlusion queries (GL 1.5, `SAMPLES_PASSED`) | **listed** (ICD, DDK GL: `ARB_occlusion_query`); no capture, no register known | **H5**. `ANY_SAMPLES_PASSED`: a store of 1 from every pixel shaded, in a translucent pass, which shades in order ("Status"; `SGX_DEBUG=noocclusion` turns them off). A count needs atomics or a counter in the hardware: `SAMPLES_PASSED` gets the framebuffer's samples when any passed | hardware, open driver (the boolean) | high (the boolean); low (the count) |
 | `ARB_shader_texture_lod` | `smp .lod` and `.grad` forms exist | done: `fragment_shader_texture_lod`; a 2D textureGrad is smp's gradient form, the others an explicit LOD (`sgx_txd_lowered`) | `mesa/tests/sgx_es3fmt.c` 1a/1b | done |
 | `ARB_map_buffer_range`, `ARB_framebuffer_object` | — | gallium generic; FBO needs mixed attachment sizes, which the render target handles by its own size | — | high |
@@ -769,7 +769,14 @@ section 14; a CE5300 board, 2026-11-20):
   `GL_QUERY_COUNTER_BITS` is 0, and the test then doesn't check the counts.
   Every check that wants 0 gets 0 (2026-11-24).
   `occlusion_query_conform@GetObjivAval_multi2` fails with the cap and
-  without. `nv_conditional_render` stays off.
+  without.
+- Conditional render (`NV_conditional_render`,
+  `ARB_conditional_render_inverted`) on either query: the driver reads the
+  result on the CPU (`sgx_render_condition_passes`), as llvmpipe does, so it
+  doesn't depend on how the count is made. piglit's 13 `nv_conditional_render`
+  tests go from skip to pass; `mesa/tests/sgx_condrender.c` passes 64 of 64
+  (both targets, all 8 modes, visible and hidden, a quad and a glClear)
+  (log 2026-11-26 "Conditional render").
 
 **Buffer textures** (`SGX_DEBUG=tbo`, with `glsl130`; a CE5300 board,
 SGX545 rev 1014, 2026-11-26, `docs/log/entries/2026-11-26-0500-buffer-textures.md`):
