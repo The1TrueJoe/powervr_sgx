@@ -337,7 +337,7 @@ static void probe_va0_map(struct pvrsgx_vm *vm, struct pvrsgx_device *sdev)
 
 	if (!pvrsgx_probe_va0 || sdev->family->core != 530)
 		return;
-	km = kzalloc(sizeof(*km), GFP_KERNEL);
+	km = kzalloc_obj(*km);
 	if (!km)
 		return;
 	km->mmu = vm->mmu;
@@ -349,6 +349,7 @@ static void probe_va0_map(struct pvrsgx_vm *vm, struct pvrsgx_device *sdev)
 	p = km->cpu;
 	for (int i = 0; i < PAGE_SIZE / 4; i++)
 		p[i] = pvrsgx_probe_va0;
+	/* The pattern is in memory before a job can read the page. */
 	wmb();
 	vm->probe_va0 = km;
 }
@@ -361,6 +362,7 @@ static void probe_va0_unmap(struct pvrsgx_vm *vm)
 
 	if (!km)
 		return;
+	/* The GPU's writes are read after the VM's last job. */
 	rmb();
 	p = km->cpu;
 	for (int i = 0; i < PAGE_SIZE / 4; i++) {

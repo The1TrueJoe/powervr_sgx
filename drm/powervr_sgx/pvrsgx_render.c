@@ -875,7 +875,8 @@ int pvrsgx_render_job_build(struct pvrsgx_job *job, u32 k, u32 data[6])
 				 (in->stencil_addr ? (u32)in->stencil_addr - zls_base : 0);
 		rd->stencil[1] = rd->stencil[0];
 		rd->bg_depth = in->bg_depth_f32;
-		rd->pixel_event_pds = pvrsgx_pds_event_addr(job->ctx->sdev, in->pixel_event_pds_addr);
+		rd->pixel_event_pds = pvrsgx_pds_event_addr(job->ctx->sdev,
+							    in->pixel_event_pds_addr);
 		rd->pixel_event_rows = in->pixel_event_pds_rows;
 		rd->rt_data_entry = entry;
 		kobj_cpu(s->rd_w4[p])[0] = pds_word(pds, in->bg_pds_primary_addr,

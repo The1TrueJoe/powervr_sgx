@@ -621,7 +621,8 @@ static int init_script_part2(struct pvrsgx_device *sdev)
 	for (int i = 0; fam->core == 530 && i + 1 < probe_init_n; i += 2) {
 		if (probe_init[i] >= 0x4000 || probe_init[i] & 3)
 			continue;
-		drm_warn(&sdev->base, "probe: init 0x%04x = 0x%08x\n", probe_init[i], probe_init[i + 1]);
+		drm_warn(&sdev->base, "probe: init 0x%04x = 0x%08x\n",
+			 probe_init[i], probe_init[i + 1]);
 		sgx_wr(sdev, probe_init[i], probe_init[i + 1]);
 	}
 	/*

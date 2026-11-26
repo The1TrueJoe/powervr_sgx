@@ -75,7 +75,8 @@ static void usse_test_phas_place(struct kunit *test)
 	bool abs = false;
 
 	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 512,
-					       PVRSGX_USSE_PLACE_NONE, PVRSGX_USSE_WINDOW_INSTS, &abs, &why), 0);
+					       PVRSGX_USSE_PLACE_NONE, PVRSGX_USSE_WINDOW_INSTS,
+					       &abs, &why), 0);
 	KUNIT_EXPECT_EQ(test, why, PVRSGX_USSE_REFUSAL_PHAS);
 	KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &w, 1, 0, 512, 0x100,
 					       PVRSGX_USSE_WINDOW_INSTS, &abs, &why), -1);
@@ -118,7 +119,8 @@ static void usse_test_reasons(struct kunit *test)
 		bool abs = false;
 
 		KUNIT_EXPECT_EQ(test, pvrsgx_usse_scan(PVRSGX_ISA_SGX545, &cases[i].w, 1, 2, 512,
-						       0x100, PVRSGX_USSE_WINDOW_INSTS, &abs, &why), 0);
+						       0x100, PVRSGX_USSE_WINDOW_INSTS,
+						       &abs, &why), 0);
 		KUNIT_EXPECT_EQ(test, why, cases[i].why);
 	}
 }
