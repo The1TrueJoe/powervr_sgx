@@ -217,7 +217,7 @@ rotation of each triangle's vertices on the CPU before step 2.
 
 | feature | hardware | the driver's path | evidence | confidence |
 |---|---|---|---|---|
-| GLSL 1.40 | — | compiler | — | compiler |
+| GLSL 1.40 | — | done (`SGX_DEBUG=glsl130,ubo,tbo`): the driver reports 1.40 with uniform blocks and buffer textures on; the compiler needed nothing more. See "Status" | piglit `glsl-1.40` ("Status") | done (ubo, tbo) |
 | instancing, `gl_InstanceID` (`ARB_draw_instanced`) | the PDS vertex program's `in1` is the instance index (**unconfirmed**); no instance count is known in the VDM draw words | one VDM draw per instance, each with its own small PDS vertex program that writes the instance number with DOUTA into the primary attribute the compiler reads `gl_InstanceID` from. Native instancing, if H7 finds the count, replaces it | PDS.md (DOUTA: hardware; `in1`: unconfirmed); STATE.md §2 VDM draw | high (per-instance draws) |
 | instance divisors (`ARB_instanced_arrays`, 3.3, but cheap here) | PDS has the divisor's reciprocal sequence (capture) | per-instance draws: the per-instance stream's base moves on the CPU | PDS.md | high |
 | uniform buffers (`ARB_uniform_buffer_object`, 16 KiB, 12 per stage) | `ld.a.d` from a driver address: the state-emit programs the driver runs already use it | the driver puts the address of each block's copy in the frame in the constant the compiler loads from; the compiler loads with `ld.a.d` (in, `SGX_DEBUG=ubo,glsl130`: see "Status"). Small UBOs could be copied into SA, but 16 KiB doesn't fit | STATE.md §2 (the state-emit program's `ld.a.d`: hardware, open driver); `sgxws_const_mem` already loads constants that don't fit in SA | high |
@@ -799,6 +799,43 @@ SGX545 rev 1014, 2026-11-26, `docs/log/entries/2026-11-26-0500-buffer-textures.m
   speculatable and the `if` becomes a select.
 - dEQP-GLES2 with the default switches: the same as dev (16,636 pass, 70
   expected fails).
+
+**GL 3.0 and 3.1 gates** (`compute_version`, read back with a program that
+prints each gate, on a CE5300 board, SGX545 rev 1014, 2026-11-26):
+
+- With `SGX_DEBUG=glsl130,ubo,vtf,tex3d` Mesa offers GL 2.1. GL 3.0 lacks
+  `ARB_color_buffer_float`, `EXT_texture_array`, `EXT_transform_feedback`
+  and `NV_conditional_render`. GL 3.1 lacks GLSL 1.40, which needs buffer
+  textures.
+- With `tbo` and `cbf` as well, every GL 3.1 gate is met. Three GL 3.0
+  gates are left, all elsewhere: texture arrays (#61), transform feedback
+  (issue #16) and conditional render.
+- `cbf` is `ARB_color_buffer_float`: the driver sets
+  `vertex_color_unclamped`, and st clamps vertex and fragment colors with
+  `fsat` in the shader when GL's clamp state asks. The driver had no clamp
+  before (it ignored the rasterizer's). Mesa turns the extension off in
+  core contexts, so GL 3.1 comes as a compatibility context.
+- Limits GL 3.x asks for that Mesa doesn't check:
+  - 1024 fragment uniform components: 508 (128 vec4);
+  - 64 varying components: 32;
+  - 256 array layers: 32 (with texture arrays);
+  - 8 draw buffers: 4 (Mesa accepts 4).
+
+  Met: 16 fragment and vertex texture units, 32 combined, 12 uniform blocks
+  a stage, 2^27 texels a buffer texture, 2048 for a rectangle texture, 8
+  clip distances.
+
+**GLSL 1.40** (`glsl130,ubo,tbo`): the driver reports 1.40, and the
+compiler needed nothing more. piglit's `glsl-1.40` at GL 3.1 by override:
+90 pass, 13 fail, 17 skip, 1 crash (dev before #58 with the same switches and
+the override: 83 pass, 14 fail). The fails are limits (`built-in constants`:
+draw buffers, fragment uniforms, varyings) and the cube `textureSize` tests,
+whose 32-texel NPOT cube maps the driver doesn't draw (PIGLIT.md, "Open bug:
+NPOT cube maps lock the 3D"); the crash is `tf-no-position` (transform
+feedback). The whole list (GL 3.0 and 3.1, buffer textures, rectangle
+textures, uniform blocks, instancing, `arb_color_buffer_float`): 649 pass, 46
+fail, 81 skip and 2 crash, against 467, 49, 114 and 2 on dev, with no test
+worse. dEQP-GLES2 with the default switches is the same as dev.
 
 Provoking vertex first waits for flat shading, which the driver doesn't do
 yet (DOUTI b25-26, STATE.md §3).
