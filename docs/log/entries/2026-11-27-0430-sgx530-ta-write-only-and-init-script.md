@@ -77,3 +77,37 @@ the DPM for a page:
 
 What's left, the stock microkernel's TA-start sequence, could only be read from its code. That's
 off limits, so the TA is parked here.
+
+## 04:50-05:00 UTC: the SGX535's DPM map, and the EVM init in pointer mode
+
+Sources, all public:
+- Intel's EMGD `psb_regs.h` (MIT), the SGX535's register header;
+- Intel's psb kernel module (GPL), for the event flow.
+
+Tagged **L**, in our words:
+- 0x604/0x60c/0x614/0x61c are free lists, tail in b16-31 and head in b0-15. 0x608/0x610 and
+  0x60c/0x614 are the host dalloc and alloc lists, beside the 3D (0x600/0x604) and TA
+  (0x618/0x61c) ones.
+- 0x630 is `DPM_STATE_CONTEXT_ID` (b0 load/store, b1 dalloc, b2 alloc).
+- 0x680/0x684/0x688/0x690 load the 3D, TA, host and dhost free lists. Their done bits are
+  EVENT_STATUS2 b1, b0, b2 and b3.
+- **0x6a8 is `DPM_TA_EVM`, b0 INIT, done when EVENT_STATUS b22 (`DPM_INITEND`) sets.**
+- 0x724/0x72c are page counts: TA in b16-31, total in b0-15.
+
+On the 530 (C), the fault-free pointer-mode recipe with scratch microkernel switches:
+
+| run | result |
+|---|---|
+| 0x6a8 = 1 just before `TA_KICK`, then wait for b22 | b22 sets (and stays set after the clear, as on 11-15). The TA still hangs, and the DPM hands out no page |
+| the four free-list loads, then that | the host and dhost loads time out (those lists aren't programmed), then a requestor-b2 fault at 0x0f800000 |
+
+The rest of the TA start in those sources matches what our microkernel already does:
+- the PDS_INV1 and CSC invalidate, with its 0x138 wait;
+- 0x804 b28, with its EVENT_STATUS b26 wait;
+- 0xa08;
+- the TA request base.
+
+The TA stays parked.
+
+A third source, an SGX535 driver whose kick sequence is a transcription of a disassembled closed
+driver (its own header says so), wasn't used.
