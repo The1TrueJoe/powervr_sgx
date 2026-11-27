@@ -39,6 +39,7 @@
  *   -k mask    the in1 bits that run the ptoff task (default 8)
  *   -j         the ptoff event runs the end-of-tile program too
  *   -Y         the clear as one job per tile
+ *   -U bits    ORed into the end-of-tile task's DOUTU word 0
  *   -M w0,w1,w2,w3[,ctl]   the end of tile DMAs these into pa0-pa3 (ctl default 0x80000003)
  *
  * Cases, 64x64 BGRA8888:
@@ -193,6 +194,8 @@ static uint32_t pe_words[5] = { 0, 0, 0, 0, 0x80000003 };
 static int pe_dma_on;
 /* -j (bring-up): the ptoff event runs the end-of-tile program too */
 static int ptoff_eot;
+/* -U bits (bring-up): ORed into the end-of-tile task's DOUTU word 0 */
+static uint32_t eot_w0_or;
 static struct buf peblk;
 static struct sgxtex_core core_cfg;
 /* -D (bring-up): list the destination's nonzero words after the check */
@@ -556,6 +559,7 @@ static void set_core(const struct drm_powervr_sgx_heap *use)
 	memcpy(c.pe_tile, pe_tile, sizeof(pe_tile));
 	c.pe_ptoff_mask = ptoff_mask;
 	c.pe_ptoff_eot = ptoff_eot;
+	c.pe_eot_w0_or = eot_w0_or;
 	if (verbose)
 		printf("core id 0x%08x: PDS %s, code window 2^%u, DOUTU offset in %s, tiles %u wide\n",
 		       gi.core_id, c.pds_8word ? "8-word" : "2-dword", c.use_window_log2,
@@ -612,7 +616,7 @@ int main(int argc, char **argv)
 	int opt, e, bad = 0, two = 0, clear_only = 0;
 	uint32_t pad = 0;
 
-	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:R:k:M:jY")) != -1) {
+	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:R:k:M:jYU:")) != -1) {
 		switch (opt) {
 		case 'v': verbose = 1; break;
 		case 'T': src_heap = DRM_POWERVR_SGX_HEAP_TEXTURE; break;
@@ -651,6 +655,7 @@ int main(int argc, char **argv)
 		case 'D': dump_nonzero = 1; break;
 		case 'j': ptoff_eot = 1; break;
 		case 'Y': per_tile_jobs = 1; break;
+		case 'U': eot_w0_or = strtoul(optarg, NULL, 0); break;
 		case 'k': ptoff_mask = strtoul(optarg, NULL, 0); break;
 		case 'M':
 			sscanf(optarg, "%i,%i,%i,%i,%i", (int *)&pe_words[0], (int *)&pe_words[1], (int *)&pe_words[2],

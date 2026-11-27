@@ -252,6 +252,7 @@ struct sgxtex_core {
 	uint32_t pe_ptoff_mask;		/* bring-up: in1 bits that run the ptoff task (0: the default, b3) */
 	uint32_t pe_dma[2];		/* bring-up: end of tile DMAs these (address, control) into pa, not DOUTA */
 	int pe_ptoff_eot;		/* bring-up: the ptoff event runs the end-of-tile program too */
+	uint32_t pe_eot_w0_or;		/* bring-up: bits ORed into the end-of-tile task's DOUTU word 0 */
 };
 void sgxtex_set_core(const struct sgxtex_core *c);
 
