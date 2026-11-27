@@ -419,13 +419,13 @@ void sgxtex_xctx_pixel_event(uint32_t *p, uint32_t eot_use, uint32_t emit_use)
 {
 	const uint32_t eot = sgxtex_doutu(eot_use, 4), emit = sgxtex_doutu(emit_use, 4);
 	/* rows of DS0 DS0 DS1 DS1 */
-	const uint32_t data[4 * SGXTEX_EVENT_ROWS] = {
+	uint32_t data[4 * SGXTEX_EVENT_ROWS] = {
 		eot, 0x00800000, eot, 0,		/* ds0[0..1] ptoff; ds1[0] eot w0, ds1[1] DOUTA's control */
 		emit, 0x00c00000, 8, 2,			/* ds0[2..3] emit; ds1[2..3] the in1 tests */
 		0x003ffff8, 0x00400000, 4, 0x100,	/* ds0[4] the tile field, ds0[5] b22; ds1[4..5] */
 		0, 0, 0x00800000, 0,			/* ds1[6] b23 */
 	};
-	const uint32_t code[SGXTEX_EVENT_WORDS - 4 * SGXTEX_EVENT_ROWS] = {
+	uint32_t code[SGXTEX_EVENT_WORDS - 4 * SGXTEX_EVENT_ROWS] = {
 		/*  0 */ PDS_AND(S1_IN(1), S2_DS1(2), U_DS1(0x30)),
 		/*  1 */ PDS_TST2(S2_DS1(0x30)),
 		/*  2 */ PDS_BRA_P0(5),
@@ -456,6 +456,21 @@ void sgxtex_xctx_pixel_event(uint32_t *p, uint32_t eot_use, uint32_t emit_use)
 		/* 27 */ PDS_HALT,
 	};
 
+	/* The SGX535's end-of-tile word (img-sgx, L): b28, the tile from in0 << 11, in1 b2 at b27 */
+	if (core.pe_tile535) {
+		data[8] = 0x07f7f800;
+		data[9] = 0x08000000;
+		data[14] = 0x10000000;
+		code[14] = PDS_SHL(U_IN(0), 11, U_DS1(0x30));
+		code[17] = PDS_SHL(U_IN(1), 25, U_DS1(0x30));
+	}
+	if (core.pe_tile[0] | core.pe_tile[1] | core.pe_tile[2] | core.pe_tile[3] | core.pe_tile[4]) {
+		data[8] = core.pe_tile[1];
+		data[9] = core.pe_tile[3];
+		data[14] = core.pe_tile[4];
+		code[14] = PDS_SHL(U_IN(0), core.pe_tile[0], U_DS1(0x30));
+		code[17] = PDS_SHL(U_IN(1), core.pe_tile[2], U_DS1(0x30));
+	}
 	memcpy(p, data, sizeof data);
 	memcpy(p + 4 * SGXTEX_EVENT_ROWS, code, sizeof code);
 }

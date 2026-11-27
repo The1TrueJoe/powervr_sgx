@@ -247,6 +247,8 @@ struct sgxtex_core {
 	int doutu_offset_bytes;		/* DRM_POWERVR_SGX_CAP_DOUTU_OFFSET_BYTES */
 	int pds_8word;			/* PDS data in 8-word blocks, not 2-dword rows */
 	uint32_t tile_w_log2;		/* tile width: 32 on the SGX545, 16 on the SGX530 */
+	int pe_tile535;			/* bring-up: the end-of-tile task's tile word in the SGX535's form */
+	uint32_t pe_tile[5];		/* bring-up: in0 shift, mask, in1 shift, mask, constant (all 0: off) */
 };
 void sgxtex_set_core(const struct sgxtex_core *c);
 
