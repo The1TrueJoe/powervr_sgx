@@ -11,7 +11,7 @@ A stall shows as the timer event left pending (`EVENT_STATUS` 0x20000000) and th
 out. New knob: `powervr_sgx_blit -U bits`, ORed into the end-of-tile task's DOUTU word 0
 (off by default).
 
-From [sgx530-state.md](../../porting/cores/sgx530-state.md) (sgx530 branch, 11-14, O): the
+From `docs/porting/cores/sgx530-state.md` on the sgx530 branch (11-14, O): the
 stock 530 sets DOUTU word 0 bit 21 only on launches that DMA first, and its pixel DOUTUs carry
 word 2 = 0x20.
 
