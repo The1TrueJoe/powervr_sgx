@@ -189,6 +189,7 @@ def NOPHAS(lines):
 
 EMIT530 = []
 EMIT530S = []
+EMIT530P = []
 for name in list(PROGS):
     if name.startswith("state_emit_"):
         n = int(name.rsplit("_", 1)[1])
@@ -196,8 +197,12 @@ for name in list(PROGS):
         # ending, which delivers o0 to the SGX530's MTE (the one-emit form delivers 0)
         PROGS[name + "_530"] = NOPHAS(PROGS[name])
         PROGS[name + "_530s"] = NOPHAS(PROGS[name][:-3] + [f"emit.t1 r0, #{n}, #0 [end f3_20]"])
+        # the DMA'd words straight from pa0, with no o-bank write: on the SGX530 an
+        # o-bank write is read as an address (docs/porting/cores/sgx530.md)
+        PROGS[name + "_530p"] = [f"emit.t1 pa0, #{n}, #0 [end f3_20]"]
         EMIT530.append(name)
         EMIT530S.append(name)
+        EMIT530P.append(name)
     elif to530(PROGS[name]):
         PROGS[name + "_530"] = NOPHAS(to530(PROGS[name]))
         EMIT530.append(name)
@@ -266,6 +271,11 @@ def main():
     out.append("static const struct usse_prog *const usse_emit530s[][2] = {")
     for name in EMIT530S:
         out.append(f"\t{{ &usse_{name}, &usse_{name}_530s }},")
+    out.append("};")
+    out.append("/* the state-emit programs that emit from pa0 (SGXGEN_EMIT530=statep) */")
+    out.append("static const struct usse_prog *const usse_emit530p[][2] = {")
+    for name in EMIT530P:
+        out.append(f"\t{{ &usse_{name}, &usse_{name}_530p }},")
     out.append("};")
     out += ["", "#endif", ""]
     sys.stdout.write("\n".join(out))

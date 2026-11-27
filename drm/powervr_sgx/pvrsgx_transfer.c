@@ -3,6 +3,7 @@
 
 #include <drm/drm_file.h>
 
+#include <linux/module.h>
 #include <linux/seq_buf.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -117,6 +118,22 @@ int pvrsgx_transfer_job_init(struct drm_file *file, struct pvrsgx_job *job,
 	return err ?: pvrsgx_check_transfer(&tj->xfer);
 }
 
+/*
+ * Bring-up (SGX530, default off): idx,value pairs that replace words 0-16 of
+ * every transfer command, the ones the microkernel programs into the 3D.
+ */
+static unsigned int probe_xfer[16];
+static int probe_xfer_n;
+module_param_array(probe_xfer, uint, &probe_xfer_n, 0444);
+MODULE_PARM_DESC(probe_xfer, "Bring-up (SGX530): idx,value pairs for transfer command words 0-16 (default none)");
+
+static void probe_xfer_words(struct pvrsgx_device *sdev, struct pvrsgx_fw_transfer_cmd *cmd)
+{
+	for (int i = 0; sdev->family->core == 530 && i + 1 < probe_xfer_n; i += 2)
+		if (probe_xfer[i] < 17)
+			((u32 *)cmd)[probe_xfer[i]] = probe_xfer[i + 1];
+}
+
 /* Write the 0x1c0-byte transfer command into the context's ring. */
 void pvrsgx_transfer_job_build(struct pvrsgx_job *job, u32 data[6])
 {
@@ -148,6 +165,7 @@ void pvrsgx_transfer_job_build(struct pvrsgx_job *job, u32 data[6])
 	cmd->size = sizeof(*cmd);
 	cmd->flags = job->transfer.dst_twiddled ? PVRSGX_TRANSFER_DST_TWIDDLED : 0;
 	cmd->unk_194 = 0x07c00000;
+	probe_xfer_words(job->ctx->sdev, cmd);
 
 	/* No source syncs; one destination, the kernel's completion sync. */
 	cmd->num_dst = 1;
