@@ -16,11 +16,39 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
+#include <linux/sizes.h>
 
 #include "pvrsgx_device.h"
 #include "pvrsgx_drv.h"
 #include "pvrsgx_fw.h"
 #include "pvrsgx_pm.h"
+
+/*
+ * Bring-up (SGX530, default off): start the kernel data heap here instead of
+ * the layout's, inside its range, to see whether an address the 3D reads
+ * moves with it.
+ */
+static unsigned int probe_kdata_base;
+module_param(probe_kdata_base, uint, 0444);
+MODULE_PARM_DESC(probe_kdata_base, "Bring-up (SGX530): kernel data heap base, 64 KiB aligned (default 0: the layout's)");
+
+static void probe_heaps(struct pvrsgx_device *sdev)
+{
+	const struct pvrsgx_va_range *kd = &sdev->family->heaps->kernel_data;
+
+	if (!probe_kdata_base || sdev->family->core != 530)
+		return;
+	if (probe_kdata_base & (SZ_64K - 1) || probe_kdata_base < kd->base ||
+	    probe_kdata_base + SZ_1M > kd->end) {
+		dev_warn(sdev->base.dev, "probe: kernel data base 0x%08x refused\n",
+			 probe_kdata_base);
+		return;
+	}
+	sdev->heaps_probe = *sdev->family->heaps;
+	sdev->heaps_probe.kernel_data.base = probe_kdata_base;
+	sdev->heaps = &sdev->heaps_probe;
+	dev_warn(sdev->base.dev, "probe: kernel data heap at 0x%08x\n", probe_kdata_base);
+}
 
 static int pvrsgx_of_probe(struct platform_device *pdev)
 {
@@ -56,6 +84,8 @@ static int pvrsgx_of_probe(struct platform_device *pdev)
 	if (IS_ERR(sdev))
 		return PTR_ERR(sdev);
 	sdev->family = pvrsgx_core_family_get((uintptr_t)device_get_match_data(dev));
+	if (sdev->family)
+		probe_heaps(sdev);
 	sdev->irq = irq;
 	platform_set_drvdata(pdev, sdev);
 

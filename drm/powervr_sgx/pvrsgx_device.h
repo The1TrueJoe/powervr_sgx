@@ -154,6 +154,10 @@ struct pvrsgx_device {
 	const struct pvrsgx_part *part;
 	/** @family: The core the bus says is there, set before the probe reads a register. */
 	const struct pvrsgx_core_family *family;
+	/** @heaps: Bring-up only: a layout in place of @family's (NULL: @family's). */
+	const struct pvrsgx_heap_layout *heaps;
+	/** @heaps_probe: Where @heaps points when it is set. */
+	struct pvrsgx_heap_layout heaps_probe;
 	/** @cr: Its registers that move between cores (@family's). */
 	const struct pvrsgx_core_regs *cr;
 	/** @core: What the driver knows about this part. */
@@ -395,7 +399,7 @@ static inline struct pvrsgx_mmu *pvrsgx_idle_mmu(const struct pvrsgx_device *sde
 /* The core's device-virtual layout. */
 static inline const struct pvrsgx_heap_layout *pvrsgx_heaps(const struct pvrsgx_device *sdev)
 {
-	return sdev->family->heaps;
+	return sdev->heaps ?: sdev->family->heaps;
 }
 
 /* A register from the core table: 0 is one the core lacks, never written. */
