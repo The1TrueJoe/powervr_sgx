@@ -37,6 +37,8 @@
  *   -g s0,m0,s1,m1,c   the end-of-tile tile word: in0 << s0 & m0 | in1 << s1 & m1 | c
  *   -R x0,y0,x1,y1   render only these tiles
  *   -k mask    the in1 bits that run the ptoff task (default 8)
+ *   -j         the ptoff event runs the end-of-tile program too
+ *   -M w0,w1,w2,w3[,ctl]   the end of tile DMAs these into pa0-pa3 (ctl default 0x80000003)
  *
  * Cases, 64x64 BGRA8888:
  *   clear    nothing  -> strided            every pixel the clear shader's colour
@@ -185,6 +187,13 @@ static uint32_t pe_tile[5];
 static int tile_range[4] = { -1 };
 /* -k mask (bring-up): in1 bits that run the ptoff task */
 static uint32_t ptoff_mask;
+/* -M w0,w1,w2,w3[,ctl] (bring-up): the end of tile DMAs these four words into pa0-pa3 */
+static uint32_t pe_words[5] = { 0, 0, 0, 0, 0x80000003 };
+static int pe_dma_on;
+/* -j (bring-up): the ptoff event runs the end-of-tile program too */
+static int ptoff_eot;
+static struct buf peblk;
+static struct sgxtex_core core_cfg;
 /* -D (bring-up): list the destination's nonzero words after the check */
 static int dump_nonzero;
 /* -B (bring-up): bytes of general heap before the background block, which moves 3D_REQ_BASE */
@@ -531,10 +540,12 @@ static void set_core(const struct drm_powervr_sgx_heap *use)
 	c.pe_tile535 = pe_tile535;
 	memcpy(c.pe_tile, pe_tile, sizeof(pe_tile));
 	c.pe_ptoff_mask = ptoff_mask;
+	c.pe_ptoff_eot = ptoff_eot;
 	if (verbose)
 		printf("core id 0x%08x: PDS %s, code window 2^%u, DOUTU offset in %s, tiles %u wide\n",
 		       gi.core_id, c.pds_8word ? "8-word" : "2-dword", c.use_window_log2,
 		       c.doutu_offset_bytes ? "bytes" : "instructions", 1u << c.tile_w_log2);
+	core_cfg = c;
 	sgxtex_set_core(&c);
 }
 
@@ -586,7 +597,7 @@ int main(int argc, char **argv)
 	int opt, e, bad = 0, two = 0, clear_only = 0;
 	uint32_t pad = 0;
 
-	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:R:k:")) != -1) {
+	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:R:k:M:j")) != -1) {
 		switch (opt) {
 		case 'v': verbose = 1; break;
 		case 'T': src_heap = DRM_POWERVR_SGX_HEAP_TEXTURE; break;
@@ -623,7 +634,13 @@ int main(int argc, char **argv)
 		case 'Q': pbe_ptr = 1; break;
 		case 'G': pe_tile535 = 1; break;
 		case 'D': dump_nonzero = 1; break;
+		case 'j': ptoff_eot = 1; break;
 		case 'k': ptoff_mask = strtoul(optarg, NULL, 0); break;
+		case 'M':
+			sscanf(optarg, "%i,%i,%i,%i,%i", (int *)&pe_words[0], (int *)&pe_words[1], (int *)&pe_words[2],
+			       (int *)&pe_words[3], (int *)&pe_words[4]);
+			pe_dma_on = 1;
+			break;
 		case 'R':
 			sscanf(optarg, "%d,%d,%d,%d", &tile_range[0], &tile_range[1], &tile_range[2], &tile_range[3]);
 			break;
@@ -707,6 +724,13 @@ int main(int argc, char **argv)
 	tw = bo(DRM_POWERVR_SGX_HEAP_TEXTURE, 64 * 64 * 4);
 	lin = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 64 * 64 * 4);
 	mip = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 32 * 32 * 4);
+	if (pe_dma_on) {	/* after the others, so their addresses don't move */
+		peblk = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 0x1000);
+		put(&peblk, peblk.va, pe_words, 4);
+		core_cfg.pe_dma[0] = peblk.va;
+		core_cfg.pe_dma[1] = pe_words[4];
+		sgxtex_set_core(&core_cfg);
+	}
 	for (uint32_t y = 0; y < 64; y++)
 		for (uint32_t x = 0; x < 64; x++)
 			((uint32_t *)src.cpu)[y * 64 + x] = pattern(x, y);
