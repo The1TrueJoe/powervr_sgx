@@ -28,6 +28,10 @@
  *   -Q         o0 of the end-of-tile task points at the PBE words
  *   -t n       DOUTU word 0 b24-31 of the end-of-tile task and the clear
  *   -V w1      a one-DOUTU pixel-event program with this word 1
+ *   -W w2, -O bits   the clear's DOUTU word 2, and bits ORed into its word 0
+ *   -1 w1      the clear's DOUTU word 1 (default 4)
+ *   -A off     an inline clear shader at this offset of the code object (0x140)
+ *   -a off     a clear shader with a code object of its own starts this far into it
  *
  * Cases, 64x64 BGRA8888:
  *   clear    nothing  -> strided            every pixel the clear shader's colour
@@ -180,7 +184,7 @@ static struct buf evb;
 static uint32_t CLEAR_COLOUR = 0xff00ff00u;
 static uint32_t clear_shader[4096] = { 0x00000000, 0xfa440700, 0x0000ff00, 0xfc27f181 };
 static uint32_t clear_words = 4;
-/* a clear shader past its 0xc0-byte slot gets a code object of its own */
+/* a clear shader past its slot (to 0x200) gets a code object of its own */
 static struct buf clear_bo;
 /* -P i=v (bring-up): PBE word i (0-3, 4 the sideband) is v in the end-of-tile program */
 /* -X (bring-up): the end-of-tile program as up to 32 hex words, low word first */
@@ -199,6 +203,12 @@ static int pbe_ptr;
 static int event_simple;
 static uint32_t event_w1;
 static struct buf pbeblk;
+/* -W w2, -O bits (bring-up): the clear's DOUTU word 2, and bits ORed into its word 0 */
+static uint32_t clear_w2, clear_w0_or, clear_w1 = 4;
+/* -A off (bring-up): an inline clear shader at this offset in the code object (default 0x140) */
+static uint32_t clear_off = 0x140;
+/* -a off (bring-up): a clear shader in its own code object starts this far into it */
+static uint32_t clear_bo_off;
 static int temps_set;
 static uint32_t temps_field;
 static int pbe_set[5];
@@ -273,15 +283,15 @@ static void programs(void)
 	emit = usse.va + 0x80;
 	nop = usse.va + 0xc0;
 	X.copy_use = usse.va + 0x100;
-	clear_use = usse.va + 0x140;
+	clear_use = usse.va + clear_off;
 	put(&usse, emit, sgxtex_emit_shader, 6);
 	if (eot_nop > 1)
 		put(&usse, emit, (const uint32_t[6]){ 0, 0xfa440700, 0, 0xf8040140 }, 6);
 	put(&usse, nop, sgxtex_nop_shader, 4);
 	put(&usse, X.copy_use, sgxtex_copy_shader, 4);
-	if (clear_words * 4 > 0xc0) {
-		clear_bo = bo(DRM_POWERVR_SGX_HEAP_USSE_PIXEL, clear_words * 4);
-		clear_use = clear_bo.va;
+	if (clear_words * 4 > 0x200 - clear_off) {
+		clear_bo = bo(DRM_POWERVR_SGX_HEAP_USSE_PIXEL, clear_bo_off + clear_words * 4);
+		clear_use = clear_bo.va + clear_bo_off;
 		put(&clear_bo, clear_use, clear_shader, clear_words);
 		upload(&clear_bo, clear_use, clear_words * 4);
 	} else {
@@ -324,6 +334,9 @@ static int submit(const struct sgxtex_surface *src, const struct sgxtex_surface 
 	sgxtex_blit_build(&b, &X, src, dst, filter);
 	if (clr) {
 		sgxtex_clear_pixel_program(b.pds, clear_use);
+		b.pds[0] |= clear_w0_or;
+		b.pds[1] = clear_w1;	/* ds0[1], DOUTU word 1 */
+		b.pds[2] = clear_w2;	/* ds1[0], DOUTU word 2 */
 		if (temps_set)
 			b.pds[0] = (b.pds[0] & 0x00ffffff) | temps_field << 24;
 	}
@@ -532,7 +545,7 @@ int main(int argc, char **argv)
 	int opt, e, bad = 0, two = 0, clear_only = 0;
 	uint32_t pad = 0;
 
-	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:")) != -1) {
+	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:")) != -1) {
 		switch (opt) {
 		case 'v': verbose = 1; break;
 		case 'T': src_heap = DRM_POWERVR_SGX_HEAP_TEXTURE; break;
@@ -557,6 +570,11 @@ int main(int argc, char **argv)
 			for (char *t = strtok(optarg, ","); t && clear_words < 16; t = strtok(NULL, ","))
 				clear_shader[clear_words++] = (uint32_t)strtoul(t, NULL, 16);
 			break;
+		case 'a': clear_bo_off = (uint32_t)strtoul(optarg, NULL, 0) & 0xff8; break;
+		case 'A': clear_off = (uint32_t)strtoul(optarg, NULL, 0) & 0x1f8; break;
+		case '1': clear_w1 = (uint32_t)strtoul(optarg, NULL, 0); break;
+		case 'W': clear_w2 = (uint32_t)strtoul(optarg, NULL, 0); break;
+		case 'O': clear_w0_or = (uint32_t)strtoul(optarg, NULL, 0); break;
 		case 'V':
 			event_simple = 1;
 			event_w1 = (uint32_t)strtoul(optarg, NULL, 0);
