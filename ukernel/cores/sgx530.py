@@ -79,6 +79,10 @@ FEATURES = 0x4              # PVRSGX_UKFW_SINGLE_CONTEXT (bit 2, proposed): EDM 
                              # patch value 6 still the PD table. When the 530 image lands on
                              # main this must become 0x8. The sgx530 branch driver stays at
                              # 0x4, so these images keep loading there; don't change it yet.
+# The DPM free-list selector (0x664) and the SGX545's PDS threshold offset (0x668) aren't in
+# TI's sgx530defs.h; its PDS page threshold is 0x614 (L). Null on the board, 2026-11-27.
+CR_DPM_FL_MODE = None
+TA_PB = [e if e[0] != 0x668 else (0x614,) + tuple(e[1:]) for e in TA_PB]  # noqa: F405
 INIT_DPM_CLEAR = []          # the SGX545's 0x65c/0x630 aren't named here (gap 13);
                              # stage 1 touches only named registers
 HEARTBEAT = 0x2a             # control block +0xa8: +1 per event, the watchdog's progress

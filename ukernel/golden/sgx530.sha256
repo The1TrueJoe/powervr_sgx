@@ -4,5 +4,5 @@
 # that perturbs the 530 is caught. The 530 is still being brought up, so its
 # image will change on purpose: regenerate with
 #   python3 ukernel/golden/check.py sgx530 --write
-sha256 910dbf49f551affeaf8b3223a22d8de697b94ef7880d2590e0210e78dbbac1a5
-bytes  17088
+sha256 918408e835ae5b6893b01596f7d32c9db1d084bb4ae2f6d9b9262d71b1271a97
+bytes  17056

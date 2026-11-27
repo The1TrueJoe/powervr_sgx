@@ -418,8 +418,9 @@ class Asm:
         EUR_CR_EVENT_STATUS2 (TA bit 0, 3D bit 1). Without this the free list is
         empty, the parameter buffer's pages-in-use stays 0 and the TA never runs
         (docs/UKERNEL.md §6 "Load the free-list")."""
-        self.i(f"limm r5, #{mode}")
-        self.i(f"str #{CR_DPM_FL_MODE // 4}, r5")
+        if CR_DPM_FL_MODE is not None:              # the SGX530 has no selector
+            self.i(f"limm r5, #{mode}")
+            self.i(f"str #{CR_DPM_FL_MODE // 4}, r5")
         self.i("limm r5, #1")
         self.i(f"str #{kick_reg // 4}, r5")
         self.wait(CR_EVENT_STATUS2, done_bit, CR_EVENT_HOST_CLEAR2)
