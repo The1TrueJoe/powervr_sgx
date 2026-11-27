@@ -216,6 +216,12 @@ struct pvrsgx_core_family {
 	u32 te_aa;
 	/** @vdm_ctl: The TA command's VDM control word. */
 	u32 vdm_ctl;
+	/**
+	 * @pixel_event_cfg: The 3D's 0xa64, next to the pixel-event program's
+	 * address and rows: 1 on the SGX545. The SGX530's end-of-tile task sees
+	 * its own registers only with 0x4ffe (docs/porting/cores/sgx530.md).
+	 */
+	u32 pixel_event_cfg;
 	/** @cmds: What its client commands are checked against (pvrsgx_cmd_defs.c). */
 	const struct pvrsgx_cmd_core *cmds;
 	/** @init_regs: Init script part 2's register writes, in order. */

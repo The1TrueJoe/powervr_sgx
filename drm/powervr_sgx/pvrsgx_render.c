@@ -456,7 +456,7 @@ static void rtds_init_entry(struct pvrsgx_rt_dataset *s, int i)
 	rd->bg_object = 0x2000000 | (kobj_va(s->bgblock[i]) - r->pb->base) >> 4;
 	rd->rt_flags = s->n.rt_flags;
 	rd->unk_58 = 0x30;
-	rd->unk_64 = 1;
+	rd->unk_64 = s->ctx->sdev->family->pixel_event_cfg;
 	rd->unk_68 = 1;
 	rd->unk_cc = 0x100;
 	rd->sync = kobj_va(s->rd_sync[i]);
