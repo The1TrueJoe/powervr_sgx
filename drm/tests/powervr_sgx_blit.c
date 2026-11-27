@@ -32,6 +32,9 @@
  *   -1 w1      the clear's DOUTU word 1 (default 4)
  *   -A off     an inline clear shader at this offset of the code object (0x140)
  *   -a off     a clear shader with a code object of its own starts this far into it
+ *   -G         the end-of-tile task's tile word in the SGX535's form
+ *   -D         list the destination's nonzero words
+ *   -g s0,m0,s1,m1,c   the end-of-tile tile word: in0 << s0 & m0 | in1 << s1 & m1 | c
  *
  * Cases, 64x64 BGRA8888:
  *   clear    nothing  -> strided            every pixel the clear shader's colour
@@ -172,6 +175,12 @@ static uint32_t emit, eot_next, clear_use;
  * -EE: the pixel event's emit task too.
  */
 static int eot_nop;
+/* -G (bring-up): the end-of-tile task's tile word in the SGX535's form (sgxtex) */
+static int pe_tile535;
+/* -g s0,m0,s1,m1,c (bring-up): the end-of-tile tile word's in0/in1 shifts and masks, and its constant */
+static uint32_t pe_tile[5];
+/* -D (bring-up): list the destination's nonzero words after the check */
+static int dump_nonzero;
 /* -B (bring-up): bytes of general heap before the background block, which moves 3D_REQ_BASE */
 static uint32_t bg_pad;
 /* -w (bring-up): the clear's destination is w x w (at most 64) */
@@ -436,6 +445,14 @@ static int check(const char *name, int e, const struct buf *b, uint32_t w, uint3
 				bad++;
 			}
 	printf("%-5s %s, %u/%u pixels right\n", name, e ? "TIMED OUT" : "done", w * h - bad, w * h);
+	if (dump_nonzero) {
+		uint32_t n = 0;
+
+		for (uint32_t i = 0; i < h * pitch; i++)
+			if (p[i] && n++ < 64)
+				printf("  nz %5u (%u,%u) %08x\n", i, i % pitch, i / pitch, p[i]);
+		printf("  %u nonzero words\n", n);
+	}
 	return e || bad;
 }
 
@@ -490,6 +507,8 @@ static void set_core(const struct drm_powervr_sgx_heap *use)
 		c.pds_8word = 1;
 		c.tile_w_log2 = 4;
 	}
+	c.pe_tile535 = pe_tile535;
+	memcpy(c.pe_tile, pe_tile, sizeof(pe_tile));
 	if (verbose)
 		printf("core id 0x%08x: PDS %s, code window 2^%u, DOUTU offset in %s, tiles %u wide\n",
 		       gi.core_id, c.pds_8word ? "8-word" : "2-dword", c.use_window_log2,
@@ -545,7 +564,7 @@ int main(int argc, char **argv)
 	int opt, e, bad = 0, two = 0, clear_only = 0;
 	uint32_t pad = 0;
 
-	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:")) != -1) {
+	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:")) != -1) {
 		switch (opt) {
 		case 'v': verbose = 1; break;
 		case 'T': src_heap = DRM_POWERVR_SGX_HEAP_TEXTURE; break;
@@ -580,6 +599,12 @@ int main(int argc, char **argv)
 			event_w1 = (uint32_t)strtoul(optarg, NULL, 0);
 			break;
 		case 'Q': pbe_ptr = 1; break;
+		case 'G': pe_tile535 = 1; break;
+		case 'D': dump_nonzero = 1; break;
+		case 'g':
+			sscanf(optarg, "%i,%i,%i,%i,%i", (int *)&pe_tile[0], (int *)&pe_tile[1], (int *)&pe_tile[2],
+			       (int *)&pe_tile[3], (int *)&pe_tile[4]);
+			break;
 		case 't':
 			temps_set = 1;
 			temps_field = (uint32_t)strtoul(optarg, NULL, 0) & 0xff;

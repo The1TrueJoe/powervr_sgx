@@ -103,8 +103,12 @@ first) replaces the clear shader. Assemble with `sgx-asm -L` (`ukernel/sgx-asm.s
 ## Step 4: the PBE (open on the SGX530)
 
 On the SGX530 the end-of-tile program's `emit.t0` does reach the PBE: without it nothing is
-written. But the PBE writes at an address that nothing in the end-of-tile task moves, and the
-task's `limm`s don't reach the values the emits send. The open questions are in the
+written. Two things put its writes at our destination (2026-11-27, the
+[log](../log/entries/2026-11-27-0900-sgx530-pbe-writes-a-tile.md)):
+- 0xa64 = 0x4ffe;
+- b28 in the end-of-tile task's DOUTU word 2 (`powervr_sgx_blit -g`).
+
+Then one 16×16 tile is written. Every other tile isn't yet. The open questions are in the
 [build log](../log/entries/2026-11-27-0200-sgx530-first-pixels-stores.md).
 
 ## Observing the stock stack (only with the owner's approval)
