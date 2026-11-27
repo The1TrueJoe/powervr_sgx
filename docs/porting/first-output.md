@@ -83,16 +83,22 @@ first) replaces the clear shader. Assemble with `sgx-asm -L` (`ukernel/sgx-asm.s
        wdf
        nop [end]
 
-2. The clear as stores into the destination: `tools/first-output/clear_stores.py ADDR COLOUR W H
-   PITCH` writes the shader. On the SGX530, at the test's destination 0x0180a000:
+2. The clear as stores into the destination. `tools/first-output/clear_stores.py ADDR COLOUR W H
+   PITCH` writes the shader. A full-width block (PITCH = W) is a loop; anything else is one
+   store per pixel. On the SGX530, at the test's destination 0x0180a000:
 
-       python3 tools/first-output/clear_stores.py 0x0180a000 0xff00ff00 32 32 64 > clear.s
+       python3 tools/first-output/clear_stores.py 0x0180a000 0xff00ff00 64 64 64 > clear.s
        sgx-asm -L clear.s | awk '{print $2, $3}' > clear.hex
-       powervr_sgx_blit -v -c -w 32 -S @clear.hex -t 8
+       powervr_sgx_blit -v -c -S @clear.hex -t 8
 
-   `clear done, 1024/1024 pixels right` is the result. Every pixel instance writes the whole
-   block, which is slow but harmless. The program has to fit one code base window, so 32×32 is
-   about the largest block on a 32 KiB window, until branches work (they don't yet on the SGX530).
+   `clear done, 4096/4096 pixels right` is the result. Every pixel instance writes the whole
+   block, which is slow but harmless.
+
+   Three things the SGX530 needed, so check them on another core:
+   - A program with a taken branch hangs when it shares a code object with other programs. The
+     generator pads the loop with `nop`s so the test gives it an object of its own.
+   - A pixel task launched this way has r0-r3 only. The loop uses nothing else.
+   - `br` targets count from the branch, in instructions.
 
 ## Step 4: the PBE (open on the SGX530)
 
