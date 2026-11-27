@@ -1381,6 +1381,10 @@ static void state_block(struct sgx_ctx *c, const uint32_t *blk, uint32_t n, uint
 		pds_d0(&p, 1, dma_ctrl(dma_dwords, 0, (dma_dwords - 1) & 7, 0));
 	else
 		pds_d0(&p, 1, dma_ctrl(dma_dwords, 0, kind, 1));
+	/* SGXGEN_STATE_DMA_B31 (bring-up probe, SGX530): b31 in the state DMA control, as the
+	 * public SGX535 driver sets it (the SGX530 stock leaves it clear) */
+	if (getenv("SGXGEN_STATE_DMA_B31"))
+		p.ds0[1] |= 0x80000000u;
 	pds_d0(&p, 2, 0);
 	pds_d0(&p, 3, 0);
 	/* SGXGEN_DOUTU_B4: b4, set in every 530 vendor DOUTU of a task that emits to the MTE
