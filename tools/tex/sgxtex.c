@@ -475,6 +475,8 @@ void sgxtex_xctx_pixel_event(uint32_t *p, uint32_t eot_use, uint32_t emit_use)
 		code[14] = PDS_SHL(U_IN(0), core.pe_tile[0], U_DS1(0x30));
 		code[17] = PDS_SHL(U_IN(1), core.pe_tile[2], U_DS1(0x30));
 	}
+	if (core.pe_ptoff_mask)
+		data[6] = core.pe_ptoff_mask;
 	memcpy(p, data, sizeof data);
 	memcpy(p + 4 * SGXTEX_EVENT_ROWS, code, sizeof code);
 }

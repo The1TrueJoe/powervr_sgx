@@ -36,6 +36,7 @@
  *   -D         list the destination's nonzero words
  *   -g s0,m0,s1,m1,c   the end-of-tile tile word: in0 << s0 & m0 | in1 << s1 & m1 | c
  *   -R x0,y0,x1,y1   render only these tiles
+ *   -k mask    the in1 bits that run the ptoff task (default 8)
  *
  * Cases, 64x64 BGRA8888:
  *   clear    nothing  -> strided            every pixel the clear shader's colour
@@ -182,6 +183,8 @@ static int pe_tile535;
 static uint32_t pe_tile[5];
 /* -R x0,y0,x1,y1 (bring-up): render only these tiles (first and last, inclusive) */
 static int tile_range[4] = { -1 };
+/* -k mask (bring-up): in1 bits that run the ptoff task */
+static uint32_t ptoff_mask;
 /* -D (bring-up): list the destination's nonzero words after the check */
 static int dump_nonzero;
 /* -B (bring-up): bytes of general heap before the background block, which moves 3D_REQ_BASE */
@@ -527,6 +530,7 @@ static void set_core(const struct drm_powervr_sgx_heap *use)
 	}
 	c.pe_tile535 = pe_tile535;
 	memcpy(c.pe_tile, pe_tile, sizeof(pe_tile));
+	c.pe_ptoff_mask = ptoff_mask;
 	if (verbose)
 		printf("core id 0x%08x: PDS %s, code window 2^%u, DOUTU offset in %s, tiles %u wide\n",
 		       gi.core_id, c.pds_8word ? "8-word" : "2-dword", c.use_window_log2,
@@ -582,7 +586,7 @@ int main(int argc, char **argv)
 	int opt, e, bad = 0, two = 0, clear_only = 0;
 	uint32_t pad = 0;
 
-	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:R:")) != -1) {
+	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:R:k:")) != -1) {
 		switch (opt) {
 		case 'v': verbose = 1; break;
 		case 'T': src_heap = DRM_POWERVR_SGX_HEAP_TEXTURE; break;
@@ -619,6 +623,7 @@ int main(int argc, char **argv)
 		case 'Q': pbe_ptr = 1; break;
 		case 'G': pe_tile535 = 1; break;
 		case 'D': dump_nonzero = 1; break;
+		case 'k': ptoff_mask = strtoul(optarg, NULL, 0); break;
 		case 'R':
 			sscanf(optarg, "%d,%d,%d,%d", &tile_range[0], &tile_range[1], &tile_range[2], &tile_range[3]);
 			break;
