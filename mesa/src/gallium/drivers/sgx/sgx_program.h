@@ -15,7 +15,7 @@ struct sgxws_blend;
 
 const struct nir_shader_compiler_options *sgx_get_nir_options(void);
 uint32_t sgx_fs_program(struct sgx_context *ctx, struct sgx_pipe_shader *so,
-                        const struct sgxws_blend *b);
+                        const struct sgxws_blend *b, bool ms4);
 
 /* the compiled vertex shader vs as it goes with the compiled fragment shader
  * fs (or NULL) and inputs in vtx_fmt (or NULL, f32 x 4): itself when their

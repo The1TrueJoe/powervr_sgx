@@ -210,7 +210,7 @@ formulas.
 | 0x27c-0x298 | 0 | client values (multisample / output values) | guess |
 | 0x29c | 0 | number of RT data entries - 1 | capture |
 | 0x2a0 | 0 | a render-target value << 12 | capture (0); unconfirmed (the formula) |
-| 0x2a4 | 0x88 | a render-target value: 0x88 with no AA; `eaa26e26` in both 4x captures (meaning unknown) | capture |
+| 0x2a4 | 0x88 | the sample positions: 0x88 with no AA; `eaa26e26` in both 4x captures. The microkernel loads it into register 0x230. Read as (x, y) nibble pairs from the low byte, in 1/16 pixel: (8, 8), the center; (6, 2), (14, 6), (2, 10), (10, 14), a rotated 4x grid. On a 4x target the PDS hands it to a discarding program in front of the depth plane (ISA.md "Phases, visibility feedback and discard") | capture (the values); hardware (the PDS iteration, issue #89); guess (the positions) |
 | 0x2a8.. | | deferred render-details updates: (device address, value) pairs, `count` at +0x54 | capture |
 
 The deferred updates exist because the render details are written in full
@@ -1288,6 +1288,10 @@ per pixel at the end of each tile (**capture**: `ms1` / `ms4` and `ms1d` /
 - **Other words:** 3D flags (+0x1c) 0x400 → 0x580 (b7 | b8, the ZLS
   bits), render details +0x10 `80000000` → `80000002` (b1), and the TA
   command grows to 0x300 bytes for the six deferred updates.
+- **A discarding program's depth plane** (source 0x22) arrives one register
+  later than with one sample: the PDS puts the sample positions word
+  (tail +0x2a4) in front of it (ISA.md "Phases, visibility feedback and
+  discard"; hardware, issue #89).
 - Not seen: 2 or 8 samples (only 4 was captured), a multisampled FBO, and
   whether the 2x-wide ZLS layout is sample-interleaved per pixel.
 

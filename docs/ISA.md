@@ -2189,6 +2189,16 @@ With feedback (discard on triangles):
   `0x7c11000` (4 components) (**unconfirmed**). That source 0x22 is the triangle's depth plane, so
   `pcoeff` = hand the ISP its plane coefficients, is a **guess** from the
   name.
+- **On a 4x target the same DOUTI fills four registers**: pa<n> holds the
+  render's sample positions word (`eaa26e26`, STATE.md "Multisampling
+  (4x)"), and the plane follows in pa<n+1>..pa<n+3>. With one sample,
+  pa<n>..pa<n+2> hold the plane (a flat quad at depth 0.5: 0, 0, 0.5).
+  `pcoeff` must then read pa<n+1>, pa<n+2> (lo `0xb0000004 | (n+1)<<14 |
+  (n+2)<<7`), and the PDS size word must give the pixel n + 4 registers.
+  With 3 the fourth register lands in the next pixel's pa0, and with
+  `pcoeff pa<n>` the stored depth is about 0 (**hardware**, issue #89:
+  `mesa/tests/sgx_msaa_discard.c`; the registers were read back by
+  moving pa<k> into o0).
 - **Which predicate kills**: atst8's h9-10, a PRED2 predicate (0 none,
   1 p0, 2 p1, 3 !p0, as in depthf). The vendor assembler never sets it
   (**oracle**; `{?h10}` in dis.py); the driver's word has 2 = p1, the keep

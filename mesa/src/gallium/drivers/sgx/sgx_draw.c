@@ -136,6 +136,17 @@ zls_target(struct sgx_context *ctx, struct sgx_resource *zs, uint32_t w,
    return true;
 }
 
+/* the samples a pixel of the frame begin_frame renders: 1, or 4 */
+static unsigned
+frame_samples(const struct sgx_context *ctx)
+{
+   const struct pipe_resource *res = sgx_cbuf(ctx)->texture;
+
+   if (!res && ctx->framebuffer.zsbuf.texture)
+      res = ctx->dummy_cb;
+   return res ? MAX2(res->nr_samples, 1) : 1;
+}
+
 /* start (or continue) the frame into colour buffer 0; called with the lock
  * held.  zs_cleared: the caller clears all of the depth/stencil buffer, so a
  * render that starts here needn't load it. */
@@ -2178,12 +2189,18 @@ sgx_draw_vbo_impl(struct pipe_context *pctx, const struct pipe_draw_info *info,
       SKIP("a vertex shader that isn't compiled");
    }
    if (fs->kind == SGX_SHADER_COMPILED) {
+      /* a 4x target: a discard's depth plane comes after the sample
+       * positions word, one more register (sgxws_fs_feedback) */
+      bool ms4 = fs->discard_pa >= 0 && frame_samples(ctx) > 1;
+
       fsp = fs->prog;
-      if (blend) {
-         fsp.code = sgx_fs_program(ctx, fs, blend);
+      if (blend || ms4) {
+         fsp.code = sgx_fs_program(ctx, fs, blend, ms4);
          if (!fsp.code)
-            SKIP("no blend variant of the fragment program");
+            SKIP("no blend or 4x variant of the fragment program");
       }
+      if (ms4)
+         fsp.pa_dwords = MAX2(fsp.pa_dwords, (unsigned)fs->discard_pa + 4);
       /* pass type: a blend 1; discard 4, or 2 with a blend; a depthf
        * (gl_FragDepth) 5 (ISA.md, H10).  A program that reads the tile
        * (an sRGB blend) is a blend: o0 holds the tile's colour only in a
