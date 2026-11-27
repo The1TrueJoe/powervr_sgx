@@ -329,6 +329,17 @@ static void vm_put_work(struct work_struct *work)
 static unsigned int pvrsgx_probe_va0;
 module_param_named(probe_va0, pvrsgx_probe_va0, uint, 0444);
 MODULE_PARM_DESC(probe_va0, "Bring-up (SGX530): map a page at device address 0 in client VMs, filled with this pattern (default 0: off)");
+static unsigned int pvrsgx_probe_va0_addr;
+module_param_named(probe_va0_addr, pvrsgx_probe_va0_addr, uint, 0444);
+MODULE_PARM_DESC(probe_va0_addr, "Bring-up (SGX530): where probe_va0 maps its page instead of 0 (default 0)");
+static unsigned int pvrsgx_probe_va0_pages = 1;
+module_param_named(probe_va0_pages, pvrsgx_probe_va0_pages, uint, 0444);
+MODULE_PARM_DESC(probe_va0_pages, "Bring-up (SGX530): how many pages probe_va0 maps, at most 1024 (default 1)");
+
+static u32 probe_va0_bytes(void)
+{
+	return clamp(pvrsgx_probe_va0_pages, 1U, 1024U) * PAGE_SIZE;
+}
 
 static void probe_va0_map(struct pvrsgx_vm *vm, struct pvrsgx_device *sdev)
 {
@@ -341,37 +352,46 @@ static void probe_va0_map(struct pvrsgx_vm *vm, struct pvrsgx_device *sdev)
 	if (!km)
 		return;
 	km->mmu = vm->mmu;
-	if (pvrsgx_kmem_alloc(sdev, km, 0, PAGE_SIZE, 0, 0)) {
-		drm_warn(&sdev->base, "probe_va0: no page\n");
+	if (pvrsgx_kmem_alloc(sdev, km, pvrsgx_probe_va0_addr & PAGE_MASK,
+			      probe_va0_bytes(), 0, 0)) {
+		drm_warn(&sdev->base, "probe_va0: no pages\n");
 		kfree(km);
 		return;
 	}
 	p = km->cpu;
-	for (int i = 0; i < PAGE_SIZE / 4; i++)
+	for (u32 i = 0; i < probe_va0_bytes() / 4; i++)
 		p[i] = pvrsgx_probe_va0;
-	/* The pattern is in memory before a job can read the page. */
+	/* The pattern is in memory before a job can read the pages. */
 	wmb();
 	vm->probe_va0 = km;
 }
 
+/* The words the GPU changed, as runs: first address, count, first and last value. */
 static void probe_va0_unmap(struct pvrsgx_vm *vm)
 {
 	struct pvrsgx_kmem *km = vm->probe_va0;
+	u32 n = probe_va0_bytes() / 4, changed = 0, runs = 0;
 	const u32 *p;
-	int changed = 0;
 
 	if (!km)
 		return;
 	/* The GPU's writes are read after the VM's last job. */
 	rmb();
 	p = km->cpu;
-	for (int i = 0; i < PAGE_SIZE / 4; i++) {
+	for (u32 i = 0; i < n; i++) {
+		u32 j = i;
+
 		if (p[i] == pvrsgx_probe_va0)
 			continue;
-		if (changed++ < 64)
-			drm_info(&vm->sdev->base, "probe_va0: +0x%03x = 0x%08x\n", i * 4, p[i]);
+		while (j + 1 < n && p[j + 1] != pvrsgx_probe_va0)
+			j++;
+		changed += j - i + 1;
+		if (runs++ < 128)
+			drm_info(&vm->sdev->base, "probe_va0: 0x%08x +%u words: 0x%08x .. 0x%08x\n",
+				 km->dev_addr + i * 4, j - i + 1, p[i], p[j]);
+		i = j;
 	}
-	drm_info(&vm->sdev->base, "probe_va0: %d words changed\n", changed);
+	drm_info(&vm->sdev->base, "probe_va0: %u words changed in %u runs\n", changed, runs);
 	pvrsgx_kmem_free(vm->sdev, km);
 	kfree(km);
 	vm->probe_va0 = NULL;
