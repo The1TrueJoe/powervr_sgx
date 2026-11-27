@@ -35,6 +35,7 @@ larger project.
 |---|---|
 | [kernel.md](kernel.md) | Publishing the GPU, power, the MMU, loading the microkernel, kicks, interrupts, recovery, runtime PM |
 | [microkernel.md](microkernel.md) | Bringing the open microkernel up on a new core, from first boot to full frames |
+| [first-output.md](first-output.md) | First pixels in memory from a 3D-only render, before the TA works (the SGX530's recipe) |
 | [isa.md](isa.md) | Establishing a core's instruction set and getting the compiler to generate code for it |
 | [state.md](state.md) | Decoding command streams and GPU state, and checking them against the hardware |
 | [mesa.md](mesa.md) | The Mesa driver, from the first clear to a desktop, dEQP and performance |
@@ -55,7 +56,8 @@ earlier one.
    answering. ([microkernel.md](microkernel.md))
 5. **First kick, first tile pass, first frame.** Send work, watch the tiler (TA) build the
    scene, then the 3D pass render it, and compare the pixels. ([microkernel.md](microkernel.md),
-   [state.md](state.md))
+   [state.md](state.md)) If the TA won't finish, a 3D-only render still gets pixels into
+   memory and confirms most of the 3D side. ([first-output.md](first-output.md))
 6. **The kernel driver.** Buffers, GPU address spaces, the job queue, interrupts, and the
    tests that exercise them. ([kernel.md](kernel.md))
 7. **Mesa: the first clear and triangle**, then textures, the compiler, blending and
