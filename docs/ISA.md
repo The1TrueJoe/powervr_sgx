@@ -1917,15 +1917,29 @@ level 1). Which of x and y comes first doesn't show in an isotropic LOD.
 with its chains, every texel naming its face and level). `smp.3d.grad`
 returns the last level whatever r11-r27 hold, zeros included, so it
 isn't a gradient read we can use. `smp.2d.grad` with the cube's state
-words still picks the face from (x, y, z) and reads four registers from
-src2, r12-r15, and nothing after them. They act as the x and y derivatives
-of the direction, in the 2D form's order (dx/dx, dx/dy, dy/dx, dy/dy),
-taken as they are, with no projection onto the face. On +X only r14-r15
-change the level, on -Y only r12-r13, and on +Z all four; 0.5 gives level
-2 of 8 texels, as on a 2D texture, where the face's own derivative would
-be 0.25. The z derivatives can't be given. So neither form takes a cube's
-gradients the way GL defines them, and the driver computes a cube's LOD in
-the program.
+words reads four registers from src2, r12-r15, and nothing after them.
+They act as the x and y derivatives of the direction, in the 2D form's
+order (dx/dx, dx/dy, dy/dx, dy/dy), taken as they are, with no projection
+onto the face. On +X only r14-r15 change the level, on -Y only r12-r13;
+0.5 gives level 2 of 8 texels, as on a 2D texture, where the face's own
+derivative would be 0.25. The z derivatives can't be given. So neither
+form takes a cube's gradients the way GL defines them, and the driver
+computes a cube's LOD in the program.
+
+A 2D sample (`smp.2d`, `.lod`, `.grad`) on a cube's state words reads two
+coordinate registers, and the cube unit takes the direction as (x, y, 0)
+(**hardware**, `tools/isa/hwt_cube2d.py` on Clover Trail, the same cube):
+the face and texel follow x and y only. Garbage in the third register
+changes nothing, where `smp.3d` turns to the z faces; (0, 0, 1) and
+(0, 0, -1) read the same texel; (0.25, 0, 1) reads +X's centre, where
+`smp.3d` reads +Z right of its centre; (1, 0.5, -0.25) reads texel 36 of
++X, the one at z = 0, where `smp.3d` reads 38. On a +Z or -Z direction the
+unit sees (0, 0, 0): no major axis. It then picks +Z, reads texel 0 of the
+level, and a plain sample reads the last level. Our reading, not measured
+further: s and t are 0 / 0, and the implicit LOD's scale 1 / ma is
+infinite. That accounts for `hwt_cubegrad`'s +Z cases reading texel 0, and
+for all four of its gradient registers acting there. A cube is sampled
+with `smp.3d`, as the compiler does.
 
 A dependent sample's implicit LOD is wrong in a quad its primitive covers
 only in part (**hardware**, `mesa/tests/sgx_deplod.c`: 128 of 4096 pixels
