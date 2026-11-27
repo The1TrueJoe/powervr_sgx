@@ -263,6 +263,15 @@ static uint32_t usse_load(struct sgx_ctx *c, const struct usse_prog *pr, int ver
 	const char *e530 = getenv("SGXGEN_EMIT530");
 	static uint32_t patched[64];
 
+	/* =statep: the state task emits its DMA'd words from pa0, with no o-bank write */
+	if (e530 && !strcmp(e530, "statep")) {
+		for (unsigned i = 0; i < sizeof(usse_emit530p) / sizeof(usse_emit530p[0]); i++)
+			if (usse_emit530p[i][0] == pr) {
+				pr = usse_emit530p[i][1];
+				break;
+			}
+		e530 = NULL;
+	}
 	if (e530 && !strcmp(e530, "state1")) {
 		for (unsigned i = 0; i < sizeof(usse_emit530s) / sizeof(usse_emit530s[0]); i++)
 			if (usse_emit530s[i][0] == pr) {
