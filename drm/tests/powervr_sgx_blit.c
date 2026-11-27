@@ -40,6 +40,9 @@
  *   -j         the ptoff event runs the end-of-tile program too
  *   -Y         the clear as one job per tile
  *   -U bits    ORed into the end-of-tile task's DOUTU word 0
+ *   -H         a host-written parameter buffer for tile (0,0) (addresses printed)
+ *   -I off     its region array entry's low bits
+ *   -J off=val,...   words poked into it (byte offsets)
  *   -M w0,w1,w2,w3[,ctl]   the end of tile DMAs these into pa0-pa3 (ctl default 0x80000003)
  *
  * Cases, 64x64 BGRA8888:
@@ -197,6 +200,15 @@ static int ptoff_eot;
 /* -U bits (bring-up): ORed into the end-of-tile task's DOUTU word 0 */
 static uint32_t eot_w0_or;
 static struct buf peblk;
+/* -H (bring-up): a host-written parameter buffer for tile (0,0): region array, region header,
+ * control stream and one object (a triangle), stock-observed form; its addresses are printed */
+static int host_pb;
+/* -I off (bring-up): the region array entry's low bits (default 0) */
+static uint32_t hpb_ra_low;
+/* -J off=val,... (bring-up): words poked into the host PB (byte offsets) */
+static uint32_t hpb_poke[32][2];
+static int hpb_npoke;
+static struct buf hpb;
 static struct sgxtex_core core_cfg;
 /* -D (bring-up): list the destination's nonzero words after the check */
 static int dump_nonzero;
@@ -293,6 +305,8 @@ static void programs(void)
 	usse = bo(DRM_POWERVR_SGX_HEAP_USSE_PIXEL, 0x20000);
 	if (bg_pad)
 		bo(DRM_POWERVR_SGX_HEAP_GENERAL, bg_pad);
+	if (host_pb)		/* before the background block: with -B, at its 1 MiB base */
+		hpb = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 0x3000);
 	bgb = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 0x4800);
 	pdsc = bo(DRM_POWERVR_SGX_HEAP_PDS_PIXEL, 0x1800);
 	pdsp = bo(DRM_POWERVR_SGX_HEAP_PDS_PIXEL, 0x400);
@@ -372,6 +386,38 @@ static int submit(const struct sgxtex_surface *src, const struct sgxtex_surface 
 	}
 	put_pds(&pdsp, X.pds_primary, b.pds, 3, 4);
 	put(&bgb, X.bg, b.bg, SGXTEX_BLIT_BG_WORDS);
+	if (host_pb) {
+		/* at 3D_REQ_BASE, as the stock frame's PB: object page 0, control streams page 1,
+		 * region array 0x2000 and region headers 0x2640 */
+		static uint32_t w[0x3000 / 4];
+		uint32_t base = X.bg & 0xfff00000u, *o = w + 9;
+		static const uint32_t isp[] = {
+			0x01d00200, 0x000000f0, 0x46124612, 0x00000042, 0x40000000,
+			0x41004000, 0x3f000000, 0x40004100, 0x3f000000, 0x40004000, 0x3f000000,
+		};
+
+		memset(w, 0, sizeof(w));
+		o[-9] = b.bg[0];			/* PDS: the clear's secondary, control, primary */
+		o[-8] = b.bg[1];
+		o[-7] = b.bg[2];
+		for (int i = 0; i < 3; i++) {		/* per vertex: 1.0 and the colour */
+			o[-6 + 2 * i] = 0x3f800000;
+			o[-5 + 2 * i] = 0xff00ff00;
+		}
+		memcpy(o, isp, sizeof(isp));
+		w[0x1000 / 4] = 0x44a8ffff;		/* tile 0's stream: one object, at dword 9 */
+		w[0x1000 / 4 + 1] = 9;
+		w[0x1000 / 4 + 2] = 0xc0000000;
+		w[0x2000 / 4] = 0x90000000 | hpb_ra_low;	/* region array: tile 0, the last */
+		w[0x2640 / 4] = 0x90000000;		/* region header: tile (0,0), the last */
+		w[0x2640 / 4 + 1] = 0x1000;		/* its stream */
+		for (int i = 0; i < hpb_npoke; i++)
+			if (hpb_poke[i][0] < sizeof(w))
+				w[hpb_poke[i][0] / 4] = hpb_poke[i][1];
+		put(&hpb, hpb.va, w, 0x3000 / 4);
+		printf("host PB at 0x%08x (3D base 0x%08x): region array +0x2000, region header +0x2640\n",
+		       hpb.va, base);
+	}
 	if (verbose)
 		printf("background block at 0x%08x\n", X.bg);
 	if (pbe_set[0] | pbe_set[1] | pbe_set[2] | pbe_set[3] | pbe_set[4]) {
@@ -499,7 +545,8 @@ static int check(const char *name, int e, const struct buf *b, uint32_t w, uint3
 			y0 = i / pitch < y0 ? i / pitch : y0;
 			y1 = i / pitch > y1 ? i / pitch : y1;
 		}
-		printf("  %u nonzero words, box (%u,%u)-(%u,%u)\n", n, x0, y0, x1, y1);
+		printf("  %u nonzero words, box (%u,%u)-(%u,%u), last word %08x\n", n, x0, y0, x1, y1,
+		       p[h * pitch - 1]);
 	}
 	return e || bad;
 }
@@ -616,7 +663,7 @@ int main(int argc, char **argv)
 	int opt, e, bad = 0, two = 0, clear_only = 0;
 	uint32_t pad = 0;
 
-	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:R:k:M:jYU:")) != -1) {
+	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:R:k:M:jYU:HI:J:")) != -1) {
 		switch (opt) {
 		case 'v': verbose = 1; break;
 		case 'T': src_heap = DRM_POWERVR_SGX_HEAP_TEXTURE; break;
@@ -656,6 +703,18 @@ int main(int argc, char **argv)
 		case 'j': ptoff_eot = 1; break;
 		case 'Y': per_tile_jobs = 1; break;
 		case 'U': eot_w0_or = strtoul(optarg, NULL, 0); break;
+		case 'H': host_pb = 1; break;
+		case 'I': hpb_ra_low = strtoul(optarg, NULL, 0); break;
+		case 'J':
+			for (char *t = strtok(optarg, ","); t && hpb_npoke < 32; t = strtok(NULL, ",")) {
+				char *eq = strchr(t, '=');
+
+				if (!eq)
+					continue;
+				hpb_poke[hpb_npoke][0] = strtoul(t, NULL, 0);
+				hpb_poke[hpb_npoke++][1] = strtoul(eq + 1, NULL, 0);
+			}
+			break;
 		case 'k': ptoff_mask = strtoul(optarg, NULL, 0); break;
 		case 'M':
 			sscanf(optarg, "%i,%i,%i,%i,%i", (int *)&pe_words[0], (int *)&pe_words[1], (int *)&pe_words[2],
@@ -745,6 +804,7 @@ int main(int argc, char **argv)
 	tw = bo(DRM_POWERVR_SGX_HEAP_TEXTURE, 64 * 64 * 4);
 	lin = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 64 * 64 * 4);
 	mip = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 32 * 32 * 4);
+
 	if (pe_dma_on) {	/* after the others, so their addresses don't move */
 		peblk = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 0x1000);
 		put(&peblk, peblk.va, pe_words, 4);
