@@ -467,6 +467,8 @@ void sgxtex_xctx_pixel_event(uint32_t *p, uint32_t eot_use, uint32_t emit_use)
 		data[14] = 0x10000000;
 		code[14] = PDS_SHL(U_IN(0), 11, U_DS1(0x30));
 		code[17] = PDS_SHL(U_IN(1), 25, U_DS1(0x30));
+		/* DOUTU words: the end-of-tile task (ds1[0]), 0 (ds1[1]), the tile word (ds0[0x30]) */
+		code[20] = 0x07000000u | 0x18 << 18 | 2 << 11 | 3 << 9 | PDS_DOUTU;
 	}
 	if (core.pe_tile[0] | core.pe_tile[1] | core.pe_tile[2] | core.pe_tile[3] | core.pe_tile[4]) {
 		data[8] = core.pe_tile[1];
@@ -477,6 +479,13 @@ void sgxtex_xctx_pixel_event(uint32_t *p, uint32_t eot_use, uint32_t emit_use)
 	}
 	if (core.pe_ptoff_mask)
 		data[6] = core.pe_ptoff_mask;
+	if (core.pe_ptoff_eot)
+		data[0] = eot;
+	if (core.pe_dma[0]) {	/* ds0[6..7]: the SGX535's DOUTD of the PBE words (L) */
+		data[12] = core.pe_dma[0];
+		data[13] = core.pe_dma[1];
+		code[13] = PDS_MOVS(3, 0, 0, 1, 3);
+	}
 	memcpy(p, data, sizeof data);
 	memcpy(p + 4 * SGXTEX_EVENT_ROWS, code, sizeof code);
 }
