@@ -249,6 +249,7 @@ struct sgxtex_core {
 	uint32_t tile_w_log2;		/* tile width: 32 on the SGX545, 16 on the SGX530 */
 	int pe_tile535;			/* bring-up: the end-of-tile task's tile word in the SGX535's form */
 	uint32_t pe_tile[5];		/* bring-up: in0 shift, mask, in1 shift, mask, constant (all 0: off) */
+	uint32_t pe_ptoff_mask;		/* bring-up: in1 bits that run the ptoff task (0: the default, b3) */
 };
 void sgxtex_set_core(const struct sgxtex_core *c);
 
