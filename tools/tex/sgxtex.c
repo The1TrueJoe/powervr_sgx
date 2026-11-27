@@ -479,6 +479,7 @@ void sgxtex_xctx_pixel_event(uint32_t *p, uint32_t eot_use, uint32_t emit_use)
 	}
 	if (core.pe_ptoff_mask)
 		data[6] = core.pe_ptoff_mask;
+	data[2] |= core.pe_eot_w0_or;
 	if (core.pe_ptoff_eot)
 		data[0] = eot;
 	if (core.pe_dma[0]) {	/* ds0[6..7]: the SGX535's DOUTD of the PBE words (L) */
