@@ -337,7 +337,7 @@ struct pvrsgx_fw_render_details {
 	u32 pixel_event_pds;
 	/** @pixel_event_rows: Its data rows. */
 	u32 pixel_event_rows;
-	/** @unk_64: 1. */
+	/** @unk_64: The core's pixel_event_cfg (1 on the SGX545). */
 	u32 unk_64;
 	/** @unk_68: 1. */
 	u32 unk_68;
@@ -476,7 +476,7 @@ struct pvrsgx_fw_transfer_cmd {
 	u32 pixel_event_pds;
 	/** @pixel_event_rows: Its data rows. */
 	u32 pixel_event_rows;
-	/** @unk_2c: 1. */
+	/** @unk_2c: The core's pixel_event_cfg (1 on the SGX545). */
 	u32 unk_2c;
 	/** @first_tile: First tile, x << 16 | y. */
 	u32 first_tile;
