@@ -16,6 +16,19 @@
  * -c runs only the clear. -p puts that many bytes of general heap before the
  * clear and copy destination, to see where a misplaced write moves.
  *
+ * Bring-up flags for a new core (docs/porting/first-output.md), each off by default:
+ *   -B bytes   general heap before the background block (moves 3D_REQ_BASE)
+ *   -w n       the clear's destination is n x n
+ *   -E, -E -E  the end-of-tile program, then the emit task too, is `nop [end]`
+ *   -Z         the pixel-event program at the start of the PDS pixel heap
+ *   -K         the clear writes 0x12345678
+ *   -S words|@file   the clear shader (hex words, low word first)
+ *   -X words   the end-of-tile program
+ *   -P i=v     PBE word i (4: the sideband)
+ *   -Q         o0 of the end-of-tile task points at the PBE words
+ *   -t n       DOUTU word 0 b24-31 of the end-of-tile task and the clear
+ *   -V w1      a one-DOUTU pixel-event program with this word 1
+ *
  * Cases, 64x64 BGRA8888:
  *   clear    nothing  -> strided            every pixel the clear shader's colour
  * and from a CPU-written pattern:
@@ -164,8 +177,34 @@ static int event_at_0;
 static struct buf evb;
 
 /* phas.i #0, #0 [wait=7]; limm o0, #CLEAR_COLOUR [end] */
-#define CLEAR_COLOUR 0xff00ff00u
-static const uint32_t clear_shader[4] = { 0x00000000, 0xfa440700, 0x0000ff00, 0xfc27f181 };
+static uint32_t CLEAR_COLOUR = 0xff00ff00u;
+static uint32_t clear_shader[4096] = { 0x00000000, 0xfa440700, 0x0000ff00, 0xfc27f181 };
+static uint32_t clear_words = 4;
+/* a clear shader past its 0xc0-byte slot gets a code object of its own */
+static struct buf clear_bo;
+/* -P i=v (bring-up): PBE word i (0-3, 4 the sideband) is v in the end-of-tile program */
+/* -X (bring-up): the end-of-tile program as up to 32 hex words, low word first */
+static uint32_t eot_words[32], eot_n;
+/* -t (bring-up): DOUTU word 0 b24-31 of the end-of-tile task (and the clear's), raw */
+/*
+ * -Q (bring-up): the end-of-tile program also puts the address of a block
+ * holding the PBE words and the sideband in o0 (an SGX530 task hands some
+ * units a pointer in o0: docs/porting/cores/sgx530.md).
+ */
+static int pbe_ptr;
+/*
+ * -V w1 (bring-up): the pixel-event program is one DOUTU of the end-of-tile
+ * task with this word 1, then HALT, instead of tools/gen's tile-field program.
+ */
+static int event_simple;
+static uint32_t event_w1;
+static struct buf pbeblk;
+static int temps_set;
+static uint32_t temps_field;
+static int pbe_set[5];
+static uint32_t pbe_val[5];
+/* -K (bring-up): the clear writes 0x12345678 instead, to tell its pixels from other writes */
+static const uint32_t clear_shader_k[4] = { 0x00000000, 0xfa440700, 0x00145678, 0xfc244111 };
 
 /* A PDS program built in 2-dword rows, into client memory in the core's layout. */
 static uint32_t put_pds(struct buf *b, uint32_t va, const uint32_t *w, uint32_t rows, uint32_t code)
@@ -190,6 +229,21 @@ static void eot_place(void)
 	X.eot_use = usse.va + eot_next;
 	eot_next += 0x80;
 	sgxtex_xctx_pixel_event(ev, X.eot_use, emit);
+	if (event_simple) {
+		/* DOUTU ds0[0..1] (ds1[0] word 2), HALT, after the 4 data rows the command names */
+		memset(ev, 0, sizeof(ev));
+		ev[0] = sgxtex_doutu(X.eot_use, 4);
+		ev[1] = event_w1;
+		ev[4 * SGXTEX_EVENT_ROWS] = 0x07000305;
+		ev[4 * SGXTEX_EVENT_ROWS + 1] = 0xaf000000;
+		put_pds(event_at_0 ? &evb : &pdsc, X.pds_event, ev, SGXTEX_EVENT_ROWS, 2);
+		return;
+	}
+	if (temps_set) {
+		/* ds0[0] and ds1[0]: the end-of-tile task's word 0 (sgxtex_xctx_pixel_event) */
+		ev[0] = (ev[0] & 0x00ffffff) | temps_field << 24;
+		ev[2] = (ev[2] & 0x00ffffff) | temps_field << 24;
+	}
 	put_pds(event_at_0 ? &evb : &pdsc, X.pds_event, ev, SGXTEX_EVENT_ROWS,
 		SGXTEX_EVENT_WORDS - 4 * SGXTEX_EVENT_ROWS);
 }
@@ -225,7 +279,14 @@ static void programs(void)
 		put(&usse, emit, (const uint32_t[6]){ 0, 0xfa440700, 0, 0xf8040140 }, 6);
 	put(&usse, nop, sgxtex_nop_shader, 4);
 	put(&usse, X.copy_use, sgxtex_copy_shader, 4);
-	put(&usse, clear_use, clear_shader, 4);
+	if (clear_words * 4 > 0xc0) {
+		clear_bo = bo(DRM_POWERVR_SGX_HEAP_USSE_PIXEL, clear_words * 4);
+		clear_use = clear_bo.va;
+		put(&clear_bo, clear_use, clear_shader, clear_words);
+		upload(&clear_bo, clear_use, clear_words * 4);
+	} else {
+		put(&usse, clear_use, clear_shader, clear_words);
+	}
 	upload(&usse, usse.va, 0x200);
 	eot_next = 0x200;
 	sgxtex_xctx_secondary(sec, nop);
@@ -261,18 +322,56 @@ static int submit(const struct sgxtex_surface *src, const struct sgxtex_surface 
 
 	eot_place();
 	sgxtex_blit_build(&b, &X, src, dst, filter);
-	if (clr)
+	if (clr) {
 		sgxtex_clear_pixel_program(b.pds, clear_use);
+		if (temps_set)
+			b.pds[0] = (b.pds[0] & 0x00ffffff) | temps_field << 24;
+	}
 	put_pds(&pdsp, X.pds_primary, b.pds, 3, 4);
 	put(&bgb, X.bg, b.bg, SGXTEX_BLIT_BG_WORDS);
 	if (verbose)
 		printf("background block at 0x%08x\n", X.bg);
+	if (pbe_set[0] | pbe_set[1] | pbe_set[2] | pbe_set[3] | pbe_set[4]) {
+		struct sgxpbe p;
+		int tw = dst->layout == SGXTEX_LAYOUT_TWIDDLED;
+
+		sgxpbe_words(&p, dst->w, dst->h, tw ? dst->w : dst->pitch, dst->addr, dst->pbefmt, tw, 0);
+		for (int i = 0; i < 4; i++)
+			if (pbe_set[i])
+				p.w[i] = pbe_val[i];
+		if (pbe_set[4])
+			p.side = pbe_val[4];
+		if (verbose)
+			printf("PBE %08x %08x %08x %08x side %08x\n", p.w[0], p.w[1], p.w[2], p.w[3], p.side);
+		sgxpbe_eot_program(b.eot, &p);
+	}
+	if (pbe_ptr) {
+		struct sgxpbe p;
+		int tw = dst->layout == SGXTEX_LAYOUT_TWIDDLED;
+		uint32_t blk[8] = {}, v = pbeblk.va;
+
+		sgxpbe_words(&p, dst->w, dst->h, tw ? dst->w : dst->pitch, dst->addr, dst->pbefmt, tw, 0);
+		memcpy(blk, p.w, sizeof(p.w));
+		blk[4] = p.side;
+		put(&pbeblk, pbeblk.va, blk, 8);
+		/* phas, limm o0, #block (bank 1 in word 1 b0-1), then the rest of the program */
+		eot_n = SGXPBE_EOT_WORDS + 2;
+		memcpy(eot_words, b.eot, 2 * 4);
+		eot_words[2] = v & 0x1fffff;
+		eot_words[3] = 0xfca00000 | (v >> 21 & 0x1f) << 4 | (v >> 26) << 12 | 1;
+		memcpy(eot_words + 4, b.eot + 2, (SGXPBE_EOT_WORDS - 2) * 4);
+	}
 	if (eot_nop) {
 		memset(b.eot, 0, sizeof(b.eot));
 		memcpy(b.eot, sgxtex_nop_shader, sizeof(sgxtex_nop_shader));
 	}
-	put(&usse, X.eot_use, b.eot, SGXPBE_EOT_WORDS);
-	upload(&usse, X.eot_use, SGXPBE_EOT_WORDS * 4);
+	if (eot_n) {
+		put(&usse, X.eot_use, eot_words, eot_n);
+		upload(&usse, X.eot_use, eot_n * 4);
+	} else {
+		put(&usse, X.eot_use, b.eot, SGXPBE_EOT_WORDS);
+		upload(&usse, X.eot_use, SGXPBE_EOT_WORDS * 4);
+	}
 	__sync_synchronize();
 
 	/* The transfer command (uAPI revision 3): what the kernel turns into the firmware's */
@@ -433,7 +532,7 @@ int main(int argc, char **argv)
 	int opt, e, bad = 0, two = 0, clear_only = 0;
 	uint32_t pad = 0;
 
-	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:Z")) != -1) {
+	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:")) != -1) {
 		switch (opt) {
 		case 'v': verbose = 1; break;
 		case 'T': src_heap = DRM_POWERVR_SGX_HEAP_TEXTURE; break;
@@ -442,6 +541,49 @@ int main(int argc, char **argv)
 		case 'c': clear_only = 1; break;
 		case 'E': eot_nop++; break;
 		case 'Z': event_at_0 = 1; break;
+		case 'S': /* (bring-up) the clear shader as hex words, low word first, or @file of them (whitespace-separated) */
+			clear_words = 0;
+			if (*optarg == '@') {
+				FILE *f = fopen(optarg + 1, "r");
+				unsigned int v;
+
+				if (!f)
+					die("clear shader file", -errno);
+				while (clear_words < 4096 && fscanf(f, " %x", &v) == 1)
+					clear_shader[clear_words++] = v;
+				fclose(f);
+				break;
+			}
+			for (char *t = strtok(optarg, ","); t && clear_words < 16; t = strtok(NULL, ","))
+				clear_shader[clear_words++] = (uint32_t)strtoul(t, NULL, 16);
+			break;
+		case 'V':
+			event_simple = 1;
+			event_w1 = (uint32_t)strtoul(optarg, NULL, 0);
+			break;
+		case 'Q': pbe_ptr = 1; break;
+		case 't':
+			temps_set = 1;
+			temps_field = (uint32_t)strtoul(optarg, NULL, 0) & 0xff;
+			break;
+		case 'X': /* -T is taken by the texture heap */
+			eot_n = 0;
+			for (char *t = strtok(optarg, ","); t && eot_n < 32; t = strtok(NULL, ","))
+				eot_words[eot_n++] = (uint32_t)strtoul(t, NULL, 16);
+			break;
+		case 'P': {
+			unsigned int i = (unsigned int)strtoul(optarg, &optarg, 0);
+
+			if (i < 5 && *optarg == '=') {
+				pbe_set[i] = 1;
+				pbe_val[i] = (uint32_t)strtoul(optarg + 1, NULL, 0);
+			}
+			break;
+		}
+		case 'K':
+			CLEAR_COLOUR = 0x12345678;
+			memcpy(clear_shader, clear_shader_k, sizeof(clear_shader_k));
+			break;
 		case 'w': clear_w = (uint32_t)strtoul(optarg, NULL, 0); break;
 		case 'B': bg_pad = (uint32_t)strtoul(optarg, NULL, 0); break;
 		case 'p': pad = (uint32_t)strtoul(optarg, NULL, 0); break;
@@ -484,6 +626,8 @@ int main(int argc, char **argv)
 	ctx = cc.handle;
 	syncobj = sc.handle;
 	programs();
+	if (pbe_ptr)
+		pbeblk = bo(DRM_POWERVR_SGX_HEAP_GENERAL, 0x1000);
 
 	src = bo(src_heap, 64 * 64 * 4);
 	if (pad)
