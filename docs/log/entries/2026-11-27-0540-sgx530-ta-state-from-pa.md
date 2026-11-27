@@ -42,3 +42,30 @@ diff stays with the captures, outside the repo. 424 pages, 4390 changed words:
 Nothing the TA hardware writes turned up outside the parameter buffer. The parameter buffer
 itself isn't in the snapshot. So the stock frame's memory shows no TA-side structure that ours
 lacks, in the ranges this method covers.
+
+## 04:00-04:30 UTC: every readable register the stock TA kick leaves, on ours (C)
+
+A whole-window diff was taken:
+- **The stock TA:** the 11-20 samples (idle values, then each change) replayed to the second TA
+  kick.
+- **Ours:** the 11-20 hang sweep (958 offsets).
+
+41 offsets differ. Most are layout addresses (code bases, PDS and event bases, the TE and VDM
+bases). The rest, on the fault-free pointer-mode recipe:
+
+| run | result |
+|---|---|
+| the stock's PB size (`SGXGEN_PB_PAGES=0x3bb`, 0x3dd pages: every page number fits 12 bits; head 0x03dc0000) | hang, the DPM hands out no page |
+| ZLS threshold 0x624 = 0x200 just before `TA_KICK` (scratch microkernel switch `UK530_POKE2`) | hang |
+| all three thresholds at the stock's, 0x3ed / 0x200 / 0x103ed, with the stock's PB size | hang (they hold) |
+| 0xa64 = 0x4ffe (it holds through the TA) | hang |
+
+0x26c (written by the hardware during a stock TA, 0x44a) stays 0 on ours. 0xa6c (our event PDS
+program's data size) is ours to choose and wasn't changed.
+
+**So no register a host can read separates the stock TA from ours**, between 11-20 and today.
+The stock frame's memory shows no TA-side structure ours lacks either. Rebuilding our state
+block in the stock's layout was considered and not done. The hang doesn't depend on the
+record's contents (11-19), and a stream of only the end word hangs the same way, so the state
+block can't be what ends the pass. What's left can't be seen by observation alone:
+write-only registers, and the order and timing of the stock microkernel's TA start.
