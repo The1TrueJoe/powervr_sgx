@@ -456,10 +456,14 @@ void sgxtex_xctx_pixel_event(uint32_t *p, uint32_t eot_use, uint32_t emit_use)
 		/* 27 */ PDS_HALT,
 	};
 
-	/* The SGX535's end-of-tile word (img-sgx, L): b28, the tile from in0 << 11, in1 b2 at b27 */
+	/* The SGX535's end-of-tile word (img-sgx, L): b28, the tile from in0 << 11, in1 b2 at b27;
+	 * no emit task (ds1[4], ds1[5] = 0: in1 b2/b8 launch nothing); ptoff runs emit_use */
 	if (core.pe_tile535) {
+		data[0] = emit;
 		data[8] = 0x07f7f800;
 		data[9] = 0x08000000;
+		data[10] = 0;
+		data[11] = 0;
 		data[14] = 0x10000000;
 		code[14] = PDS_SHL(U_IN(0), 11, U_DS1(0x30));
 		code[17] = PDS_SHL(U_IN(1), 25, U_DS1(0x30));

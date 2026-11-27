@@ -32,9 +32,10 @@
  *   -1 w1      the clear's DOUTU word 1 (default 4)
  *   -A off     an inline clear shader at this offset of the code object (0x140)
  *   -a off     a clear shader with a code object of its own starts this far into it
- *   -G         the end-of-tile task's tile word in the SGX535's form
+ *   -G         the pixel-event program in the SGX535's form: its tile word, no emit task
  *   -D         list the destination's nonzero words
  *   -g s0,m0,s1,m1,c   the end-of-tile tile word: in0 << s0 & m0 | in1 << s1 & m1 | c
+ *   -R x0,y0,x1,y1   render only these tiles
  *
  * Cases, 64x64 BGRA8888:
  *   clear    nothing  -> strided            every pixel the clear shader's colour
@@ -179,6 +180,8 @@ static int eot_nop;
 static int pe_tile535;
 /* -g s0,m0,s1,m1,c (bring-up): the end-of-tile tile word's in0/in1 shifts and masks, and its constant */
 static uint32_t pe_tile[5];
+/* -R x0,y0,x1,y1 (bring-up): render only these tiles (first and last, inclusive) */
+static int tile_range[4] = { -1 };
 /* -D (bring-up): list the destination's nonzero words after the check */
 static int dump_nonzero;
 /* -B (bring-up): bytes of general heap before the background block, which moves 3D_REQ_BASE */
@@ -296,6 +299,8 @@ static void programs(void)
 	put(&usse, emit, sgxtex_emit_shader, 6);
 	if (eot_nop > 1)
 		put(&usse, emit, (const uint32_t[6]){ 0, 0xfa440700, 0, 0xf8040140 }, 6);
+	if (pe_tile535)		/* the SGX535's ptoff task, `ptoff [end]`, in the unused emit slot */
+		put(&usse, emit, (const uint32_t[2]){ 0, 0xf8348000 }, 2);
 	put(&usse, nop, sgxtex_nop_shader, 4);
 	put(&usse, X.copy_use, sgxtex_copy_shader, 4);
 	if (clear_words * 4 > 0x200 - clear_off) {
@@ -404,6 +409,12 @@ static int submit(const struct sgxtex_surface *src, const struct sgxtex_surface 
 	t.first_tile_y = b.cmd[12] & 0xffff;
 	t.last_tile_x = b.cmd[13] >> 16;
 	t.last_tile_y = b.cmd[13] & 0xffff;
+	if (tile_range[0] >= 0) {
+		t.first_tile_x = tile_range[0];
+		t.first_tile_y = tile_range[1];
+		t.last_tile_x = tile_range[2];
+		t.last_tile_y = tile_range[3];
+	}
 	t.bg_depth_f32 = b.cmd[2];
 
 	xioctl(DRM_IOCTL_SYNCOBJ_RESET, &r);
@@ -446,12 +457,19 @@ static int check(const char *name, int e, const struct buf *b, uint32_t w, uint3
 			}
 	printf("%-5s %s, %u/%u pixels right\n", name, e ? "TIMED OUT" : "done", w * h - bad, w * h);
 	if (dump_nonzero) {
-		uint32_t n = 0;
+		uint32_t n = 0, x0 = ~0u, y0 = ~0u, x1 = 0, y1 = 0;
 
-		for (uint32_t i = 0; i < h * pitch; i++)
-			if (p[i] && n++ < 64)
+		for (uint32_t i = 0; i < h * pitch; i++) {
+			if (!p[i])
+				continue;
+			if (n++ < 64)
 				printf("  nz %5u (%u,%u) %08x\n", i, i % pitch, i / pitch, p[i]);
-		printf("  %u nonzero words\n", n);
+			x0 = i % pitch < x0 ? i % pitch : x0;
+			x1 = i % pitch > x1 ? i % pitch : x1;
+			y0 = i / pitch < y0 ? i / pitch : y0;
+			y1 = i / pitch > y1 ? i / pitch : y1;
+		}
+		printf("  %u nonzero words, box (%u,%u)-(%u,%u)\n", n, x0, y0, x1, y1);
 	}
 	return e || bad;
 }
@@ -564,7 +582,7 @@ int main(int argc, char **argv)
 	int opt, e, bad = 0, two = 0, clear_only = 0;
 	uint32_t pad = 0;
 
-	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:")) != -1) {
+	while ((opt = getopt(argc, argv, "vn:T2cp:EB:w:ZKS:P:X:t:QV:W:O:A:a:1:GDg:R:")) != -1) {
 		switch (opt) {
 		case 'v': verbose = 1; break;
 		case 'T': src_heap = DRM_POWERVR_SGX_HEAP_TEXTURE; break;
@@ -601,6 +619,9 @@ int main(int argc, char **argv)
 		case 'Q': pbe_ptr = 1; break;
 		case 'G': pe_tile535 = 1; break;
 		case 'D': dump_nonzero = 1; break;
+		case 'R':
+			sscanf(optarg, "%d,%d,%d,%d", &tile_range[0], &tile_range[1], &tile_range[2], &tile_range[3]);
+			break;
 		case 'g':
 			sscanf(optarg, "%i,%i,%i,%i,%i", (int *)&pe_tile[0], (int *)&pe_tile[1], (int *)&pe_tile[2],
 			       (int *)&pe_tile[3], (int *)&pe_tile[4]);
