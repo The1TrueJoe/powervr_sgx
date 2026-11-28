@@ -2506,12 +2506,13 @@ backed above; this section only collects it.
     distances in the vertex shader (`nir_lower_clip_vs`, driver
     `clip_planes` 0: planes 0..n-1, a disabled one below the last 0.0), and
     each distance becomes `fdpc o<clip_o + p - 1>, cp<p>, (d, 0), c52
-    [rpt=2]` after every other output (`sgx_shader.n_clip`, `clip_o`). The
-    driver sets output select b0-5 to planes 0..n_clip-1 and counts n_clip
-    more dwords. Lines clip too: no discard.
-  - **Guesses** until a hardware draw: that a plane enabled with a 0.0
-    distance keeps everything (a point on the plane is inside); that the
-    result registers follow the enabled bits in order.
+    [rpt=2]` after the sets and before the point size, which the TA takes
+    from the last output (`sgx_shader.n_clip`, `clip_o`). The driver sets
+    output select b0-7 to planes 0..n_clip-1 and counts n_clip more dwords.
+    Lines clip too: no discard.
+  - Hardware (`mesa/tests/sgx_ucp.c`, a CE5300 board, rev 1014): a plane
+    enabled with a 0.0 distance keeps everything; the result registers
+    follow the enabled bits in order; b6-7 are planes 6 and 7.
   - `sgx_lower_clip_fs` (the per-pixel fallback) stays for a core without
     the TA path.
 - **Polygon stipple**: `nir_lower_pstipple_fs` (a 32x32 texture read at
