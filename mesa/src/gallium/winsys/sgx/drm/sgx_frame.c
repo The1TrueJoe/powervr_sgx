@@ -2886,6 +2886,8 @@ upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
           unsigned temps)
 {
    int discard_pa = fb ? fb->discard_pa : -1, depth_pa = fb ? fb->depth_pa : -1;
+   /* the plane pcoeff reads: on a 4x target after the sample positions */
+   int plane_pa = discard_pa + (fb && fb->ms4 ? 1 : 0);
    uint32_t *w = malloc((count + count1 + 13) * 8), va, b[2];
    bool masked = blend && blend->wmask != 0xf;
    bool visible = blend && blend->visible;
@@ -2915,8 +2917,8 @@ upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned count,
           0xfa440100u | ((temps + 3) / 4)); /* phas.i #phase1, #t [wait=1] */
       if (discard_pa >= 0)
          put(w, &n,
-             0xb0000004u | (uint32_t)discard_pa << 14 |
-                (uint32_t)(discard_pa + 1) << 7,
+             0xb0000004u | (uint32_t)plane_pa << 14 |
+                (uint32_t)(plane_pa + 1) << 7,
              0xf8300004u); /* pcoeff pa<n>, pa<n+1>, sa4 */
       else
          put(w, &n, 0xa0000000u, 0x28a10002u); /* mov pa0, pa0 [skipinv rcnt] */

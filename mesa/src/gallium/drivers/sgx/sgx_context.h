@@ -134,8 +134,11 @@ struct sgx_pipe_shader {
    uint8_t dep_plane[SGX_MAX_DEP_STATES];
    /* a texelFetch (sgx_sample_info.fetch): sampled NEAREST, clamped */
    bool dep_fetch[SGX_MAX_DEP_STATES];
+   /* blended (key), or not, and for a 4x target (ms4: a discard's plane
+    * after the sample positions, sgxws_fs_feedback) */
    struct {
       struct sgxws_blend key;
+      bool blended, ms4;
       uint32_t code;
    } variants[32];
    unsigned n_variants, next_variant;

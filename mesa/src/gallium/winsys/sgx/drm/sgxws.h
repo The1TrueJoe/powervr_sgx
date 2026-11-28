@@ -458,10 +458,13 @@ uint32_t sgxws_upload_vs(struct sgxws_ctx *c, const uint64_t *code, unsigned n,
  *  - depth_pa >= 0: it writes gl_FragDepth, in pa<depth_pa> at the nop;
  *    depthf takes the nop's place, predicated on p1 when it also discards.
  *    Without a discard, pcoeff's slot is a no-op (`mov pa0, pa0`), as in
- *    the vendor driver's points path. The draw's pass type is 5. */
+ *    the vendor driver's points path. The draw's pass type is 5.
+ *  - ms4: for a 4x target, where the PDS puts the sample positions word in
+ *    pa<discard_pa> and the plane after it: pcoeff reads pa<discard_pa + 1>. */
 struct sgxws_fs_feedback {
    int discard_pa;
    int depth_pa;
+   bool ms4;
 };
 uint32_t sgxws_upload_fs(struct sgxws_ctx *c, const uint64_t *code, unsigned n,
                          unsigned color_pa, const struct sgxws_blend *blend,

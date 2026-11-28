@@ -2395,7 +2395,9 @@ compile_shader(struct sgx_context *ctx, struct sgx_pipe_shader *so,
          /* the triangle's depth plane (source 0x22, 3 components) after the
           * inputs: pa<n> on, n = the registers the iterations above fill (an
           * F32 component 1, an F16 pair 1, a sampled texel or the vertex
-          * colour 1) */
+          * colour 1). On a 4x target the PDS puts the sample positions word
+          * in pa<n> and the plane after it, 4 registers (the draw's
+          * pa_dwords, sgx_fs_program) */
          unsigned pa = 0;
 
          for (unsigned i = 0; i < so->prog.n_douti; i++) {
@@ -2982,25 +2984,28 @@ sgx_fs_for(struct sgx_context *ctx, struct sgx_pipe_shader *fs, bool lines)
 }
 
 /* the compiled fragment shader's program with its colour blended (b), or
- * without (NULL); 0 when there is none */
+ * without (NULL), for a 4x target (ms4) or not; 0 when there is none */
 
 uint32_t
 sgx_fs_program(struct sgx_context *ctx, struct sgx_pipe_shader *so,
-               const struct sgxws_blend *b)
+               const struct sgxws_blend *b, bool ms4)
 {
    struct sgx_screen *screen = sgx_screen(ctx->base.screen);
    uint32_t va;
 
-   if (!b)
+   /* only a discard's program differs on a 4x target */
+   ms4 = ms4 && so->discard_pa >= 0;
+   if (!b && !ms4)
       return so->prog.code;
    for (unsigned i = 0; i < so->n_variants; i++) {
-      if (!memcmp(&so->variants[i].key, b, sizeof(*b)))
+      if (so->variants[i].blended == !!b && so->variants[i].ms4 == ms4 &&
+          (!b || !memcmp(&so->variants[i].key, b, sizeof(*b))))
          return so->variants[i].code;
    }
    if (!so->code)
       return 0;
    simple_mtx_lock(&screen->lock);
-   struct sgxws_fs_feedback fb = {so->discard_pa, so->depth_pa};
+   struct sgxws_fs_feedback fb = {so->discard_pa, so->depth_pa, ms4};
    va = so->code1 && so->discard_pa >= 0
            ? sgxws_upload_fs_split(ctx->hw, so->code, so->n_code, so->code1,
                                    so->n_code1, so->color_reg, b, &fb,
@@ -3016,7 +3021,9 @@ sgx_fs_program(struct sgx_context *ctx, struct sgx_pipe_shader *so,
                       : so->next_variant++ % ARRAY_SIZE(so->variants);
 
       sgxws_code_free(ctx->hw, so->variants[i].code); /* 0: a new slot */
-      so->variants[i].key = *b;
+      so->variants[i].key = b ? *b : (struct sgxws_blend){0};
+      so->variants[i].blended = b;
+      so->variants[i].ms4 = ms4;
       so->variants[i].code = va;
    }
    simple_mtx_unlock(&screen->lock);
